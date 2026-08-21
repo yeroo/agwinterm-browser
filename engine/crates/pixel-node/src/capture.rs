@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -10,6 +9,42 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pixel_core::surfaces::Rect;
+
+/// Reads `buf.len()` bytes from `offset` without moving a shared file cursor.
+///
+/// The segment file is read at explicit offsets from `Segment::apply`, which is why
+/// upstream reached for `std::os::unix::fs::FileExt::read_exact_at`. Windows has no
+/// such method: `std::os::windows::fs::FileExt` offers `seek_read`, which takes the
+/// offset but is a short read like `Read::read` — so the loop below is what supplies
+/// the "exact" half. It also moves the file pointer, which is harmless here because
+/// every read carries its own offset.
+#[cfg(windows)]
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ));
+            }
+            Ok(read) => {
+                buf = &mut buf[read..];
+                offset += read as u64;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
 
 
 pub struct Config {
@@ -436,7 +471,7 @@ impl Segment {
             return Ok(());
         }
         self.compressed.resize(meta.len as usize, 0);
-        self.seg.read_exact_at(&mut self.compressed, meta.offset)?;
+        read_exact_at(&self.seg, &mut self.compressed, meta.offset)?;
         self.rows.resize(expected, 0);
         let written = lz4_flex::block::decompress_into(&self.compressed, &mut self.rows)
             .map_err(io::Error::other)?;
@@ -498,6 +533,10 @@ impl Registry {
         Ok(id)
     }
 
+    /// Only the zero-copy submit paths ask this before paying for a surface lock;
+    /// Windows' `update_surface` already holds plain pixels and calls `capture`
+    /// directly, so it has no caller there.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn wants(&self, surface: u32) -> bool {
         self.active.load(Ordering::Relaxed) > 0
             && self.lock().by_surface.contains_key(&surface)

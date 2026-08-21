@@ -48,6 +48,11 @@ pub struct SurfaceMailbox {
 }
 
 impl SurfaceMailbox {
+    /// On Windows `SurfacePixels` has exactly one variant, so the `Owned` patterns
+    /// below are irrefutable and the lint fires on code that is correct on all three
+    /// platforms. Scoped to the two recycling sites rather than to the crate, so the
+    /// unix builds keep warning if a future variant makes one genuinely unreachable.
+    #[cfg_attr(windows, allow(irrefutable_let_patterns))]
     pub fn submit(&self, id: u32, pixels: SurfacePixels, damage: Option<Rect>) {
         let mut slots = self.slots.lock().unwrap_or_else(|error| error.into_inner());
         let slot = slots.entry(id).or_default();
@@ -95,6 +100,7 @@ impl SurfaceMailbox {
             .collect()
     }
 
+    #[cfg_attr(windows, allow(irrefutable_let_patterns))]
     pub fn recycle(&self, frame: SurfaceFrame, rows: u32) {
         self.presented.fetch_add(1, Ordering::Relaxed);
         self.rows.fetch_add(u64::from(rows), Ordering::Relaxed);
@@ -118,6 +124,7 @@ impl SurfaceMailbox {
 }
 
 #[cfg(test)]
+#[cfg_attr(windows, allow(irrefutable_let_patterns))]
 mod tests {
     use super::*;
 

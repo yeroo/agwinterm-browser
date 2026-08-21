@@ -707,21 +707,87 @@ keep-unchanged modules. [triage: major]
 
 ### Task 8: `pixel-node` on Windows
 
-- [ ] **build the native dependencies under MSVC first**: `openh264` with the `source` feature
+- [x] **build the native dependencies under MSVC first**: `openh264` with the `source` feature
       compiles C++ via a build script, and seven tree-sitter grammars build C. Whether they compile
       under MSVC is unchecked, and a toolchain failure here should surface as its own finding rather
       than as a confusing napi error. [triage: immaterial-but-actionable]
-- [ ] make `pixel-node` build: `SurfacePixels::Owned { bgra, width, height }` is ungated and is the
+      — **the risk is closed, and it was never a toolchain problem.** Building the C/C++ half on its
+      own (`cargo build -p openh264-sys2 -p openh264 -p tree-sitter` plus the seven grammars)
+      succeeds: openh264 produces **86 objects into 4 static libs**
+      (`openh264_{common,decoder,encoder,processing}.lib`) and each grammar produces its own `.lib`.
+      Stronger than "it links": `record.rs`'s tests actually **encode H.264** on Windows — the
+      `[OpenH264] … ParamValidation()` lines in the test output are the real encoder running.
+- [x] make `pixel-node` build: `SurfacePixels::Owned { bgra, width, height }` is ungated and is the
       Windows path — on Windows the enum has exactly one variant. Note the `Owned` path is *tuned*,
       not vestigial: `SurfaceMailbox::submit` (`surface.rs:53-58`) recycles the dropped frame's
       `Vec<u8>`, and `BitmapPresenter` unions damage across coalesced frames
-- [ ] give `draw_frame`'s match a Windows-valid arm set
-- [ ] **fix the napi build script's hardcoded `.dylib`/`.so`** so it finds the Windows `.dll`
+      — **the two errors Task 4 handed over were both in `capture.rs`, and neither was about
+      surfaces.** `capture.rs:4` imported `std::os::unix::fs::FileExt` for a single call,
+      `capture.rs:439`'s `read_exact_at`. Windows has no such method: `std::os::windows::fs::FileExt`
+      offers `seek_read`, which takes the offset but is a *short* read. So `capture.rs` now carries a
+      two-arm `read_exact_at` helper — the unix arm delegates, the Windows arm loops `seek_read` and
+      supplies the "exact" half itself. Nothing in `surface.rs` had to change to compile.
+      ➕ Three warnings did, though, and under `-D warnings` a warning is a build failure: with one
+      variant the `Owned` patterns at `surface.rs:57`, `:101` and in its tests are **irrefutable**,
+      and `Captures::wants` loses its only callers (they are in the macOS and Linux `impl` blocks —
+      Windows' `update_surface` already holds plain pixels and calls `capture` directly). Both are
+      scoped `#[cfg_attr(windows, …)]` at the four sites, following Task 4's precedent, so the unix
+      builds keep warning normally.
+      ⚠️ The unix arm of `read_exact_at` **cannot be compiled on this machine as part of
+      `pixel-node`** — `cargo check -p pixel-node --target x86_64-unknown-linux-gnu` dies in `cc-rs`
+      (`failed to find tool "x86_64-linux-gnu-gcc"`) before it reaches any Rust, because openh264 and
+      the grammars need a linux C compiler. It was checked instead by lifting the helper verbatim
+      into a scratch crate with no C dependencies, where `cargo +1.93.1 check --target
+      x86_64-unknown-linux-gnu` is clean.
+- [x] give `draw_frame`'s match a Windows-valid arm set
+      — **it already had one, and adding an arm would have been dead code.** `SurfacePixels::Owned`
+      is the unconditional last arm, so on Windows the match is exhaustive with exactly one arm and
+      rustc reports nothing. What the arm set actually needed was to be *reachable from a test*:
+      `draw_frame` took `&mut Engine`, and `Engine::new` opens a real console, so the only arm that
+      compiles here was also the only one that could not be exercised. `draw_frame` and `draw_pixels`
+      are now generic over a one-method `SurfaceSink` trait, which `Engine` implements by delegating
+      to its inherent `draw_surface`. The production call site at `lib.rs:548` is unchanged and the
+      runtime path is identical.
+- [x] **fix the napi build script's hardcoded `.dylib`/`.so`** so it finds the Windows `.dll`
       artifact [triage: minor]
-- [ ] confirm the napi module loads under Node v22 on Windows
-- [ ] write tests for `draw_frame` over `Owned`, including a stride wider than the width and a
+      — `engine/packages/pixel-react/scripts/build-native.mjs` now resolves the name through
+      `libraryName(platform)`: `pixel_node.dll` on win32 — no `lib` prefix *and* a different
+      extension, which is why the one-line darwin ternary got it doubly wrong. Two things beyond the
+      rename: the copy is guarded by `existsSync`, so a future naming mistake says *which file it
+      wanted* instead of raising a bare ENOENT that reads as "the engine was never built"; and the
+      cargo invocation sits behind an `import.meta.filename === process.argv[1]` entry guard, so the
+      tests can import `libraryName` without spawning a build. `execFileSync("cargo", …)` needed no
+      change — `CreateProcess` appends `.exe` itself.
+- [x] confirm the napi module loads under Node v22 on Windows
+      — **Node v22.19.0**, `require("native/pixel.node")` on the 17.6 MB copied DLL. All **7** exports
+      are present, and four of them were *run* rather than just typed: `highlight("fn main() {}",
+      "rust")` returns 6 spans and `highlightCaptures()` returns 16 — that is tree-sitter's
+      MSVC-built C executing — plus `parseMarkdown` and `diff`. `PixelEngine` is present as a
+      constructor but not instantiated, since it opens a console.
+- [x] write tests for `draw_frame` over `Owned`, including a stride wider than the width and a
       zero-area damage rect
-- [ ] run tests — must pass before Task 9
+      — **5 Rust tests** in `pixel-node/src/lib.rs`, against a recording `SurfaceSink`: the tight
+      `Owned` frame (dimensions, stride, damage and the returned row count), the wide stride, the
+      zero-area damage rect, absent-vs-empty damage, and an engine refusal arriving as a message the
+      draw loop can report. The stride test pins a real asymmetry rather than a formality: the seam
+      carries `stride > width * 4` — that is how the macOS and Linux zero-copy variants arrive, and
+      how Task 12's shared-memory frames will — but `Owned` has **no stride field**, so it can only
+      ever declare `width * 4`. A padded buffer has to be repacked at submit time, not described on
+      the way out. Plus **9 node tests** (`tools/vendor-check/native-build.test.mjs`) covering the
+      artifact name per platform, the entry guard, the guarded copy, the shell-free cargo call, and —
+      when the artifact exists — its `MZ` header and a live load.
+- [x] run tests — must pass before Task 9 — **379 Rust tests pass on Windows** (0 failed; `pixel-core`
+      323, unchanged from Task 7, and `pixel-node` 51 → **56**) and **62 node tests** (53 before, +9).
+      This is the first task at which **`cargo check --workspace` is clean**: the 2 errors Task 4
+      handed over are gone and no new ones took their place. `cargo clippy --workspace --all-targets`
+      reports **12** warnings — `pixel-core`'s recorded 5, plus **`pixel-node`'s Windows baseline of
+      7, established here for the first time**, since it could not be measured while the crate did
+      not compile. All 7 are on vendored lines this task did not touch: `capture.rs:436,693,735,751`,
+      `lib.rs:304`, `record.rs:405,992`.
+      ➕ `cargo fmt --all --check`'s residual is **172 hunks, one fewer than HEAD's 173** — every new
+      line is fmt-clean, and the missing hunk is `pixel-node/src/lib.rs`'s **stray blank line at
+      EOF**, which stopped being at EOF when the test module was appended after it. Recorded rather
+      than reverted: putting it back would mean a blank line in the middle of the file.
 
 ### Task 9: Electron capture and the launcher
 

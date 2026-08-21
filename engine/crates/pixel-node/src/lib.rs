@@ -156,8 +156,41 @@ impl Autoprofile {
     }
 }
 
-fn draw_frame(
-    engine: &mut Engine,
+/// The single thing `draw_frame` asks of the engine.
+///
+/// `draw_frame` is where a submitted frame stops being platform-shaped: on macOS it
+/// arrives as an IOSurface, on Linux as a shared-memory region, and on Windows only
+/// ever as an owned buffer. Naming that one dependency lets the Windows arm — the only
+/// arm that compiles here — be exercised without an `Engine`, which cannot be built in
+/// a test because `Engine::new` opens a real console.
+trait SurfaceSink {
+    fn draw_surface(
+        &mut self,
+        surface: u32,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+        stride: usize,
+        damage: Option<pixel_core::surfaces::Rect>,
+    ) -> std::io::Result<usize>;
+}
+
+impl SurfaceSink for Engine {
+    fn draw_surface(
+        &mut self,
+        surface: u32,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+        stride: usize,
+        damage: Option<pixel_core::surfaces::Rect>,
+    ) -> std::io::Result<usize> {
+        Engine::draw_surface(self, surface, width, height, bgra, stride, damage)
+    }
+}
+
+fn draw_frame<S: SurfaceSink>(
+    engine: &mut S,
     frame: &surface::SurfaceFrame,
 ) -> std::result::Result<u32, String> {
     match &frame.pixels {
@@ -194,8 +227,8 @@ fn draw_frame(
     }
 }
 
-fn draw_pixels(
-    engine: &mut Engine,
+fn draw_pixels<S: SurfaceSink>(
+    engine: &mut S,
     frame: &surface::SurfaceFrame,
     width: u32,
     height: u32,
@@ -668,3 +701,153 @@ impl PixelEngine {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use pixel_core::surfaces::Rect;
+
+    use super::{SurfaceSink, draw_frame, draw_pixels};
+    use crate::surface::{SurfaceFrame, SurfacePixels};
+
+    /// What the engine would have been asked to draw.
+    #[derive(Default)]
+    struct Recording {
+        calls: Vec<Call>,
+        fail: bool,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct Call {
+        surface: u32,
+        width: u32,
+        height: u32,
+        bgra: Vec<u8>,
+        stride: usize,
+        damage: Option<Rect>,
+    }
+
+    impl SurfaceSink for Recording {
+        fn draw_surface(
+            &mut self,
+            surface: u32,
+            width: u32,
+            height: u32,
+            bgra: &[u8],
+            stride: usize,
+            damage: Option<Rect>,
+        ) -> std::io::Result<usize> {
+            if self.fail {
+                // The message `Engine::draw_surface` produces when the buffer is too
+                // small for the dimensions it was handed.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "surface dimensions do not match its pixels",
+                ));
+            }
+            self.calls.push(Call {
+                surface,
+                width,
+                height,
+                bgra: bgra.to_vec(),
+                stride,
+                damage,
+            });
+            Ok(width as usize * 4 * height as usize)
+        }
+    }
+
+    fn rect(x: u32, y: u32, w: u32, h: u32) -> Option<Rect> {
+        Some(Rect { x, y, w, h })
+    }
+
+    fn owned(id: u32, w: u32, h: u32, bgra: Vec<u8>, damage: Option<Rect>) -> SurfaceFrame {
+        SurfaceFrame {
+            id,
+            pixels: SurfacePixels::Owned {
+                bgra,
+                width: w,
+                height: h,
+            },
+            damage,
+        }
+    }
+
+    /// `Owned` is the only variant that exists on Windows, so this is the whole of
+    /// `draw_frame` there rather than one arm of three.
+    #[test]
+    fn an_owned_frame_reaches_the_engine_tightly_packed() {
+        let mut sink = Recording::default();
+        let bgra: Vec<u8> = (0..24u8).collect();
+        let damage = rect(1, 0, 2, 2);
+        let rows = draw_frame(&mut sink, &owned(7, 3, 2, bgra.clone(), damage)).expect("draws");
+
+        assert_eq!(rows, 2, "draw_frame reports the rows it handed over");
+        assert_eq!(
+            sink.calls,
+            vec![Call {
+                surface: 7,
+                width: 3,
+                height: 2,
+                bgra,
+                stride: 12,
+                damage,
+            }],
+        );
+    }
+
+    /// The seam carries a stride wider than the row — that is how the macOS and Linux
+    /// zero-copy variants arrive, and how Task 12's shared-memory frames will. `Owned`
+    /// itself has no stride field, so it can only ever declare `width * 4`: a padded
+    /// buffer has to be repacked before it is submitted, not described on the way out.
+    #[test]
+    fn a_stride_wider_than_the_width_survives_the_seam_but_owned_never_declares_one() {
+        let mut sink = Recording::default();
+        let padded = vec![9u8; 2 * (3 * 4 + 8)];
+        let frame = owned(1, 3, 2, Vec::new(), None);
+        draw_pixels(&mut sink, &frame, 3, 2, &padded, 20).expect("draws");
+        assert_eq!(sink.calls[0].stride, 20);
+
+        let mut sink = Recording::default();
+        draw_frame(&mut sink, &owned(1, 3, 2, padded, None)).expect("draws");
+        assert_eq!(
+            sink.calls[0].stride, 12,
+            "an owned buffer with padded rows would be read as 12-byte rows, so the \
+             padding has to be stripped at submit time",
+        );
+    }
+
+    /// A zero-area damage rect is a legal frame, not an error: `surfaces::write`
+    /// clamps it to nothing and returns early. `draw_frame` must forward it as it
+    /// stands rather than widening it to a full repaint.
+    #[test]
+    fn a_zero_area_damage_rect_is_forwarded_rather_than_widened() {
+        let mut sink = Recording::default();
+        let damage = rect(4, 4, 0, 0);
+        let rows = draw_frame(&mut sink, &owned(2, 2, 2, vec![0; 16], damage)).expect("draws");
+
+        assert_eq!(rows, 2);
+        assert_eq!(sink.calls[0].damage, damage);
+    }
+
+    /// Absent damage means "the whole surface", which is a different instruction from
+    /// an empty rect and must not be confused with one.
+    #[test]
+    fn an_absent_damage_rect_stays_absent() {
+        let mut sink = Recording::default();
+        draw_frame(&mut sink, &owned(2, 2, 2, vec![0; 16], None)).expect("draws");
+        assert_eq!(sink.calls[0].damage, None);
+    }
+
+    #[test]
+    fn an_engine_refusal_comes_back_as_a_message_the_loop_can_report() {
+        let mut sink = Recording {
+            fail: true,
+            ..Recording::default()
+        };
+        let error = draw_frame(&mut sink, &owned(3, 2, 2, vec![0; 4], None))
+            .expect_err("a short buffer is refused");
+        assert!(
+            error.contains("surface dimensions do not match its pixels"),
+            "got {error:?}",
+        );
+    }
+}
