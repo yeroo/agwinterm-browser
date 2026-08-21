@@ -1325,13 +1325,73 @@ agwinterm on its own pipe (`--app-id agwinterm-dev`), built for this and stopped
 
 ### Task 15: [Final] Update documentation
 
-- [ ] update `README.md` status, install and usage for Windows
-- [ ] update `docs/design/00-port-brief.md` where implementation diverged — the brief has been
+The three "record" items land together in [`docs/design/07-as-built.md`](../design/07-as-built.md):
+they are one question asked three ways — what does a person running this actually meet — and
+splitting them across three files would have put the transports table a click away from the
+ceiling that makes the frame 2.5× more expensive.
+
+- [x] update `README.md` status, install and usage for Windows
+      — rewritten, and ➕ **two of its three paragraphs were wrong rather than stale.** It described
+      the design that *lost*: "drops the `pixel-core` terminal engine entirely, and lets agwinterm
+      be the compositor" — the proposal the brief's own architecture section overturned by
+      measurement before Task 1 — and it described frames travelling "through a shared-memory ring",
+      which is the path Task 12 could not build. A reader following it would have looked for a
+      compositor that is not there and a transport that does not exist. Status now says what
+      shipped, what did not, and at what frame rate.
+      ➕ **The documented build command did not work.** The root `build` script is `pnpm -r build`,
+      and pnpm is not on `PATH` here — it runs through `corepack` — so `corepack pnpm build` spawns
+      a shell that cannot find `pnpm` and exits 1. Found by running it rather than by writing it
+      down. `corepack pnpm -r build` is what the README says, and it is what was run to verify the
+      whole install-to-usage path end to end.
+- [x] update `docs/design/00-port-brief.md` where implementation diverged — the brief has been
       corrected twice by evidence and should stay honest
-- [ ] document the two frame transports, when each is used, how to force either
-- [ ] record what was dropped (`ghostty.rs`, the Swift helper, apparmor sandboxing, `--split`) and
+      — **kept as the argument, not rewritten into the record.** Six `⚠️ As built` notes sit beside
+      the claims they correct, plus a table at the top for the four that matter: the shm transport
+      that did not ship, the process-model question that is now answered, 43 keep-unchanged files
+      that are 40 plus three written reasons, and `herdr.rs` gated off permanently rather than
+      ported. A brief edited into looking prescient is not evidence about anything, so nothing was
+      quietly deleted — including the transport diagram, which is still the design and now has a
+      measured baseline to beat.
+      ➕ One correction the plan did not anticipate: the brief's "**keyboard input is solved**"
+      bullet. agwinterm *parses* kitty keyboard escapes but does not speak the protocol, and the two
+      consequences — no key releases, no Super to bind — are what Task 11 spent its two ➕ findings on.
+- [x] document the two frame transports, when each is used, how to force either
+      — [`07-as-built.md § 1`](../design/07-as-built.md#1-the-two-frame-transports): the two verbs
+      side by side, the five stages of the path that exists, `TERMINAL_BROWSER_FRAME_TRANSPORT`'s
+      three values with their aliases, and why `shm` degrades loudly instead of failing. Includes
+      the two things that are easy to read as tidiness and are not: **a fresh path per frame**
+      (a fixed path races the host's read and collides with its `mtime ^ length ^ hash(path)`
+      signature, both silently) and **`image.clear` on the way out** (a frame is a placement the
+      host holds, which is Task 14's second defect).
+- [x] record what was dropped (`ghostty.rs`, the Swift helper, apparmor sandboxing, `--split`) and
       why, so absences read as decisions
-- [ ] record the accepted ceilings (cell-resolution pointer, cell metrics) and what would lift them
+      — [`§ 2`](../design/07-as-built.md#2-what-was-dropped-and-why), in three tables: dropped in
+      the engine, refused in the CLI, not copied at all. Wider than the four the plan named, because
+      the four were not the whole set: `herdr.rs`, the patched-Electron fast paths, `probeGraphics`,
+      `--ssh`, `upgrade`, `shutdown` and "here"-scoping each get a row, and each names what would
+      lift it — several are "nothing", which is itself the answer. `CpuThrottle` is listed although
+      this port did not drop it (it is `cfg!(target_os = "macos")` upstream), so the 26 fps in
+      Task 10's budget is not read as a throttled number.
+- [x] record the accepted ceilings (cell-resolution pointer, cell metrics) and what would lift them
+      — [`§ 3`](../design/07-as-built.md#3-the-accepted-ceilings): for each, what a user sees, where
+      the information is lost, what the port does about it, and the specific host change that lifts
+      it. Both fixes are agwinterm's (`?1016` with a DECRQM answer; the `session.metrics` verb whose
+      client is already written and tested here). Two lesser ones are named so they are not
+      surprises: no key releases, and Ctrl standing in for a Super that never arrives.
+- [x] write tests for the documentation — ➕ **not on the plan's list, and this task is the one that
+      most needed them.** `tools/docs-check/docs.test.mjs`, 7 tests: every relative link and every
+      anchor across `README.md` and both `docs/` trees resolves (verified by breaking one and
+      watching it fail); every `TERMINAL_BROWSER_*` variable the docs name is read by something;
+      the documented transport values are *exactly* what `Transport::parse` accepts, in both
+      directions, so the table cannot quietly become a subset; the refusal set in `unsupported.ts`
+      matches the one §2 tabulates; `ghostty`/`herdr` are still `#[cfg(unix)]`-gated rather than
+      deleted; and both ceilings are pinned at the line that makes them ceilings — `FALLBACK_CELL`
+      and `reports_pixel_mouse`. Prose does not fail when the code moves underneath it, which is
+      precisely why Task 14 enforced its lint scoping instead of asserting it.
+- [x] run tests — **230 node tests** (223 → 230, +7) and **406 Rust** via `cargo nextest`
+      (1 skipped benchmark), 349 + 57 via `cargo test`. `fmt-scope.py` and `clippy-scope.py` report
+      the same 298 and 12 vendored complaints with **0 on a port-written line**. No source file was
+      touched by this task, so the Rust numbers are Task 14's, re-run rather than re-measured.
 
 ## Technical Details
 

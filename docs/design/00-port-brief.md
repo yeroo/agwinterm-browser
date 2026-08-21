@@ -7,6 +7,28 @@ a real Chromium browser rendered inside a terminal pane. The host terminal is
 Upstream sources are kept for reference (never committed) at `.reference/terminal-browser/`.
 The agwinterm source tree lives at `C:\Users\boris\source\agwinterm`.
 
+> ### This brief was written before the port and has been corrected three times
+>
+> Twice during design, by measurement; a third time now, by the implementation. **It is kept
+> as the argument, not as the record.** Where a claim below did not survive contact with
+> the code, an `⚠️ As built` note says so on the spot rather than in an errata section, and
+> [`07-as-built.md`](07-as-built.md) is the shipped description. Nothing has been quietly
+> rewritten to look prescient: a brief that gets edited into being right is not evidence
+> about anything.
+>
+> The four that matter, in one place:
+>
+> | this brief said | what shipped |
+> |---|---|
+> | frames travel over a shared-memory ring (`image.frameshm`) | **PNG over `image.frame`.** The fast path's contract was never published, so it was not built. [§ Chosen transport](#chosen-transport) |
+> | where the engine process lives is unresolved | **resolved:** the foreground process, one browser per pane. [`03-process-model.md`](03-process-model.md) |
+> | 43 files kept unchanged | **40 byte-identical, 3 with a written reason.** "No unix API" turned out not to mean "portable". [`UPSTREAM.md`](UPSTREAM.md) |
+> | `herdr.rs`: port to named pipes, or gate off for v1 | **gated off permanently**, and the reason is not effort. [§ the unix dependency](#the-unix-dependency-is-concentrated-not-pervasive) |
+>
+> Everything the brief got right is left standing without comment, including the load-bearing
+> bet — keeping `pixel-core` really was cheaper than dropping it, and the browser chrome really
+> did port for free.
+
 ## Why a port and not a build flag
 
 Upstream cannot run on Windows, for two *independent* reasons. Either alone is fatal.
@@ -59,6 +81,16 @@ The host side is further along than the guest side, and this is what makes the p
   (`emulator.rs:809 kitty_keyboard`). No macOS-style background helper app is needed;
   upstream's Swift input helper has no analogue here and is simply dropped.
 
+> ⚠️ **As built.** The helper half is right — it is dropped by a gate upstream already had, and
+> the sequences all survive ConPTY verbatim, CSI-u included. The kitty-keyboard half is not:
+> agwinterm parses those escapes but does not *speak* the protocol, so `kitty_keyboard()` is false
+> here, and two things follow that "solved" does not suggest. **No key releases are reported** —
+> which held Chromium down with every key until `PageInput` was taught to close the press itself —
+> and **there is no Super modifier to bind**, so `cmdModifier` is `ctrl` on Windows. Upstream's
+> substitute for a host with no Super is *Alt*, which would have put new tab, address bar, reload,
+> back, forward and zoom on alt-chords, on the one platform where every one of them is Ctrl by
+> convention and Alt is a modifier pages use in their own right.
+
 ### Two host gaps that are not solved, and are the port's real ceiling
 
 An earlier draft of this section claimed "input is solved" outright. It is not, in two specific ways,
@@ -90,6 +122,17 @@ exist to prevent.
 Both are small, well-localised host-side changes, and both are **additional cross-repo dependencies**
 that must be decided before the plan reaches them. They are tracked in the agwinterm plan.
 
+> ⚠️ **As built.** Neither landed, and both are now accepted ceilings rather than open questions —
+> written up with what would lift them in [`07-as-built.md § 3`](07-as-built.md#3-the-accepted-ceilings).
+> The port shipped over both, which this section did not expect it could: the cell-metrics half
+> was reclassified from *blocking* to *degrades* once [`04-cell-metrics.md`](04-cell-metrics.md)
+> found that the cost of a wrong-but-consistent cell size is sharpness rather than click accuracy,
+> and `TERMINAL_BROWSER_CELL_PX` is the override that makes it a user's choice. The `?1016` half is
+> exactly as bad as described. One correction to the paragraph above it: `reports_pixel_mouse()` is
+> indeed `false`, but **both gates it feeds are unreachable here** — they sit behind the native
+> scroll helper, which nothing on Windows spawns — so the quantisation is entirely in the
+> coordinates, and the flag costs nothing that runs.
+
 ## Architecture
 
 An earlier draft of this brief proposed dropping `pixel-core` wholesale and letting agwinterm
@@ -107,6 +150,25 @@ subdirectories (`engine/` 12, `scroll/` 5, `selection/` 2, `surfaces/` 2, `tree/
 | `herdr.rs` | 2 | port — `UnixStream`/`UnixListener` → Windows named pipes (or gate off for v1) |
 | `ghostty.rs` | 2 | drop — ghostty-specific `SIGUSR2` signalling, no Windows analogue |
 | **all 43 others** | **0** | **keep unchanged** |
+
+> ⚠️ **As built**, two rows of that table came out differently.
+>
+> **`herdr.rs` is gated off permanently, and porting the socket would have been wasted work.**
+> It is not a transport — it is a *different host*, found through `HERDR_SOCKET_PATH` and
+> negotiated with `pane.graphics.info`, which must answer `file_frame_transport: "direct-kitty"`
+> before the module will speak to it (`herdr.rs:56`). Kitty escapes are what ConPTY strips, so a
+> ported client would connect and then be unable to draw. The host does not run on Windows either.
+> Both it and `ghostty.rs` are byte-identical to upstream: "drop one" is a `#[cfg(unix)]` in
+> `lib.rs`, not an edit, so both still build and still run their tests on unix.
+>
+> **Of the 43, 40 are byte-identical and three have a written reason** — the Task 3 re-export
+> shim in `lib.rs`, plus `clipboard_image.rs` and one added `#[test]` in `engine/mod.rs`. The
+> lesson is in the first of those and it generalises: this count screens for unix **APIs**, and
+> `clipboard_image.rs` used none while assuming unix **paths** in three places, so three of its
+> five tests failed on Windows. *"No unix API" is not "portable."* The measurement above is still
+> right about what it measured; it was read as answering a slightly larger question than it did.
+> Each divergence is recorded in [`UPSTREAM.md`](UPSTREAM.md) and pinned by
+> `tools/vendor-check/unchanged.test.mjs`, which fails if the set moves in either direction.
 
 All 24 subdirectory files score zero on the same pattern. `canvas.rs`, `paint.rs`, `text_input.rs`,
 `image_cache.rs`, `menu.rs`, `kitty.rs`, `shape.rs`, `wrap.rs`, `style.rs`, `scrollbar.rs` and the
@@ -192,6 +254,17 @@ exists later — it is not v1.
 | `ghostty.rs` | `SIGUSR2` to ghostty | dropped |
 | CLI / terminals / store | TypeScript | mostly portable; `ssh.ts` and `sandbox.ts` (apparmor) need Windows work |
 
+⚠️ **As built**, three rows of that column read differently:
+
+| row | what shipped |
+|---|---|
+| Frame pixels → terminal | **PNG to a fresh path under `%TEMP%`, named to the host over `image.frame`.** The BGRA ring is deferred, not chosen against — [§ Chosen transport](#chosen-transport). |
+| `herdr.rs` IPC | **not ported** — permanently `#[cfg(unix)]`, for a reason that is not effort (above). |
+| CLI / terminals / store | ported, and the two named files ended as **refusals rather than Windows work**: ControlMaster is a unix-socket feature Win32 OpenSSH does not implement, and there is no AppArmor profile to install where Chromium is sandboxed by the OS. Both say so out loud ([`05`](05-cli-and-endpoints.md), [`07`](07-as-built.md#dropped-or-refused-in-the-cli)). |
+
+Everything else in the table held, including the two rows the whole bet rested on: the browser
+chrome and the compositor are unchanged, and the stock-Electron bitmap path needed no patch.
+
 ### The unresolved question: where the engine process lives
 
 Upstream is a **daemon/client split, and the daemon reaches the user's terminal by opening a path.**
@@ -216,6 +289,16 @@ inspecting the `--daemon` argument — so there is no foreground mode to switch 
 a restructure of the browser process's top level, not a configuration flag.
 
 This is decided in the port plan's Task 2, before any console work is specified.
+
+> ⚠️ **As built: resolved, and the reasoning above survived being tested.** The engine runs in the
+> foreground process — one browser per pane, holding that pane's console — and the daemon is kept
+> in the tree, still entered by `--daemon`, and is not what the Windows CLI launches.
+> [`03-process-model.md`](03-process-model.md) has the measurements, made with real
+> pseudoconsoles rather than reasoned about, and they add one finding this section did not have:
+> a GUI-subsystem child (which `electron.exe` is) gets **no** console even on an ordinary
+> non-detached spawn, and has to take one with `AttachConsole`. So `detached: true` was never the
+> obstacle, and anyone who "fixed" the daemon by removing it would have fixed the wrong thing.
+> What rules the daemon out is that no process can hold two consoles at once.
 
 ### Chosen transport
 
@@ -243,6 +326,22 @@ verbs read as siblings. **The exact name prefix is pinned in
 
 This spans **two repositories**: agwinterm gains the command, winterm-browser produces the frames.
 The existing file-based `image.frame` stays as the fallback and as the bring-up path.
+
+> ⚠️ **As built: this did not ship, and the bring-up path is the only path.** agwinterm never
+> gained the command. Its spec — the one this section ends by insisting on — does not exist:
+> `agwinterm/docs/specs/image-frameshm.md` was never written, agwinterm's own plan leaves the
+> header-layout task unchecked, and `ControlServer.cs:249` still dispatches `image.frame` and
+> nothing else. So there is no mapping layout to write BGRA into, and a producer built anyway
+> would have been inventing a wire format and calling it a contract.
+>
+> The gate was honoured rather than worked around, which is the whole value of having written
+> "do not invent one" here. What shipped instead is the half that survives the blocker:
+> `TERMINAL_BROWSER_FRAME_TRANSPORT`, so the file path stays *explicitly* selectable and this
+> baseline stays re-measurable; and `is_unknown_command`, the one reading of a host's refusal that
+> every capability probe in the crate now shares. The cost of the gap is measured, not guessed —
+> **38 ms per frame at a 131×37 pane, 26 fps**, of which the fast path would delete about 27.6 ms
+> outright ([`02-frame-budget.md`](02-frame-budget.md)). The diagram above is still the design;
+> it is now a design with a baseline to beat.
 
 ## Working agreement
 
