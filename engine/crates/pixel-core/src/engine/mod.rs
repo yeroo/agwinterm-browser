@@ -1128,4 +1128,26 @@ mod tests {
         };
         assert_eq!(window_from(&ws, (11, 21)), (1045, 798));
     }
+
+    #[test]
+    fn without_a_native_scroll_helper_the_pixel_mouse_gates_are_unreachable() {
+        // `pixel_mouse` is read in exactly two places — `pointer.rs`'s
+        // `self.pixel_mouse.then_some(point)` and `scroll.rs`'s `wants_cursor` —
+        // and both sit behind `self.native`, the out-of-process scroll helper.
+        // It is spawned only when `NATIVE_SCROLL_HELPER` names one, so where
+        // there is none there is no `native`, and a false `pixel_mouse` changes
+        // nothing that runs. The pointer's cell resolution is lost in the
+        // coordinates themselves, at `terminal_windows.rs`'s `mouse_position_px`,
+        // not at these two gates — which is why the port accepts the ceiling
+        // instead of treating the false flag as the bug.
+        if std::env::var_os("NATIVE_SCROLL_HELPER").is_some() {
+            // A developer machine with a helper configured; the claim is about
+            // the shipped configuration, and this is not it.
+            return;
+        }
+        assert!(
+            NativeScroll::spawn(None).is_none(),
+            "a helper appeared without NATIVE_SCROLL_HELPER naming one",
+        );
+    }
 }

@@ -5,8 +5,67 @@ import type { EngineKeyEvent, PastedImage, PointerEvent, WheelEvent } from "pixe
 export interface InputTarget {
   contents(): WebContents;
   scale(): number;
+  /**
+   * The page's size in CSS pixels, when the caller knows it. `pointer` clamps to
+   * it, which matters only at the last row and column: the surface is
+   * `round(cssExtent * scale)` device pixels wide, so a pointer on its final
+   * device pixel divides back to `cssExtent` — one past the last addressable CSS
+   * pixel — on any display scaled above 2. Optional so a target that does not
+   * track its own size keeps the unclamped behaviour.
+   */
+  size?(): { width: number; height: number } | null;
   focus(): Promise<void> | void;
   cdp(method: string, params?: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
+ * Whether the host reports key *releases*.
+ *
+ * Only the kitty keyboard protocol does; agwinterm does not implement it, and no
+ * Windows console host does either, so on this port every key arrives as a press
+ * and nothing ever arrives to close it. Chromium would then hold every key it was
+ * ever sent down until the page lost focus — `keyup` never fires, and a page
+ * watching for one (a shortcut released, a key held to pan) simply stops working.
+ *
+ * Defaults to `false`, which is the value that is *safe* when nothing sets it: a
+ * synthesized release is harmless on a host that sends real ones — `sentKeys`
+ * makes the real release a no-op — while a missing one is invisible until a page
+ * misbehaves. Task 10 lost a day to a capability that defaulted to the convenient
+ * value instead of the safe one.
+ */
+let keyReleasesReported = false;
+
+export function setKeyReleaseReporting(reported: boolean) {
+  keyReleasesReported = reported;
+}
+
+export function reportsKeyReleases() {
+  return keyReleasesReported;
+}
+
+/**
+ * Surface device pixels to page CSS pixels.
+ *
+ * `x` and `y` arrive from the engine already in the surface's device pixels — on
+ * this port that is a cell coordinate multiplied by the pane's cell size at
+ * `terminal_windows.rs`'s `mouse_position_px`, so the value names the *centre* of
+ * a character cell and the pointer's resolution is one cell. `scale` is the
+ * display's device-pixel ratio, the same number Chromium was handed as
+ * `deviceScaleFactor`, so dividing by it lands in the page's own coordinates.
+ */
+export function pagePoint(
+  x: number,
+  y: number,
+  scale: number,
+  size?: { width: number; height: number } | null,
+): { x: number; y: number } {
+  // A zero or NaN scale would map the whole surface onto one point, or onto none.
+  const factor = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const axis = (value: number, extent: number | undefined) => {
+    const at = Math.max(0, Math.round(value / factor));
+    return extent && extent > 0 ? Math.min(at, extent - 1) : at;
+  };
+  return { x: axis(x, size?.width), y: axis(y, size?.height) };
 }
 
 type SendableInputEvent = Parameters<WebContents["sendInputEvent"]>[0];
@@ -64,9 +123,7 @@ export class PageInput {
 
   pointer(event: PointerEvent) {
     this.syncFocus();
-    const scale = this.target.scale();
-    const x = Math.max(0, Math.round(event.x / scale));
-    const y = Math.max(0, Math.round(event.y / scale));
+    const { x, y } = pagePoint(event.x, event.y, this.target.scale(), this.target.size?.());
     this.lastX = x;
     this.lastY = y;
     const button = event.button === "none" ? undefined : event.button;
@@ -178,11 +235,8 @@ export class PageInput {
     }
     const keyCode = electronKey(event.key);
     if (event.kind === "release") {
-      if (!keyCode || !this.sentKeys.delete(event.key)) return;
-      const modifiers = this.modifiers(event.mods);
-      if (event.key.startsWith("left")) modifiers.push("left");
-      if (event.key.startsWith("right")) modifiers.push("right");
-      this.send({ type: "keyUp", keyCode, modifiers });
+      if (!keyCode) return;
+      this.sendKeyUp(event.key, keyCode, this.sideModifiers(event.key, this.modifiers(event.mods)));
       return;
     }
     this.syncFocus();
@@ -192,16 +246,35 @@ export class PageInput {
       }
       return;
     }
-    const modifiers = this.modifiers(event.mods);
-    if (event.key.startsWith("left")) modifiers.push("left");
-    if (event.key.startsWith("right")) modifiers.push("right");
-    if (event.kind === "repeat") modifiers.push("isautorepeat");
+    const modifiers = this.sideModifiers(event.key, this.modifiers(event.mods));
+    const down = [...modifiers!];
+    if (event.kind === "repeat") down.push("isautorepeat");
     this.sentKeys.add(event.key);
-    this.send({ type: "rawKeyDown", keyCode, modifiers });
+    this.send({ type: "rawKeyDown", keyCode, modifiers: down });
     const printable = !!event.text && !event.mods.ctrl && !event.mods.super && !event.mods.alt;
     if (printable) {
-      this.send({ type: "char", keyCode: event.text!, modifiers });
+      this.send({ type: "char", keyCode: event.text!, modifiers: down });
     }
+    // Nothing will arrive to close this key, so close it here. The modifiers are
+    // the press's, not an empty set: shift is still down while `a` comes back up.
+    if (!keyReleasesReported) this.sendKeyUp(event.key, keyCode, modifiers);
+  }
+
+  /** `left`/`right` tells Chromium which of a paired modifier key was used. */
+  private sideModifiers(key: string, modifiers: Electron.InputEvent["modifiers"]) {
+    if (key.startsWith("left")) modifiers!.push("left");
+    if (key.startsWith("right")) modifiers!.push("right");
+    return modifiers;
+  }
+
+  /** Releases a key once; a second call for the same press does nothing. */
+  private sendKeyUp(
+    key: string,
+    keyCode: string,
+    modifiers: Electron.InputEvent["modifiers"],
+  ) {
+    if (!this.sentKeys.delete(key)) return;
+    this.send({ type: "keyUp", keyCode, modifiers });
   }
 
   paste(text: string) {
@@ -244,10 +317,7 @@ export class PageInput {
     for (const key of this.sentKeys) {
       const keyCode = electronKey(key);
       if (!keyCode) continue;
-      const modifiers: Electron.InputEvent["modifiers"] = [];
-      if (key.startsWith("left")) modifiers.push("left");
-      if (key.startsWith("right")) modifiers.push("right");
-      this.send({ type: "keyUp", keyCode, modifiers });
+      this.send({ type: "keyUp", keyCode, modifiers: this.sideModifiers(key, []) });
     }
     this.sentKeys.clear();
   }
@@ -277,6 +347,11 @@ export class PageInput {
     });
     if (!event.mods.ctrl && !event.mods.super && !event.mods.alt) {
       await this.target.cdp("Input.dispatchKeyEvent", { type: "char", text: "\r", ...base });
+    }
+    // Enter takes the CDP path on every platform, so it needs the same synthetic
+    // release the `sendInputEvent` path above gets.
+    if (!keyReleasesReported) {
+      await this.target.cdp("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     }
   }
 

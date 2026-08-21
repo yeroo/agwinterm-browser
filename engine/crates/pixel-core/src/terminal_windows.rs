@@ -1813,6 +1813,86 @@ mod tests {
         );
     }
 
+    // -- the pointer, and the resolution it does not have ------------------
+
+    #[test]
+    fn the_edge_cells_of_a_pane_map_inside_the_canvas_that_pane_is_drawn_on() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        term.cell = Some((9, 19));
+        let (cw, ch) = (9u32, 19u32);
+        let (cols, rows) = (80u32, 24u32);
+
+        // The engine draws `cols * cw` by `rows * ch` — `window_from` with a
+        // `WindowSize` that carries no pixel extent, which is every size this
+        // backend reports. So the *last* cell's centre has to be strictly inside
+        // that canvas, or a click on the right edge lands off the page.
+        let last = term.mouse_position_px(cols, rows);
+        assert_eq!(last, ((cols - 1) * cw + cw / 2, (rows - 1) * ch + ch / 2));
+        assert!(
+            last.0 < cols * cw && last.1 < rows * ch,
+            "the last cell's centre fell outside the canvas: {last:?}",
+        );
+
+        // And the first cell's must not wrap: the report is one-based, so the
+        // subtraction is the one place a `u32` could go round the houses.
+        assert_eq!(term.mouse_position_px(1, 1), (cw / 2, ch / 2));
+        assert_eq!(
+            term.mouse_position_px(0, 0),
+            (cw / 2, ch / 2),
+            "a zero coordinate is not a report `parse_sgr_mouse` accepts, but it \
+             must not underflow if one ever arrives",
+        );
+    }
+
+    #[test]
+    fn the_pointer_quantises_to_a_cell_and_reports_pixel_mouse_is_what_says_so() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        term.cell = Some((10, 20));
+
+        // Every position this backend can produce is a cell centre. agwinterm
+        // discards the sub-cell offset where it encodes the report and implements
+        // no `?1016` to ask for it back, so two clicks anywhere inside one cell
+        // are the same event. That is the port's accepted ceiling, and
+        // `reports_pixel_mouse` is the flag that declares it.
+        assert!(!term.reports_pixel_mouse());
+        for col in 1..=40u32 {
+            let (x, y) = term.mouse_position_px(col, 1);
+            assert_eq!(x % 10, 5, "column {col} did not land on a cell centre");
+            assert_eq!(y, 10);
+        }
+    }
+
+    #[test]
+    fn a_drag_carries_its_position_across_press_move_and_release() {
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        term.cell = Some((10, 20));
+
+        // Press at cell (3, 2), drag right two cells, release. `?1002` reports
+        // motion with the button bit set (32 + 0), which is what makes the middle
+        // report a `Move` rather than a hover.
+        inbox.push(b"\x1b[<0;3;2M\x1b[<32;5;2M\x1b[<0;5;2m");
+        let mut seen = Vec::new();
+        while let Some(event) = term.poll_event(Some(Duration::from_secs(5))).unwrap() {
+            let Event::Mouse(mouse) = event else {
+                panic!("expected mouse events, got {event:?}");
+            };
+            seen.push((mouse.kind, mouse.x, mouse.y));
+            if seen.len() == 3 {
+                break;
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (MouseKind::Down, 25, 30),
+                (MouseKind::Move, 45, 30),
+                (MouseKind::Up, 45, 30),
+            ],
+            "a drag must keep the same cell-to-pixel mapping at every phase",
+        );
+    }
+
     #[test]
     fn a_resolved_cell_size_is_cached_until_it_is_forgotten() {
         let mut term = Terminal::detached(Inbox::new(), None);

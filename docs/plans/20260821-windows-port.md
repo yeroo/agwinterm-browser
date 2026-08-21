@@ -962,18 +962,88 @@ capability it uses, and a static page is precisely the workload it is in product
 
 ### Task 11: Interactive input
 
-- [ ] route decoded keyboard and mouse events into Chromium via `browser/src/page/input.ts`
-- [ ] translate cell coordinates to page pixels, accounting for `deviceScaleFactor` and the metrics
+- [x] route decoded keyboard and mouse events into Chromium via `browser/src/page/input.ts`
+      — the route itself needed nothing: `session.tsx` already forwards `pointer`/`wheel`/`key` to
+      the active controller and `PageInput` already speaks `sendInputEvent`. What it needed was the
+      thing at the *end* of the route, below.
+      ➕ **Chromium was being held with every key down.** Only the kitty keyboard protocol reports
+      key *releases*, and `kitty_keyboard()` is `false` here — so every key arrives as a press and
+      nothing ever arrived to close it. `sentKeys` grew, `keyUp` never reached the page, and the
+      only thing that flushed it was a blur (`controller.ts:449`). A page watching for `keyup` — a
+      shortcut released, a key held to pan — simply stopped working, silently. `PageInput` now
+      closes the press itself when the host reports no releases (`setKeyReleaseReporting`, set from
+      `applyKeyBindings` beside `noSuper`, which is the same capability read twice). It defaults to
+      **`false`** — the value that is safe when nothing sets it, which is Task 10's `watch_resize`
+      lesson applied: a synthesized release is a no-op on a kitty host because `sentKeys` swallows
+      the real one, while a missing release is invisible until a page misbehaves. Enter takes the
+      CDP path on every platform and got the same treatment.
+- [x] translate cell coordinates to page pixels, accounting for `deviceScaleFactor` and the metrics
       decision from Task 6
-- [ ] **expect `reports_pixel_mouse()` to be false** and verify the consequences are the documented
+      — the multiply is Task 6's (`mouse_position_px`, cell → surface device pixels using the same
+      cell size the canvas is drawn at); the divide is `pagePoint` (new, exported from `input.ts`),
+      which is the old inline `Math.round(event.x / scale)` made nameable and given two guards.
+      ➕ **The last device pixel of a scaled display divides to one past the page.** The surface is
+      `round(cssExtent * scale)` device pixels (`snapToCssGrid`), so on a 3× display a 33-CSS-pixel
+      page is 99 device pixels and device pixel 98 rounds to CSS 33 — one past the last addressable
+      pixel, i.e. off the page. `InputTarget` gained an optional `size()`, wired from all three call
+      sites (`controller.ts`, `devtools.ts`, `popup.ts`), and `pagePoint` clamps to it. Also: a zero
+      or NaN `scale` now falls back to 1 rather than mapping the whole surface onto one point.
+- [x] **expect `reports_pixel_mouse()` to be false** and verify the consequences are the documented
       ceiling rather than a bug: `engine/mod.rs:352` sets the flag, `engine/pointer.rs:61` gates
       `let located = self.pixel_mouse.then_some(point)` so hover and pairing get no position, and
       `engine/scroll.rs:192` gates `wants_cursor`
-- [ ] compare against the Task 1 ConPTY probe: if CSI-u forms did not survive, that is the cause
-- [ ] map Cmd-based bindings (`browser/src/session/keybindings.ts`) to Ctrl
-- [ ] write tests for cell→pixel translation including edge cells and a scaled display
-- [ ] write tests for modifier mapping and a drag sequence producing the expected page events
-- [ ] run tests — must pass before Task 12
+      — it is false, and ➕ **both cited gates are unreachable on this platform, so the flag changes
+      nothing that runs.** Each sits behind `self.native` — the out-of-process scroll helper, spawned
+      only when `NATIVE_SCROLL_HELPER` names one (`native.rs:87`), which nothing on Windows does.
+      `pointer.rs:61` is inside `if self.use_native && self.native.is_some()`; `scroll.rs:192` is
+      inside `ingest_native`, which returns at its first `let Some(native)`. The pointer's cell
+      resolution is lost earlier and elsewhere — in the *coordinates*, at `mouse_position_px`, where
+      agwinterm's cell-quantised report is multiplied back up to a cell **centre**. That is the
+      documented ceiling; the false flag is not a second one.
+- [x] compare against the Task 1 ConPTY probe: if CSI-u forms did not survive, that is the cause
+      — closed in Task 1's favour and it is not the cause: **every sequence survived verbatim**
+      through a real ConPTY, CSI-u plain and modified included. So nothing is lost in transit; the
+      absent Super and absent pixel mouse are agwinterm's, and `ENABLE_REPORTING` therefore never
+      asks for either — already pinned by
+      `the_reporting_modes_written_on_the_way_in_are_undone_on_the_way_out`, which fails if `\x1b[>`
+      or `?1016` reappears and leaves the decoder reading bytes on the wrong assumption.
+- [x] map Cmd-based bindings (`browser/src/session/keybindings.ts`) to Ctrl
+      — ⚠️ **upstream's substitute for a host with no Super is Alt, not Ctrl**, and it is applied by
+      capability rather than by platform: `session.tsx:426`'s `cmdHeld` returns
+      `mods.super || (noSuper && mods.alt)`, and `noSuper` is `!kittyKeyboard`, which is always true
+      here. `defaultKeys` was already right (its non-darwin branch is Ctrl) — so the half that looked
+      wrong was fine and the half that looked fine was wrong. Left alone, new tab, address bar,
+      reload, back, forward and zoom would all have been **alt+**, on a platform where Alt is a
+      modifier pages use in their own right and every one of those keys is Ctrl by convention.
+      `cmdHeld`/`accelHeld`/`clipboardHeld` moved out of `session.tsx` into `keybindings.ts` as pure
+      functions of `(event, noSuper)` — testable without an Electron app — behind a `cmdModifier`
+      constant that is `ctrl` on Windows and `super` elsewhere. `parseMods` maps a `cmd+`/`super+`
+      chord to it as well, so a `--palette-key cmd+p` written for a Mac lands on something a Windows
+      user can press instead of on a modifier that never arrives. macOS and Linux are unchanged, and
+      three of the nine tests below exist to say so.
+      Ctrl+C now copies; Ctrl+Shift+C is left to the terminal.
+- [x] write tests for cell→pixel translation including edge cells and a scaled display
+      — split across the two languages the translation is split across. Rust
+      (`terminal_windows.rs`): the last cell of an 80×24 pane lands strictly inside the `cols * cw`
+      canvas it is drawn on, the first cell does not underflow a `u32`, and every column of a 10-px
+      cell lands on a centre — which is the quantisation stated as an invariant rather than as prose.
+      JS (`tools/input/page-input.test.mjs`): `pagePoint` at 1×, 2× and 3×, the 3× edge clamped and
+      the same position unclamped for contrast, a zero-size ignored, and a negative input floored.
+- [x] write tests for modifier mapping and a drag sequence producing the expected page events
+      — the drag is tested at both ends. Rust: an SGR press / `?1002` motion / release burst fed as
+      bytes yields `Down`/`Move`/`Up` at the same cell-to-pixel mapping in every phase. JS: the same
+      three phases through `PageInput` produce `mouseDown`/`mouseMove`/`mouseUp` with
+      `leftbuttondown` on the move and *not* on the release, `movementX` measured from the last send,
+      a click count that increments in place and restarts elsewhere, and — separately — the four
+      modifiers mapped onto Chromium's names, `super` becoming `meta`. Nine keybinding tests cover
+      the Cmd→Ctrl mapping and its two untouched platforms.
+- [x] run tests — must pass before Task 12 — **389 Rust tests** (0 failed, 1 pre-existing ignored
+      benchmark; `pixel-core` 328 → **332**, `pixel-node` 57) plus the probe crates' 15 and 14, and
+      **138 node tests** (109 before, **+29**). `cargo clippy --workspace --all-targets` is at Task
+      8's **12** warnings, on the same vendored lines; `cargo fmt --all --check`'s residual is **172
+      hunks, identical to Task 8's**, with no hunk in either file this task touched.
+      `cargo check --workspace` clean, and `browser/`'s `tsc --noEmit` clean — which it now is,
+      as of Task 8, so the TypeScript half of this task is typechecked rather than only bundled.
 
 ### Task 12: Shared-memory fast path
 

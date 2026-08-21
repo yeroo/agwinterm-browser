@@ -52,6 +52,9 @@ export class PopupWindow {
     this.input = new PageInput({
       contents: () => this.window.webContents,
       scale,
+      // Popup sizes are already CSS pixels — `BrowserWindow` was given them with
+      // `useContentSize`.
+      size: () => ({ width: this.stateValue.width, height: this.stateValue.height }),
       focus: () => this.focus(),
       cdp: (method, params) => this.cdp(method, params),
     });

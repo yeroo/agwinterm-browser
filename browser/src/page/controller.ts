@@ -133,6 +133,7 @@ export class BrowserController {
     this.input = new PageInput({
       contents: () => this.window.webContents,
       scale: () => this.layout.scale,
+      size: () => this.contentSize(this.layout),
       focus: () => this.focusContent(),
       cdp: async (method, params) => {
         await this.attachCdp();

@@ -73,6 +73,7 @@ export class DevtoolsWindow {
     this.input = new PageInput({
       contents: () => this.window.webContents,
       scale: () => this.layout.scale,
+      size: () => cssSize(this.layout.width, this.layout.height, this.layout.scale),
       focus: () => this.focus(),
       cdp: (method, params) => this.cdp(method, params),
     });

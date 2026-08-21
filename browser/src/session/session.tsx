@@ -16,6 +16,7 @@ import {
 } from "../page/browser-session";
 import type { DownloadProgress } from "../page/browser-session";
 import { BrowserController } from "../page/controller";
+import { setKeyReleaseReporting } from "../page/input";
 import { initOffscreenMode } from "../page/offscreen";
 import { initialBrowserState } from "../page/types";
 import type { BrowserState, BrowserSurfaceLayout } from "../page/types";
@@ -38,7 +39,7 @@ import type {
   PopupView,
 } from "../ui/types";
 import { normalizeUrl, searchOrUrl } from "../url";
-import { bindingLabel, defaultKeys, isRecordKey, listStep, matchesBinding, parseKeyBindings, recordKeyLabel } from "./keybindings";
+import { accelHeld, bindingLabel, clipboardHeld, cmdHeld, cmdModifier, defaultKeys, isRecordKey, listStep, matchesBinding, parseKeyBindings, recordKeyLabel } from "./keybindings";
 import type { KeyBinding } from "./keybindings";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
 import type { DevtoolsPlacement } from "./layout";
@@ -413,6 +414,9 @@ class Session {
 
   private applyKeyBindings(kittyKeyboard: boolean) {
     this.noSuper = !kittyKeyboard;
+    // The kitty protocol is the only thing that reports key *releases*, so its
+    // absence is also what tells `PageInput` to close each press itself.
+    setKeyReleaseReporting(kittyKeyboard);
     const binding = (flag: string, fallback: string) =>
       parseKeyBindings(flagValue(this.argv, flag) ?? defaultBinding(fallback, this.noSuper));
     this.paletteBinding = binding("--palette-key", defaultKeys.palette);
@@ -423,18 +427,15 @@ class Session {
   }
 
   private cmdHeld(event: EngineKeyEvent): boolean {
-    return event.mods.super || (this.noSuper && event.mods.alt);
+    return cmdHeld(event, this.noSuper);
   }
 
   private accelHeld(event: EngineKeyEvent): boolean {
-    return this.cmdHeld(event) || (process.platform === "linux" && event.mods.ctrl);
+    return accelHeld(event, this.noSuper);
   }
 
   private clipboardHeld(event: EngineKeyEvent): boolean {
-    if (this.cmdHeld(event)) return true;
-    return (
-      process.platform === "linux" && event.mods.ctrl && !event.mods.shift && !event.mods.alt
-    );
+    return clipboardHeld(event, this.noSuper);
   }
 
   private isPasteKey(event: EngineKeyEvent): boolean {
@@ -1485,7 +1486,8 @@ function defaultBinding(spec: string, noSuper: boolean): string {
     .map((chord) => {
       const parts = chord.split("+");
       const key = parts.pop()!;
-      const mods = [...new Set(parts.map((mod) => (mod === "super" ? "alt" : mod)))];
+      const stand = cmdModifier === "ctrl" ? "ctrl" : "alt";
+      const mods = [...new Set(parts.map((mod) => (mod === "super" ? stand : mod)))];
       return [...mods, key].join("+");
     })
     .join(" ");
