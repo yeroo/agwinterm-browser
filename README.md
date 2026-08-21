@@ -29,4 +29,6 @@ with a shell — read it like you would read a `Makefile`.
 
 ## Status
 
-Design brief written. Implementation plan pending.
+Design brief and implementation plan written, reviewed by a revmux triage panel, and revised.
+The review report is at `.revmux/tasks/plan-windows-port/01-initial/report.md`.
+Implementation has not started.

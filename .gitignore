@@ -9,8 +9,15 @@ node_modules/
 dist/
 out/
 
-# revmux run archives (task inputs under .revmux/tasks/*/ *are* committed via
-# the negations below; the round outputs and logs are not)
+# revmux rounds: keep what a future reader needs — the round's input/ (what the
+# panel was pointed at), findings.json and report.md (what it concluded). Drop
+# the per-run machinery: composed prompts, per-agent transcripts, event logs.
+# Not only noise — revmux names verify-stage prompts after the directories they
+# cover, and those names exceed the Windows path limit, so git cannot add them.
+.revmux/tasks/*/*/prompts/
+.revmux/tasks/*/*/agents/
+.revmux/tasks/*/*/events.jsonl
+.revmux/tasks/*/*/manifest.json
 .revmux/tasks/*/*/output/
 .revmux/tasks/*/*/logs/
 

@@ -1,28 +1,49 @@
 # winterm-browser — Windows-native port
 
+> **Revision 2**, after a revmux triage panel (`.revmux/tasks/plan-windows-port/01-initial`) raised
+> 4 critical and 19 major findings against revision 1. Four things changed structurally: an
+> architecture decision task now precedes all console work; the Electron install and launcher move
+> ahead of the milestone; `terminal.rs` is split rather than gated; and the file-based frame path
+> writes unique paths. Findings are cited inline as `[triage: …]` where the reason is not obvious.
+
 ## Overview
 
 Bring terminal-browser to Windows, hosted by agwinterm: a real Chromium browser rendered inside a
 terminal pane, with working keyboard and mouse, on stock Electron, with no WSL.
 
 The authoritative design is [`docs/design/00-port-brief.md`](../design/00-port-brief.md). Read it
-first — it records what was measured rather than assumed, and it already overturned one plausible
-architecture. In short:
+first — it records what was measured rather than assumed, and it has now been corrected twice by
+evidence. In short:
 
 - Upstream cannot run here for two independent reasons: `pixel-core` does not compile on Windows
-  (41 errors), and its transport — Kitty APC escapes on stdout — is stripped by ConPTY before any
-  Windows emulator sees it.
-- But the unix dependency is **concentrated, not pervasive**: 64 of 68 unix-API references live in
-  `terminal.rs`, and **19 of 22 `pixel-core` modules have none at all**. The compositor, layout and
-  text stack (taffy, tiny-skia, fontdue) are portable Rust. That matters because the browser chrome
-  renders through `pixel-react` into `pixel-core` — dropping it would have meant rewriting the whole
-  chrome.
-- Upstream's fast frame paths need an Electron fork they build themselves, macOS and Linux only. But
-  `presentBitmap` (`browser/src/page/paint.ts:104`) already implements a stock-Electron path:
-  `image.toBitmap()` → `surface.present({bgra, width, height, damage})`. Windows gets that for free.
+  (41 errors), and its transport — Kitty APC escapes on stdout — is stripped by ConPTY.
+- The unix dependency is **concentrated**: 64 of 68 unix-API references are in `terminal.rs`;
+  **43 of `pixel-core`'s 46 source files have none**. The compositor, layout and text stack are
+  portable Rust, and the browser chrome renders through them — so keeping `pixel-core` avoids
+  rewriting the chrome.
+- But `terminal.rs` is itself split: lines 1251–1909 are a 659-line VT input decoder with zero unix
+  references and 27 passing byte-sequence tests. That decoder is what the Windows backend needs.
+  Gating the module wholesale would strand it.
+- Upstream's fast frame paths need an Electron fork they build themselves, but `presentBitmap`
+  (`browser/src/page/paint.ts:104`) already implements a stock-Electron path.
 
-**So the port is: replace one module, port one, drop one, keep nineteen** — plus a new output
-backend that speaks agwinterm's control pipe instead of writing escapes to a tty.
+**So the port is: split one module, port one, drop one, keep forty-three** — plus a new output
+backend on agwinterm's control pipe, and an architecture decision about where the engine runs.
+
+### What this port cannot fix, and is accepting
+
+Two ceilings are host-side and are accepted rather than solved here
+[triage: mouse quantisation, cell metrics]:
+
+- **Pointer resolution is one character cell.** agwinterm discards the sub-cell offset at the encode
+  site and has no `?1016`. Small link targets, hover, drag-select and scrollbar grabs all quantise.
+- **Cell pixel metrics are not published**, so the renderer cannot match the pane's physical pixels
+  without a host change.
+
+Both have a cheap host-side fix, and both are now **explicit dependencies on the agwinterm plan**
+rather than assumptions. If that plan does not ship them, this port still works — with a
+cell-resolution pointer and a possibly-resampled image — and that is the documented outcome, not a
+surprise discovered at Task 11.
 
 ## Context (from discovery)
 
@@ -31,281 +52,389 @@ agwinterm source: `C:\Users\boris\source\agwinterm`.
 
 | area | file | note |
 |---|---|---|
-| tty layer to replace | `engine/crates/pixel-core/src/terminal.rs` | 64 unix hits: termios raw mode, `/dev/tty`, `rustix::shm`, `pipe`+`O_NONBLOCK`, and the Kitty-to-stdout encoder |
-| IPC to port | `engine/crates/pixel-core/src/herdr.rs` | `UnixStream`/`UnixListener` → named pipes, or gated off for v1 |
-| to drop | `engine/crates/pixel-core/src/ghostty.rs` | `SIGUSR2` to ghostty; no Windows analogue |
-| keep unchanged | the other 19 `pixel-core` modules | `canvas`, `paint`, `text_input`, `image_cache`, `menu`, `kitty`, `shape`, `wrap`, `style`, `scrollbar`, … |
-| napi bridge | `engine/crates/pixel-node/src/{lib,surface}.rs` | `SurfacePixels` gates IOSurface on macOS and shm on linux; the `Owned { bgra, width, height }` variant is the Windows path and already exists |
+| tty layer to replace | `pixel-core/src/terminal.rs` lines 4, 193–1250 | termios raw mode, `/dev/tty`, `rustix::shm`, `pipe`+`O_NONBLOCK`, Kitty-to-stdout encoder |
+| **decoder to keep** | `pixel-core/src/terminal.rs` lines **1251–1909** | zero unix refs; `parse_csi`, `parse_sgr_mouse`, `parse_kitty_keyboard`, `parse_osc_color`, … all take `&[u8]` |
+| **types to extract** | `terminal.rs:11-175` | `Event`, `KeyEvent`, `KeyKind`, `Mods`, `Key`, `Mouse`, `MouseKind`, `MouseButton`, `TerminalColors`, `ColorSlot`, `WindowSize`, `Waker`, `SessionEnv` — imported by 11 keep-unchanged modules; `lib.rs` re-exports `SessionEnv` at crate root |
+| seam width | `impl Terminal`, `terminal.rs:336-1061` | **24 public methods**, including 5 clipboard calls reached via `&mut Terminal` from `engine/clipboard.rs` |
+| IPC to port | `pixel-core/src/herdr.rs` | `UnixStream`/`UnixListener` → named pipes, or gated off for v1 |
+| to drop | `pixel-core/src/ghostty.rs` | `SIGUSR2` to ghostty; no Windows analogue |
+| daemon architecture | `cli/src/main.ts:119,155,301`, `browser/src/daemon.ts:96-106`, `browser/src/main.tsx:55` | tty-by-path into a detached daemon; no Windows analogue |
+| launcher | `cli/src/main.ts:65-68,80-86,109` | `/bin/sh -c`, `ELECTRON_DEV_BIN=["electron"]` (no `.exe`), POSIX quoting, `2>>` redirection |
+| install hook | `browser/package.json:7` | `"postinstall": "bash ../scripts/fetch-electron.sh"` — fetches the fork |
+| pnpm gate | `pnpm-workspace.yaml` | `onlyBuiltDependencies: [better-sqlite3, esbuild]` — **electron is not listed**, so its own binary download is blocked |
+| napi bridge | `pixel-node/src/{lib,surface}.rs` | `Owned { bgra, width, height }` is ungated and is the Windows path; buffer recycling at `surface.rs:53-58` is built around it |
+| unix sockets | `store/src/paths.ts:46-48`, `browser/src/daemon.ts:38-39`, `browser/src/registry.ts:52-57` | **two** socket protocols, persisted in `store/src/schema.ts:7`, consumed by 4 CLI modules |
 | the seam | `Surface.present` from `pixel-react` | what `browser/` calls; the Windows backend plugs in here |
-| Electron capture | `browser/src/page/{offscreen,paint}.ts` | `offscreenPreferences` branches darwin/linux; `initOffscreenMode` throws on darwin without shared textures |
-| host frame path | agwinterm `src/Agwinterm.Pty/ControlServer.cs:249` | `image.frame` today; `image.frameshm` per the agwinterm plan |
-| host input | agwinterm `TerminalEmulator.cs:403-405`, `emulator.rs:809` | SGR mouse `?1000/?1002/?1003/?1006` and kitty keyboard already work |
+| host frame path | agwinterm `ControlServer.cs:249`, `HandleImageFrame` at `:426` | `ContentSignature` at `:487-496` is mtime^length^hash(path) — it never reads bytes |
 
-**Tooling upstream already uses**, and this port keeps: `cargo nextest run --workspace`,
-`cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, and
-`node --test` for the TypeScript packages. 37 Rust source files carry tests; they are the
-regression net for everything in the "keep unchanged" column.
+**Tooling**: `cargo nextest run --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo fmt --all --check`, `node --test`. `pixel-core` has **246 `#[test]` functions across 25 files**;
+~197 are in keep-unchanged modules and become a live per-task regression net the moment Task 4 lands.
 
 ## Constraints
 
 - **Windows-native only. WSL is out of scope** and is not an acceptable fallback for any task.
-- **Stock Electron.** Do not fetch or build a patched Electron; if a task seems to need one, the
-  task is wrong. `scripts/fetch-electron.sh` is upstream's, and it does not apply here.
-- **This plan depends on the agwinterm plan** for the shm fast path only
-  (`agwinterm/docs/plans/20260821-image-frameshm-command.md`, contract in
-  `agwinterm/docs/specs/image-frameshm.md`). Everything up to and including the
-  first-frame-on-screen milestone uses the file-based `image.frame`, which needs no agwinterm change.
-  If the contract is not ready when Task 9 starts, stop and say so rather than inventing a shape.
-- **Never test against the real agwinterm instance.** Use a Debug agwinterm (instance id
-  `agwinterm-dev`, its own pipe and data dir) and verify routing with
-  `agwintermctl --pipe agwinterm-dev tree` before trusting any result. Running against the real
-  data dir has destroyed real session state before.
-- **Do not weaken the "keep unchanged" 19 modules to make something compile.** If one of them needs
-  a change, that is a finding worth recording in the plan (➕), not a quiet edit.
-- Upstream's licence and provenance travel with the vendored code.
+- **Stock Electron.** No patched build. Note this is not free: removing the fork fetch without also
+  allowing electron's own postinstall leaves `node_modules/electron/dist` empty and no `electron.exe`
+  anywhere — a worse failure, hit at the milestone rather than at install. Task 1 handles both halves.
+- **This plan depends on the agwinterm plan** for three things now, not one: `image.frameshm`
+  (Task 12, optional, self-guarding), cell metrics (Task 6, blocking), and `?1016` pixel mouse
+  (Task 11, degrades gracefully). Contract lives in `agwinterm/docs/specs/image-frameshm.md`.
+  **Tasks 1–10 have zero dependency on the agwinterm plan** [triage: confirmed against
+  `HandleImageFrame` — every capability Task 7 needs is in shipped code].
+- **Never test against the real agwinterm instance.** Debug build → instance id `agwinterm-dev`, own
+  pipe and data dir. Verify with `agwintermctl --pipe agwinterm-dev tree` before trusting a result.
+- **Do not weaken the 43 keep-unchanged files to make something compile.** A needed change there is a
+  ➕ finding, not a quiet edit.
 
 ## Development Approach
 
 - **Testing approach**: Regular (code first, then tests).
 - Complete each task fully before moving to the next.
-- Make small, focused changes.
-- **CRITICAL: every task MUST include new/updated tests** for code changes in that task.
-  - unit tests for new and modified functions, as separate checklist items
-  - success and error scenarios both
+- **CRITICAL: every task MUST include new/updated tests**, as separate checklist items, covering
+  success and error scenarios.
 - **CRITICAL: all tests must pass before starting the next task.**
 - **CRITICAL: update this plan file when scope changes during implementation.**
-- Run `cargo clippy -- -D warnings` and `cargo fmt --check` as part of "tests pass".
+- `cargo clippy -- -D warnings` and `cargo fmt --check` are part of "tests pass".
 
 ## Testing Strategy
 
-- **Unit tests**: required every task. Rust via `cargo nextest`, TypeScript via `node --test`.
-- **Platform-behaviour tests**: the console and control-pipe layers are where assumptions die.
-  Prefer a test that drives the real thing (a real named pipe, a real `MemoryMappedFile`, a real
-  Debug agwinterm) over a mock that encodes a guess about Win32.
-- **Visual confirmation** is a milestone, not a test: Task 8 is "a page is legibly on screen".
-  Screenshot verification belongs in Post-Completion, not in a checkbox.
-- **No e2e browser-automation suite in this plan.** Scope is a working port.
+- **Unit tests**: every task. Rust via `cargo nextest`, TypeScript via `node --test`.
+- **Platform-behaviour tests**: prefer driving the real thing (a real named pipe, a real
+  `MemoryMappedFile`, a real Debug agwinterm) over a mock encoding a guess about Win32.
+- **The ~197 inherited tests are the regression net.** From Task 4 onward they must run on Windows
+  and stay green; that is what makes "keep forty-three unchanged" a checkable claim.
+- **Visual confirmation is a milestone, not a test** (Task 10). Screenshots go in Post-Completion.
 
 ## Progress Tracking
 
-- Mark completed items with `[x]` immediately when done.
-- Add newly discovered tasks with ➕ prefix.
-- Document issues/blockers with ⚠️ prefix.
-- Update the plan when implementation deviates from scope.
+- Mark completed items `[x]` immediately. Add discovered tasks with ➕. Blockers with ⚠️.
 
 ## Implementation Steps
 
-### Task 1: Vendor upstream and record the true Windows baseline
+### Task 1: Vendor, make `pnpm install` actually work, and take a full-tree baseline
 
-- [ ] copy upstream `engine/`, `browser/`, `cli/`, `terminals/`, `store/` from `.reference/` into the
-      repo root, preserving `LICENSE` and recording the upstream commit in `docs/design/UPSTREAM.md`
-- [ ] do **not** copy `scripts/` wholesale — `install.sh`, `fetch-electron.sh`, `apparmor.sh` and
-      `bundle.sh` are unix/patched-Electron specific; port them later, individually, when needed
-- [ ] run `cargo check --workspace` and commit the full error list to
-      `docs/design/01-baseline-errors.md`, grouped by module
-- [ ] run `pnpm install` and record which packages install cleanly on Windows and which do not
-- [ ] confirm the baseline matches the brief's claim (errors concentrated in `terminal.rs`,
-      `herdr.rs`, `ghostty.rs`) and record any module the brief did not predict as a ➕ finding
-- [ ] write a test asserting the vendored `pixel-core` module list matches what the plan expects, so
-      an upstream re-vendor cannot silently add a new unix-bound module
+- [ ] copy upstream `engine/`, `browser/`, `cli/`, `terminals/`, `store/` into the repo root,
+      preserving `LICENSE`, and record the upstream commit in `docs/design/UPSTREAM.md`
+- [ ] do **not** copy `install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh`
+- [ ] **remove the `postinstall` hook from `browser/package.json:7`** — it runs `bash` on the
+      patched-Electron fetch script the Constraints forbid, and with `scripts/` uncopied it fails on
+      a missing file regardless. Record it as the first intentional divergence from upstream.
+- [ ] **add `electron` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`** (or fetch the stock
+      binary explicitly) — pnpm 10 blocks the electron package's own binary download, which is *why*
+      upstream substituted the fork fetch. Removing the hook alone yields an install that succeeds
+      and still has no Electron binary. [triage: critical]
+- [ ] run `pnpm install` and confirm `node_modules/electron/dist/electron.exe` exists — this is the
+      pass/fail, not "the command exited 0"
+- [ ] run `cargo check --workspace`; commit the error list to `docs/design/01-baseline-errors.md`
+- [ ] **run the same unix-API disposition pass over `browser/`, `cli/`, `store/`, `terminals/` and
+      the JS build scripts**, recording it beside the `pixel-core` table — the Rust measurement
+      covered the least risky layer, and every blocker found so far was outside it [triage: major]
+- [ ] **probe ConPTY input fidelity**: from a child under a Debug agwinterm with
+      `ENABLE_VIRTUAL_TERMINAL_INPUT` set, record the exact bytes received for an SGR mouse report
+      and a kitty-keyboard CSI-u report. These are synthesized host-side and pass through conhost's
+      `INPUT_RECORD` round-trip; CSI-u forms are exotic and Task 11 is the first thing that would
+      notice a loss. Record next to the `cargo check` baseline. [triage: minor, cheap, de-risks two tasks]
+- [ ] write a test asserting the vendored `pixel-core` file inventory (46 files) matches expectation,
+      so a re-vendor cannot silently add a unix-bound module
 - [ ] run tests — must pass before Task 2
 
-### Task 2: Put the tty layer behind a backend seam
+### Task 2: Decide where the engine process lives on Windows
 
-- [ ] define a `TerminalBackend` trait in `pixel-core` covering what `terminal.rs` does for the rest
-      of the crate: enter/leave raw mode, report size, deliver input events, present a composited
-      frame, and wake the event loop
-- [ ] derive the trait from `terminal.rs`'s existing callers, not from a fresh design — the goal is
-      the seam upstream already implies, so the 19 portable modules keep compiling untouched
-- [ ] move the existing unix implementation behind `#[cfg(unix)]` so upstream behaviour is preserved
-      rather than deleted
-- [ ] add a `#[cfg(windows)]` stub that compiles and returns "unimplemented" for every method
-- [ ] `#[cfg(unix)]`-gate `ghostty.rs` and `herdr.rs` for now, recording herdr as deferred
-- [ ] write tests that the trait's contract holds for a fake backend (event delivery ordering,
-      size reporting, raw-mode enter/leave pairing)
-- [ ] verify `cargo check --workspace` is clean on Windows — this is the task's real deliverable
+**This is a design task and it blocks all console work.** Upstream's daemon opens the client's tty by
+path; Windows has no path that names another process's ConPTY, and the daemon is spawned detached
+with no console at all. [triage: critical]
+
+- [ ] write `docs/design/03-process-model.md` choosing between: (a) host the engine in the foreground
+      process, or (b) keep the daemon and forward stdin from the CLI client over IPC
+- [ ] cost each against what it actually touches. For (a): `browser/src/main.tsx:55` calls
+      `runDaemon(cdpPort)` unconditionally and does not inspect the `--daemon` argument, so there is
+      no foreground mode to switch to — this is a restructure of the browser process's top level, not
+      a flag. For (b): input latency, and a second stdin protocol to own.
+- [ ] note that `createRoot({tty: null})` is already a supported shape
+      (`pixel-react/src/index.ts:262-264` falls back to a stdio bridge; `session.tsx:313` has a
+      `!this.ctx.tty` branch) — this is the seam either option builds on
+- [ ] confirm the output side is unaffected either way: frames leave via the control pipe addressed
+      by `AGWINTERM_SESSION_ID` and never need a tty
+- [ ] record the decision, the rejected option and why, so Task 5 has a brief to work from
+- [ ] write tests for whichever process-boundary shape is chosen, at the level the decision permits
+      (an IPC round-trip test for (b); a foreground-entry smoke test for (a))
 - [ ] run tests — must pass before Task 3
 
-### Task 3: Windows console input
+### Task 3: Extract `terminal.rs`'s portable type vocabulary
 
-- [ ] implement the input half of the Windows backend: enable VT input with `SetConsoleMode`
-      (`ENABLE_VIRTUAL_TERMINAL_INPUT`, disabling line and echo input), restoring the prior mode on
-      exit including on panic
-- [ ] read from the console input handle and feed the bytes to the existing VT input decoder rather
-      than writing a second decoder
-- [ ] decode SGR mouse reports (`?1006`) and kitty keyboard sequences — agwinterm emits both, so the
-      work is consuming them, not negotiating them
-- [ ] request the modes the backend needs on startup and release them on shutdown
-- [ ] handle resize: derive it from the console screen buffer info, since there is no `SIGWINCH`
-- [ ] write tests for the decoder over recorded byte sequences: ordinary keys, modified keys, kitty
-      keyboard forms, SGR press/drag/release, and a sequence split across two reads
-- [ ] write tests for raw-mode restoration on both the normal and panicking exit path
+Done before any gating, because `lib.rs` declares `mod terminal;` unconditionally and re-exports
+`pub use terminal::SessionEnv;` at crate root — a bare `#[cfg(unix)]` breaks the crate root and 11
+keep-unchanged modules. [triage: major]
+
+- [ ] move `Event`, `KeyEvent`, `KeyKind`, `Mods`, `Key`, `Mouse`, `MouseKind`, `MouseButton`,
+      `TerminalColors`, `ColorSlot`, `WindowSize`, `Waker`, `SessionEnv` into their own module
+- [ ] **re-export them from `terminal`** so all 11 importers and `lib.rs`'s `pub use` are untouched:
+      `engine/{clipboard,doc,embed,input,keys,mod,pointer,scroll}.rs`, `menu.rs`, `native.rs`,
+      `text_input.rs`
+- [ ] verify `text_input.rs`'s tests still resolve `crate::terminal::Mods` and `KeyKind` (:1345-1351)
+- [ ] note in the commit that a re-export shim is the expected diff, so Task 14's unchanged-check
+      does not read it as a violation
+- [ ] write tests asserting each re-exported path still resolves (a compile-level test module)
 - [ ] run tests — must pass before Task 4
 
-### Task 4: agwinterm control-pipe client
+### Task 4: The backend seam — gate the tty code, keep the decoder
 
-- [ ] implement a Rust client for the agwinterm control pipe: connect to the pipe named by
-      `%AGWINTERM_PIPE%`, write one JSON request per line, read the
-      `{"ok":true,"result":...}` / `{"ok":false,"error":...}` envelope back
-- [ ] target the session named by `%AGWINTERM_SESSION_ID%` rather than `"active"`, so a frame can
-      never land in a pane the user switched to
-- [ ] detect the host: absent `AGWINTERM_ENABLED`, fail with a clear message naming what is required
-      instead of producing a blank pane
-- [ ] handle a closed or unavailable pipe as a recoverable error with reconnect, not a panic
-- [ ] write tests against a real named-pipe server fixture: request/response round-trip, an error
-      envelope, a server that closes mid-request, and a server that never accepts
-- [ ] write tests for host detection with the env vars present and absent
+- [ ] define `TerminalBackend` covering the **24 public methods** of `impl Terminal`
+      (`terminal.rs:336-1061`): `new`, `open`, `reports_color_scheme`, `relayed`, `kitty_keyboard`,
+      `set_key_event_types`, `draw`, `read_event`, `poll_event`, `waker`, `watch_resize`, `size`,
+      `reports_pixel_mouse`, `frames_are_inline`, `forget_cell_size`, `cell_size`, `query_colors`,
+      `request_colors`, `set_pointer_shape`, `set_clipboard`, `request_clipboard`,
+      `clipboard_data_supported`, `request_clipboard_types`, `request_clipboard_data`
+- [ ] the five clipboard methods are **not optional** — `engine/clipboard.rs` takes `&mut Terminal`
+      at `:96,:121,:157,:181,:220`. They are OSC-52-shaped and return `io::Result`, so they trait
+      cleanly, but they must be on the trait [triage: major, revision 1 omitted clipboard entirely]
+- [ ] derive the trait from existing callers, not from a fresh design
+- [ ] **`#[cfg(unix)]` covers the tty and frame-transport code only (lines 4, 193–1250).
+      Lines 1251–1909 — the VT decoder — and its `#[cfg(test)] mod tests` at 1911 stay
+      unconditional.** Gating the module wholesale strands 659 lines of portable code and 27 tests
+      that Task 5 needs. [triage: major]
+- [ ] add a `#[cfg(windows)]` stub returning "unimplemented" for every method
+- [ ] `#[cfg(unix)]`-gate `ghostty.rs`; record `herdr.rs` as deferred to Task 13
+- [ ] verify `cargo check --workspace` is clean on Windows — the task's real deliverable
+- [ ] verify the ~197 inherited tests in keep-unchanged modules now **run and pass on Windows**;
+      record the count, since it is the regression net for every task after this
+- [ ] write tests for the trait contract against a fake backend: event ordering, size reporting,
+      raw-mode enter/leave pairing, clipboard request/response
 - [ ] run tests — must pass before Task 5
 
-### Task 5: File-based frame output (bring-up path)
+### Task 5: Windows console input
 
-- [ ] implement the output half of the Windows backend using the **existing** `image.frame` command:
-      encode the composited frame to PNG, write it to a temp path, and publish it via the control
-      pipe with `cols`/`rows` set to the pane's cell span so it scales to the grid
-- [ ] reuse ids across frames so agwinterm's content-signature cache behaves as designed
-- [ ] clean up temp files, and survive a frame whose file write fails
-- [ ] keep this path permanently as the fallback and as the thing the shm path is diffed against —
-      it is not throwaway scaffolding
-- [ ] write tests for cell-span computation from pixel size and cell metrics, including a pane too
-      small to place into
-- [ ] write tests for the publish path against the named-pipe fixture from Task 4
+- [ ] implement the input half of the Windows backend, **in the process Task 2 chose**
+- [ ] enable VT input with `SetConsoleMode` (`ENABLE_VIRTUAL_TERMINAL_INPUT`, line and echo input
+      off), restoring the prior mode on exit **including on panic**
+- [ ] **reuse the existing decoder at `terminal.rs:1251-1909` — do not write a second one.** It
+      already handles kitty CSI-u, SGR mouse, OSC color and incomplete tails; its
+      `parse_event_consumes_one_event_and_reports_incomplete_tails` test (:2144) is exactly the
+      split-across-two-reads case
+- [ ] handle resize from the console screen buffer, since there is no `SIGWINCH`
+- [ ] write tests only for what is genuinely new — the Windows read loop, mode set/restore, and
+      resize — rather than re-testing the inherited parser
+- [ ] write tests for raw-mode restoration on the normal and panicking exit paths
 - [ ] run tests — must pass before Task 6
 
-### Task 6: `pixel-node` on Windows
+### Task 6: agwinterm control-pipe client, and where cell metrics come from
 
-- [ ] make `pixel-node` build on Windows: the `Owned { bgra, width, height }` variant of
-      `SurfacePixels` already exists and is the Windows path
-- [ ] give `draw_frame`'s match a Windows-valid arm set, and confirm `surface.rs` has no
-      macOS/linux-only variant left unguarded
-- [ ] confirm the napi module loads under Node v22 on Windows
-- [ ] write tests for `draw_frame` over the `Owned` variant, including a stride wider than the width
-      and a zero-area damage rect
+- [ ] implement a Rust client for the control pipe: connect to `%AGWINTERM_PIPE%`, one JSON request
+      per line, read the `{"ok":true,"result":...}` / `{"ok":false,"error":...}` envelope
+- [ ] target `%AGWINTERM_SESSION_ID%`, never `"active"` — a frame must not land in a pane the user
+      switched to
+- [ ] absent `AGWINTERM_ENABLED`, fail with a message naming what is required rather than producing
+      a blank pane
+- [ ] handle a closed pipe as recoverable with reconnect, not a panic
+- [ ] **decide and record where cell pixel metrics come from before Task 7 needs them.** Neither of
+      `pixel-core`'s mechanisms works here: `\x1b[16t` hits agwinterm's `csi_dispatch`
+      (`emulator.rs:964-1045`) which has no `t` arm, and `tcgetwinsize`'s `ws_xpixel` has no Windows
+      equivalent. No control verb and no `AGWINTERM_*` variable carries them. The options are a new
+      agwinterm verb, a config value, or "render at a fixed resolution and let `cols`/`rows` scale
+      it". **Do not let `terminal.rs:840-843`'s hardcoded `(16, 32)` fallback stand as the answer** —
+      it is a silent wrong guess and produces wrong click targets. [triage: major]
+- [ ] if the choice is a host change, open it in the agwinterm plan and record the dependency here
+- [ ] write tests against a real named-pipe server fixture: round-trip, error envelope, server closes
+      mid-request, server never accepts
+- [ ] write tests for host detection with the env vars present and absent
 - [ ] run tests — must pass before Task 7
 
-### Task 7: Electron offscreen capture on stock Electron
+### Task 7: File-based frame output (bring-up path)
 
-- [ ] add a Windows branch to `offscreenPreferences` in `browser/src/page/offscreen.ts` returning
-      `{ useSharedTexture: false, deviceScaleFactor }` — no shared memory, no patched build
-- [ ] make `initOffscreenMode` report `bitmap` on Windows without throwing
-- [ ] confirm `presentPaint` falls through to `presentBitmap` and that `BitmapPresenter`'s coalescing
-      is what throttles frame delivery
-- [ ] set the frame rate through the existing `frame-rate.ts` path rather than a new knob
-- [ ] write tests for `offscreenPreferences` per platform
-- [ ] write tests for `presentPaint` selecting the bitmap path when no texture and no shm frame are
-      present, and for a zero-area image being rejected
+- [ ] implement the output half using the **existing** `image.frame`, publishing with `cols`/`rows`
+      set to the pane's cell span
+- [ ] **write each frame to a unique path, or write-then-atomically-rename.** Do not reuse one path.
+      agwinterm's phase 1 does `ContentSignature(path)` then `File.ReadAllBytes(path)` synchronously
+      while a free-running producer is already writing the next frame: `ReadAllBytes` either hits a
+      sharing violation — swallowed by the bare `catch { data = null; }` at `ControlServer.cs:458`,
+      silently re-placing the stale image — or returns a partial PNG the decoder then fails on.
+      [triage: major]
+- [ ] **drop the id-reuse-for-cache rationale.** `ContentSignature` is
+      `mtime ^ (length<<1) ^ hash(path)` and never reads bytes. Every browser frame differs, so the
+      cache never skips; worse, two consecutive frames of equal PNG length within the filesystem's
+      timestamp granularity produce the *same* signature and the new frame is silently dropped.
+      [triage: major]
+- [ ] clean up the resulting file churn, and survive a failed frame write
+- [ ] keep this path permanently as the fallback and as the baseline the shm path is diffed against
+- [ ] write tests for cell-span computation, including a pane too small to place into
+- [ ] write tests for unique-path generation and cleanup under sustained frame production
+- [ ] write tests for the publish path against the Task 6 pipe fixture
 - [ ] run tests — must pass before Task 8
 
-### Task 8: Milestone — a page on screen
+### Task 8: `pixel-node` on Windows
 
-- [ ] wire the pieces: launch Electron OSR, composite through `pixel-core`, publish through the
-      file-based path, into a Debug agwinterm pane
-- [ ] load a static page and confirm it is legibly on screen at the right size and position
-- [ ] confirm the pane still behaves as a terminal around the image (scroll, resize, switch away and
-      back)
-- [ ] measure and record the achieved frame rate and where the time goes, in
-      `docs/design/02-frame-budget.md` — this number is the case for the shm path
-- [ ] fix whatever this reveals before continuing; record surprises as ➕ or ⚠️ items
-- [ ] write tests for the startup sequence's failure modes: no agwinterm, pane too small, Electron
-      failing to launch
+- [ ] **build the native dependencies under MSVC first**: `openh264` with the `source` feature
+      compiles C++ via a build script, and seven tree-sitter grammars build C. Whether they compile
+      under MSVC is unchecked, and a toolchain failure here should surface as its own finding rather
+      than as a confusing napi error. [triage: immaterial-but-actionable]
+- [ ] make `pixel-node` build: `SurfacePixels::Owned { bgra, width, height }` is ungated and is the
+      Windows path — on Windows the enum has exactly one variant. Note the `Owned` path is *tuned*,
+      not vestigial: `SurfaceMailbox::submit` (`surface.rs:53-58`) recycles the dropped frame's
+      `Vec<u8>`, and `BitmapPresenter` unions damage across coalesced frames
+- [ ] give `draw_frame`'s match a Windows-valid arm set
+- [ ] **fix the napi build script's hardcoded `.dylib`/`.so`** so it finds the Windows `.dll`
+      artifact [triage: minor]
+- [ ] confirm the napi module loads under Node v22 on Windows
+- [ ] write tests for `draw_frame` over `Owned`, including a stride wider than the width and a
+      zero-area damage rect
 - [ ] run tests — must pass before Task 9
 
-### Task 9: Interactive input
+### Task 9: Electron capture and the launcher
 
-- [ ] route decoded keyboard and mouse events into Chromium via the existing `browser/src/page/input.ts`
-      path, translating from the terminal's cell coordinates to page pixels
-- [ ] verify the translation accounts for `deviceScaleFactor` and the pane's cell metrics, since an
-      off-by-one cell is a wrong click target
-- [ ] confirm the existing keybindings (`browser/src/session/keybindings.ts`) resolve sensibly on
-      Windows, mapping Cmd-based bindings to Ctrl
-- [ ] write tests for cell→pixel translation including edge cells and a scaled display
-- [ ] write tests for modifier mapping and for a mouse drag sequence producing the expected page events
+Moved ahead of the milestone: revision 1 put the launcher in Task 11, three tasks *after* the
+milestone that needs it. [triage: critical]
+
+- [ ] add a Windows branch to `offscreenPreferences` (`browser/src/page/offscreen.ts`) returning
+      `{ useSharedTexture: false, deviceScaleFactor }`, and make `initOffscreenMode` report `bitmap`
+      on Windows without throwing. **Check first whether the existing non-darwin branch already does
+      this** — if so, say that in the plan and skip it rather than adding dead code [triage: minor]
+- [ ] confirm `presentPaint` falls through to `presentBitmap` and that `BitmapPresenter` throttles
+- [ ] **port the launch path out of `cli/src/main.ts`**: `:109` builds
+      `["/bin/sh", "-c", line]`, which does not exist on Windows; `:65-68` sets
+      `ELECTRON_DEV_BIN = ["electron"]` for every non-darwin platform, but the Windows artifact is
+      `electron.exe`, so the `fs.existsSync` guard at `:80-86` fails and reports
+      `"missing … — build the browser first"` — the wrong diagnosis; `:105-108` applies POSIX
+      single-quote escaping and `2>>` redirection
+- [ ] spawn without a shell, and resolve the binary with the `.exe` suffix
+- [ ] leave the registry, `ssh`, `sandbox` and `upgrade` surface to Task 13
+- [ ] write tests for `offscreenPreferences` per platform
+- [ ] write tests for `presentPaint` selecting the bitmap path, and rejecting a zero-area image
+- [ ] write tests for binary resolution and argument construction on Windows
 - [ ] run tests — must pass before Task 10
 
-### Task 10: Shared-memory fast path
+### Task 10: Milestone — a page on screen
 
-- [ ] **precondition**: `agwinterm/docs/specs/image-frameshm.md` exists and the verb is available on
-      the Debug instance. If not, stop and report rather than guessing the layout.
-- [ ] implement the producer side: create the named mapping, write BGRA into the inactive slot,
-      publish by bumping the ready sequence, and send `image.frameshm`
-- [ ] carry BGRA end to end — no PNG encode, no swizzle, no temp file
-- [ ] keep the file-based path selectable by env var, and fall back to it automatically when
-      `image.frameshm` is unavailable, so an older agwinterm still works
-- [ ] release the mapping on shutdown, and ensure an abnormal exit cannot leave the terminal reading
-      a stale slot
-- [ ] write tests for slot alternation and sequence monotonicity
-- [ ] write tests for the fallback triggering on an `{"ok":false,"error":"unknown command..."}` reply
-- [ ] write tests for the producer surviving the consumer disappearing
-- [ ] re-measure the frame budget and update `docs/design/02-frame-budget.md` with the comparison
+Everything this needs now exists: install (1), process model (2), engine (3–5), transport (6–7),
+napi (8), launcher (9). It needs **no agwinterm change** — `image.frame` already ships every
+capability it uses, and a static page is precisely the workload it is in production for. [triage: critical, confirmed]
+
+- [ ] launch Electron OSR, composite through `pixel-core`, publish through the file-based path, into
+      a Debug agwinterm pane
+- [ ] load a static page; confirm it is legibly on screen at the right size and position
+- [ ] confirm the pane still behaves as a terminal around the image (scroll, resize, switch away)
+- [ ] measure and record the frame budget in `docs/design/02-frame-budget.md`: PNG encode, file
+      write, agwinterm's read, its async PNG decode. **This number is the case for Task 12** — and
+      if a single static page takes seconds to appear, that is a finding, not a milestone
+- [ ] fix what this reveals before continuing; record surprises as ➕ or ⚠️
+- [ ] write tests for the startup failure modes: no agwinterm, pane too small, Electron fails to launch
 - [ ] run tests — must pass before Task 11
 
-### Task 11: Port the CLI
+### Task 11: Interactive input
 
-- [ ] port `cli/src/` entry points: `main.ts`, `control.ts`, `instances.ts`, `registry.ts`, `ls.ts`,
-      `action.ts` — path handling, the instance registry location, and process discovery
-- [ ] use Windows-appropriate application data locations rather than unix conventions
-- [ ] `sandbox.ts` is apparmor-specific: stub it with an explicit "not supported on Windows" rather
-      than silently pretending a sandbox is in place
-- [ ] `ssh.ts` and `upgrade.ts`: decide per command whether to port, stub or drop, and record the
-      decision — do not leave a command that appears to work but does not
-- [ ] write tests for path and registry resolution on Windows
-- [ ] write tests for each stubbed command reporting unsupported clearly
+- [ ] route decoded keyboard and mouse events into Chromium via `browser/src/page/input.ts`
+- [ ] translate cell coordinates to page pixels, accounting for `deviceScaleFactor` and the metrics
+      decision from Task 6
+- [ ] **expect `reports_pixel_mouse()` to be false** and verify the consequences are the documented
+      ceiling rather than a bug: `engine/mod.rs:352` sets the flag, `engine/pointer.rs:61` gates
+      `let located = self.pixel_mouse.then_some(point)` so hover and pairing get no position, and
+      `engine/scroll.rs:192` gates `wants_cursor`
+- [ ] compare against the Task 1 ConPTY probe: if CSI-u forms did not survive, that is the cause
+- [ ] map Cmd-based bindings (`browser/src/session/keybindings.ts`) to Ctrl
+- [ ] write tests for cell→pixel translation including edge cells and a scaled display
+- [ ] write tests for modifier mapping and a drag sequence producing the expected page events
 - [ ] run tests — must pass before Task 12
 
-### Task 12: Verify acceptance criteria
+### Task 12: Shared-memory fast path
+
+- [ ] **precondition**: `agwinterm/docs/specs/image-frameshm.md` exists **and states the literal
+      `Local\` name prefix and the producer slot-reuse invariant**. The spec existing is not enough —
+      agwinterm's own Task 6 writes its throughput number into the same file, so it is authoritative
+      from Task 1 but incomplete until Task 6. If either field is missing, stop and report.
+- [ ] implement the producer: create the **named** mapping (never a raw `HANDLE` — a Win32 handle is
+      process-local and meaningless in the consumer without `DuplicateHandle`), write BGRA into the
+      inactive slot, publish by bumping `ready`, send `image.frameshm`
+- [ ] **honour the producer invariant**: do not begin filling a slot until the reply for the frame
+      two back has returned. Two slots are sufficient *only* because the control pipe is
+      request/response; the two-slot alternation alone does not carry the no-tearing claim
+      [triage: major]
+- [ ] carry BGRA end to end — no PNG encode, no swizzle, no temp file
+- [ ] keep the file path selectable by env var and fall back automatically when the verb is absent —
+      the reply is literally `{"ok":false,"error":"unknown command '...'"}` (`ControlServer.cs:250`)
+- [ ] release the mapping on shutdown; an abnormal exit must not leave a stale slot readable
+- [ ] write tests for slot alternation, sequence monotonicity, and **a producer publishing faster
+      than the consumer drains**
+- [ ] write tests for the fallback triggering on the unknown-command reply
+- [ ] write tests for the producer surviving the consumer disappearing
+- [ ] re-measure and update `docs/design/02-frame-budget.md` with the comparison
+- [ ] run tests — must pass before Task 13
+
+### Task 13: CLI, and the two Unix-socket protocols
+
+Larger than revision 1's "port the CLI": upstream has **two** socket protocols, not one, and their
+endpoint strings are persisted and consumed across four CLI modules. [triage: major]
+
+- [ ] port both to named pipes behind **one shared endpoint abstraction**: the daemon socket
+      (`store/src/paths.ts:46-48`, `browser/src/daemon.ts:38-39`) and the per-browser socket
+      (`browser/src/registry.ts:52-57`), both currently filesystem paths deleted with `fs.rmSync`
+- [ ] update the persisted endpoint column (`store/src/schema.ts:7`) and its four consumers —
+      `cli/src/{main,control,instances,action}.ts`
+- [ ] cover stale-endpoint cleanup, which has no `fs.rmSync` analogue for named pipes
+- [ ] port `registry.ts`, `ls.ts` and application-data locations to Windows conventions
+- [ ] `sandbox.ts` is apparmor-specific: stub it with an explicit "not supported on Windows" rather
+      than silently pretending a sandbox is in place
+- [ ] `ssh.ts`, `upgrade.ts`: port, stub or drop per command, and record the decision — do not leave
+      a command that appears to work but does not
+- [ ] port `herdr.rs` to named pipes, or record it as permanently disabled on Windows with a reason
+- [ ] **`--split` is out of scope unless agwinterm gains a matching verb.** `pixel-terminals` has no
+      agwinterm detector, and agwinterm's `session.split` takes an operation but not a command
+      (`ControlServer.cs:134-135,163`), so upstream's `--split` semantics cannot be met without a
+      further host change. Record it as unsupported. [triage: major]
+- [ ] write tests for path, endpoint and registry resolution on Windows
+- [ ] write tests for stale-endpoint cleanup
+- [ ] write tests for each stubbed command reporting unsupported clearly
+- [ ] run tests — must pass before Task 14
+
+### Task 14: Verify acceptance criteria
 
 - [ ] verify every requirement in the Overview is implemented
-- [ ] verify the port runs with no WSL and no patched Electron anywhere in the dependency chain
-- [ ] verify the file-based fallback still works with `image.frameshm` disabled
+- [ ] verify no WSL and no patched Electron anywhere in the dependency chain — including that
+      `browser/package.json` has no `postinstall` and no fork mirror appears in the lockfile
+- [ ] verify the file-based fallback works with `image.frameshm` disabled
 - [ ] verify a killed browser process leaves the pane usable as a terminal
-- [ ] verify the 19 "keep unchanged" modules are in fact unchanged (`git diff` against the vendored
-      baseline); justify or revert any that are not
-- [ ] run the full test suite: `cargo nextest run --workspace` and `node --test`
-- [ ] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check` —
-      all issues fixed
-- [ ] verify test coverage meets the project standard
+- [ ] **verify the 43 keep-unchanged files are unchanged** (`git diff` against the vendored baseline)
+      — all 46 `pixel-core` source files including the five subdirectories, not the 19 revision 1
+      named. The Task 3 re-export shim is the one expected diff. [triage: major]
+- [ ] verify the inherited ~197 tests still pass
+- [ ] run `cargo nextest run --workspace` and `node --test`
+- [ ] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
+- [ ] verify coverage meets the project standard
 
-### Task 13: [Final] Update documentation
+### Task 15: [Final] Update documentation
 
 - [ ] update `README.md` status, install and usage for Windows
-- [ ] update `docs/design/00-port-brief.md` where implementation diverged from the brief — the brief
-      was already corrected once by measurement and should stay honest
-- [ ] document the two frame transports, when each is used, and how to force either
-- [ ] record what was dropped (`ghostty.rs`, the Swift helper, apparmor sandboxing) and why, so the
-      absences read as decisions rather than oversights
+- [ ] update `docs/design/00-port-brief.md` where implementation diverged — the brief has been
+      corrected twice by evidence and should stay honest
+- [ ] document the two frame transports, when each is used, how to force either
+- [ ] record what was dropped (`ghostty.rs`, the Swift helper, apparmor sandboxing, `--split`) and
+      why, so absences read as decisions
+- [ ] record the accepted ceilings (cell-resolution pointer, cell metrics) and what would lift them
 
 ## Technical Details
 
 **The seam.** `Surface.present({ bgra, width, height, damage })` is where upstream's browser hands
 pixels to the engine, and it is unchanged by this port. Everything above it — Electron, React chrome,
-tabs, modals — is upstream code running as-is. Everything below it is what gets replaced.
+tabs, modals — is upstream code running as-is. Everything below it is replaced.
 
 **Why the terminal never sees an escape sequence.** ConPTY strips APC, so the Windows backend does
-not write graphics to stdout at all. Frames leave through a side channel — the agwinterm control
-pipe — while the pane's normal text stream stays a normal text stream. This is why the port targets
-agwinterm specifically rather than "Windows terminals".
+not write graphics to stdout. Frames leave through the control pipe while the pane's text stream
+stays a normal text stream. This is why the port targets agwinterm specifically.
 
-**Input direction is opposite to output.** Input arrives *through* the pty as ordinary VT sequences
-(agwinterm already emits kitty keyboard and SGR mouse), so it needs no side channel; output cannot
-use the pty at all. The asymmetry is the thing to hold onto when reading the backend.
+**Input direction is opposite to output.** Input arrives *through* the pty as ordinary VT sequences,
+so it needs no side channel; output cannot use the pty at all. Hold onto that asymmetry when reading
+the backend — and note it is also why the daemon architecture breaks on input only (Task 2).
 
 ## Post-Completion
 
-**Manual verification**:
-- Real browsing: a heavy page, a video, a page with a text input, devtools open.
-- Long-running behaviour: memory and handle counts over an extended session.
-- Behaviour when the pane is hidden, since agwinterm gates repaint on visibility.
-- Multiple browser instances in different panes at once.
+**Manual verification**: real browsing (heavy page, video, text input, devtools); long-running memory
+and handle counts; hidden-pane behaviour; multiple instances at once. Pay attention to whether
+cell-resolution pointing is merely awkward or actually disqualifying for real use — that judgement
+decides whether `?1016` becomes a funded agwinterm change.
 
-**External system updates**:
-- agwinterm must ship `image.frameshm` for the fast path; the file-based path is the compatibility
-  floor.
-- Upstream terminal-browser moves independently. Decide and record a re-vendoring policy — the
-  19 unchanged modules are what make re-vendoring cheap, and that only holds if they stay unchanged.
+**External system updates**: agwinterm ships `image.frameshm` (fast path), cell metrics (blocking for
+Task 6) and optionally `?1016`. Upstream terminal-browser moves independently — record a re-vendoring
+policy; the 43 unchanged files are what make re-vendoring cheap, and only if they stay unchanged.
 
-**Deliberately out of scope**:
-- WSL, in any form.
-- A patched Electron build for Windows.
-- Zero-copy D3D11 shared-texture capture. Stock Electron on Windows can expose a shared texture
-  handle and agwinterm renders with Direct2D, so the path exists — but it is a separate effort,
-  justified by the Task 10 measurements or not at all.
-- Terminals other than agwinterm.
+**Deliberately out of scope**: WSL in any form; a patched Electron for Windows; zero-copy D3D11
+shared-texture capture (justified by Task 12's measurements or not at all); terminals other than
+agwinterm; `--split` pane integration.

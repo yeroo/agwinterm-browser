@@ -1,0 +1,705 @@
+{
+  "scope": {
+    "task": "",
+    "run": "",
+    "scope_path": ""
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "facts",
+        "lenses": [
+          "grounding",
+          "precedent"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2764181,
+        "raised": 10,
+        "degraded": false
+      },
+      {
+        "name": "thesis",
+        "lenses": [
+          "thesis"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2205987,
+        "raised": 9,
+        "degraded": false
+      },
+      {
+        "name": "antithesis",
+        "lenses": [
+          "antithesis"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 3910636,
+        "raised": 12,
+        "degraded": false
+      },
+      {
+        "name": "cost",
+        "lenses": [
+          "cost"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 150181,
+        "raised": 5,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "facts-4",
+      "file": "docs/design/00-port-brief.md",
+      "line": 124,
+      "end_line": 124,
+      "severity": "major",
+      "confidence": 90,
+      "title": "The brief and the agwinterm plan disagree on the shm wire shape — `handle` versus a named mapping",
+      "body": "Goal item 4 asks whether the contract between the two repos is actually pinned. On the one field that crosses the process boundary, the two documents say different things.\n\nThe brief — which scope.md:7 calls \"the authoritative design\" and the plan at :8-9 says to read first — shows `{\"cmd\":\"image.frameshm\",\"args\":{\"handle\":..,\"w\":..,\"h\":..}}`. The agwinterm plan defines the args as `{\"images\":[{\"id\",\"name\":\"Local\\\\...\",\"slot\",\"seq\",\"width\",\"height\",\"stride\",\"format\",\"row\",\"col\",\"cols\",\"rows\"}]}` (context/agwinterm-dependency-plan.md:103-105) and opens the mapping with `MemoryMappedFile.OpenExisting(name, MemoryMappedFileRights.Read)` (:126).\n\nThese are not two spellings of one design. A Win32 HANDLE is process-local; its numeric value means nothing in the consumer unless the producer calls `DuplicateHandle` into the consumer's process, which requires knowing the consumer's PID and holding rights to it. The named-mapping shape is the workable one — so the brief is the wrong document here, and it is the document the plan tells the executor to trust. The Windows plan's own Task 10 (:229-232) says \"create the named mapping\", so the plan is right and the brief is stale; a reader who follows the plan's instruction to read the brief first gets the wrong shape.\n\nA second gap in the same area, less certain: agwinterm's reader will \"restrict accepted names to a fixed prefix in the `Local\\` namespace\" (dependency plan :130-131). The Windows plan's Task 10 never mentions a required prefix. If the exact prefix is not written into docs/specs/image-frameshm.md at agwinterm Task 1, the producer picks a name and is rejected at runtime with a validation error that looks like a bug.\n\nEstablished by reading both documents; the DuplicateHandle point is Win32 semantics, not something I tested. Overturned if `handle` in the brief was always shorthand for the mapping name — in which case the fix is a word, but the word matters because ralphex codes against it.",
+      "fix": "Correct the brief's diagram to the named-mapping args before Task 10 starts rather than at Task 13, and add the exact `Local\\` name prefix to the agwinterm Task 1 spec bullet so both sides pin the same string.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "thesis-5",
+      "file": "docs/design/00-port-brief.md",
+      "line": 77,
+      "end_line": 77,
+      "severity": "major",
+      "confidence": 95,
+      "title": "The brief's per-module table covers 22 of pixel-core's 46 source files; the portable surface is 43 of 46",
+      "body": "Verified by direct count and grep. `pixel-core/src` holds 22 top-level `.rs` files and 24 more across five subdirectories — `engine/` (12), `scroll/` (5), `selection/` (2), `surfaces/` (2), `tree/` (3) — for 46 total. `grep -rlnE 'rustix|std::os::unix|termios|libc::|/dev/tty'` across all five subdirectories returns nothing (exit 1). So the accurate figure is 43 of 46 source files with zero unix references, and the brief's table at :70-77 (\"pixel-core's 22 source files\", \"all 19 others | 0\") presents as a complete per-module survey a count that covers less than half the crate.\n\nThe direction of the error is favourable — the bet rests on a larger and more uniform base than claimed — but two plan tasks key off the undercounted framing, and this plan is executed autonomously:\n\n- Task 12 (`docs/plans/20260821-windows-port.md:260-261`) says \"verify the 19 'keep unchanged' modules are in fact unchanged (`git diff` against the vendored baseline)\". Followed literally, that diffs 19 files and leaves 24 unverified.\n- Task 2 (:2nd bullet, \"so the 19 portable modules keep compiling untouched\") enumerates the trait surface as raw mode, size, input events, present, wake — and omits clipboard, which is exactly what the subdirectory callers need.\n\nOn coupling: five `engine/` modules import from `terminal.rs` — `doc.rs:6` (`KeyEvent`), `keys.rs:4` (`KeyEvent`/`KeyKind`), `embed.rs:5` (`Mouse`/`MouseKind`), `input.rs:5` (`Mouse` only — the original finding said `Mouse`/`MouseKind`), and `clipboard.rs:7` (the concrete `Terminal`). The first four are plain data types defined at `terminal.rs:11-121`.\n\nI resolved the overturn condition the original finding left open by reading `engine/clipboard.rs`'s body rather than only its import. It calls five methods on `\u0026mut Terminal`: `request_clipboard()` (:97), `set_clipboard()` (:127, :168), `clipboard_data_supported()` (:194), `request_clipboard_types()` (:195), `request_clipboard_data(mime)` (:242). All are OSC-52-shaped and return `io::Result`; none is inherently fd-shaped. So `clipboard.rs` stays in the portable column and the claim holds in full — but those five methods must be on `TerminalBackend`, and Task 2's enumeration does not name them.",
+      "fix": "Correct the brief's table to 43 of 46 and state that the count covers all five subdirectories; add a row naming the five `engine/` modules that import `terminal.rs` types, with `clipboard.rs`'s five method calls listed, so Task 2's trait surface is derived from a written list rather than rediscovered. Fix Task 12's \"19 modules\" wording to the full 43-file set so the unchanged-baseline diff actually covers it.",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-3",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 120,
+      "end_line": 126,
+      "severity": "major",
+      "confidence": 95,
+      "title": "Task 2 cannot meet its own deliverable: terminal.rs holds the crate's input-type vocabulary, imported by 11 keep-unchanged modules",
+      "body": "Verified directly. All 14 public types are defined in terminal.rs at the lines given (Event:11, KeyEvent:26, KeyKind:49, Mods:57, Key:65, Mouse:94, MouseKind:103, MouseButton:114, TerminalColors:122, ColorSlot:139, WindowSize:175, Terminal:227, Waker:304, SessionEnv:315), in the same 2617-line file as the termios/shm/pipe code.\n\nOne correction to the count: 12 files reference `crate::terminal`, but one of them is herdr.rs, which the plan already classes as \"IPC to port\" rather than keep-unchanged. So 11 keep-unchanged modules break, not 12: engine/clipboard.rs (Terminal), engine/doc.rs (KeyEvent, ~10 Key:: arms), engine/embed.rs (Mouse, MouseKind), engine/input.rs (Mouse), engine/keys.rs (KeyEvent, KeyKind, ~30 Key:: arms), engine/mod.rs, engine/pointer.rs, engine/scroll.rs, menu.rs (TerminalColors), native.rs (Waker), text_input.rs (Key, KeyEvent, Mouse, MouseButton, MouseKind, and Mods/KeyKind in its tests).\n\nOne detail strengthens it: lib.rs declares `mod terminal;` unconditionally and then re-exports `pub use terminal::SessionEnv;` at its own top level, so a bare `#[cfg(unix)]` on the module breaks the crate root too, not only the 11 importers.\n\nThe rest stands as written: the two bullets at :120-121 and :126 are in tension, the lift-the-types alternative collides with the :63-64 constraint and Task 12's git-diff check at :260-261, and the facade route is not named anywhere in the plan.",
+      "fix": "Split Task 2 explicitly: first extract the portable types (Event/Key/KeyEvent/KeyKind/Mods/Mouse/MouseKind/MouseButton/TerminalColors/ColorSlot/WindowSize/Waker/SessionEnv) into their own module and re-export them from `terminal` so the 11 importers and lib.rs's `pub use terminal::SessionEnv` are untouched; only then cfg-gate the unix impl. Say so in the bullet, and note in Task 12 that a re-export shim is the expected diff.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-6",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 169,
+      "end_line": 170,
+      "severity": "major",
+      "confidence": 90,
+      "title": "Nothing sources the cell metrics and pane pixel size that Tasks 5, 8 and 9 all require",
+      "body": "Core claim verified exhaustively. I read the complete control-verb dispatch in ControlServer.cs — the global switch (:140-234) and the session-targeted switch (:241-250) — and no verb reports pane geometry, pixel size or cell metrics. No XTWINOPS handler exists: neither TerminalEmulator.cs nor native/agwinterm-core/src/emulator.rs has a 't'-final CSI path, so `CSI 14t`/`16t`/`18t` is unhandled. Task 3's resize source yields cols and rows only.\n\nTwo corrections. First, `_cellW/_cellH` do not \"live only in Agwinterm.App\" — that project is dead code (absent from Agwinterm.slnx); the live metrics are `_cellW = 8, _cellH = 16` in Agwinterm.Win32/Program.cs:336, pushed into the emulator at Program.Render.cs:356 as `em.CellPixelWidth/CellPixelHeight` (declared ITerminalCore.cs:66, TerminalEmulator.cs:479). The conclusion is unchanged and in fact firmer: the shipping app computes real font metrics and deliberately keeps them host-side, used only for sixel cell-span at TerminalEmulator.cs:502. Nothing publishes them.\n\nSecond, Task 9 is less exposed than the body implies. If the producer picks its own render scale, cell→pixel mouse translation is self-consistent without knowing the terminal's true cell size, so Task 9 is not blocked. The genuine costs are the ones the finding names for Task 5: an unsourced input in a bullet an autonomous executor must satisfy, and resampling blur on browser text when the render resolution does not match the pane's physical pixels. That is enough to keep this at major — Task 5 gates Task 6, and improvising a cell size is exactly the silent-wrong-assumption failure the project's conventions are built around.\n\nThe #98 citation checks out verbatim: DSR/CPR and DA1/DA2 are listed under \"conhost answers these itself\", and the OSC 8 observation is recorded as confirmed live.",
+      "fix": "Decide and record where cell metrics come from — a new control verb, a config value, or \"render at fixed resolution and let cols/rows scale it\" — and add it to Task 4's client surface before Task 5 needs it.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding",
+        "precedent"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-7",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 216,
+      "end_line": 218,
+      "severity": "major",
+      "confidence": 95,
+      "title": "Mouse position is quantised to one character cell; there is no pixel-resolution mouse anywhere",
+      "body": "Substance confirmed, location corrected. MainWindow.xaml.cs is Agwinterm.App, which is dead code — not in Agwinterm.slnx, built by no installer script. The claim holds independently in the shipping app, which is why this is a refinement rather than a rejection: Agwinterm.Win32/Program.Input.cs:442-452 `SendMouse` takes a pixel point and does `col = Clamp((int)((pxX - ox) / cw), ...)`, `row = Clamp((int)((pxY - oy) / ch), ...)` before emitting `\\x1b[\u003cbtn;col+1;row+1M`. Sub-cell position is discarded at the encode site, so it is unrecoverable downstream. `CellAtPx` (:568) does the same integer division for selection. `SendMousePx` (:388) explicitly notes \"cell mapping uses DIP metrics\".\n\n`?1016` SGR-Pixels appears nowhere in src or native. The mode handlers cover 1000/1002/1003/1006 only, in both engines (TerminalEmulator.cs:402-405 and emulator.rs:620-623), so the C# and Rust cores agree and neither offers a pixel-resolution path.\n\nThe consequence stands as written: every click, hover and drag in Chromium snaps to a cell lattice, which no code in this repo can fix, and it bears directly on the Overview's \"working keyboard and mouse\" and the Post-Completion text-input and heavy-page cases at :294.",
+      "fix": "Either accept and record cell-granularity pointing as a known limitation in the brief and Task 9, or add `?1016` SGR-Pixels to agwinterm and to the pinned cross-repo dependency list.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-9",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 58,
+      "end_line": 58,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "Precedent: adding a control verb is a well-worn, repeatedly-accepted shape here, and the conformance constraint is now a CI gate",
+      "body": "Reporting the sweep result so silence is not read as \"no precedent exists\". winterm-browser has no remote and three local commits, so there is no forge history for this repo; I swept agwinterm's, which has one (yeroo/agwinterm) with `gh` available.\n\n**Supports the transport decision.** Adding a verb to the control API is routine and has been accepted repeatedly on its merits: #7 `feat(control): session.rename verb` (MERGED), #8 `feat(control): session.seen, sidebar read-back, version in ping` (MERGED), #68 `feat(control): font can target a specific split/scratch/quick pane` (MERGED), #201 `feat(control): resolve a session target by name, not just by id` (MERGED, 2026-08-20). `image.frame` itself was built for an external consumer, docxy, and is described in docs/agterm-gap-analysis.md:41 as delivered \"out-of-band because ConPTY strips APC\". So `image.frameshm` is not a novel shape for this project — it is the fourth or fifth instance of one it keeps choosing, for a reason that still holds.\n\n**Strengthens the conformance constraint.** PR #195 `test(control-api): make the cross-product contract a gate` was merged 2026-08-18, three days before these plans. The dependency plan's rule at :43-46 — do not add `image.frameshm` to tests/conformance/control-api.json — is therefore not caution about a shared file, it is a recently-enforced CI gate that would fail agliteterm's build. That constraint is correctly stated and should not be softened during execution.\n\n**Does not bear.** Upstream terminal-browser has no recorded position on Windows: README.md, AGENTS.md and CLAUDE.md mention neither Windows, Win32 nor WSL. scripts/install.sh:9-14 refuses non-Darwin/Linux, which the brief cites correctly, but that is a packaging fact rather than a decision anyone argued.\n\nI have anchored this on plan line 58 only because it is the constraint the precedent bears on; the line itself also carries a small error, below.",
+      "fix": "",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "precedent"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "facts-10",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 58,
+      "end_line": 58,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "The shm-contract precondition is stated against Task 9 but consumed at Task 10",
+      "body": "Constraints line 54-58 reads \"If the contract is not ready when Task 9 starts, stop and say so rather than inventing a shape.\" The contract is not consumed at Task 9 — Task 9 is Interactive input (:212-222) and touches no shared memory. The precondition belongs to Task 10, which states it correctly itself at :226-227.\n\nEstablished by reading the two task bodies. It matters only because of how these plans are executed: an autonomous runner reading the Constraints block literally can halt at the top of Task 9 for a missing precondition Task 9 does not need, and \"stop and say so\" is exactly the instruction it would follow. The same sentence also says \"Everything up to and including the first-frame-on-screen milestone uses the file-based image.frame\", which is right and identifies Task 8 as the boundary — so the off-by-one is in the task number alone.\n\nOverturned if Task 9 was meant to be the number after a renumbering, in which case the whole block wants re-reading against the current task list.",
+      "fix": "Change \"when Task 9 starts\" to \"when Task 10 starts\" in the Constraints block.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "thesis-2",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 198,
+      "end_line": 210,
+      "severity": "critical",
+      "confidence": 90,
+      "title": "Task 8 needs no agwinterm change at all, and its workload sits inside the already-shipping envelope of image.frame",
+      "body": "This is your question 3 and question 4, and they answer together. I read agwinterm's `HandleImageFrame` at `src/Agwinterm.Pty/ControlServer.cs:426` in full. Established, not inferred: it takes `args.images[]`; each entry supplies `path`, `row`, `col`, `cols`, `rows` and optional source crop; it computes a `ContentSignature` from mtime/length/path and skips the file read when the id's signature is unchanged; phase 1 reads the bytes off the render lock and phase 2 takes `MutateLocked` only for `ClearPlacements` + `SetImageData(id, KittyFormat.Png, 0, 0, data)` + `PlaceImage(...)`. Every capability Task 5 asks for — cell-span scaling via cols/rows, id reuse against the content cache — is present in shipped code, and the dispatch entry is at line 249 exactly as the brief cites.\n\nWhat follows: Tasks 1–8 have zero dependency on the agwinterm plan. The entire cross-repo contract risk is confined to Task 10, which is an optimization, and the plan already makes Task 10 self-guarding — its precondition bullet says stop rather than guess the layout, and it requires automatic fallback. I checked that the fallback is implementable against a real string rather than an assumed one: `ControlServer.cs:523` is `Err(string error) =\u003e {\"ok\":false,\"error\":\u003cjson\u003e}` and the dispatch default at line 250 is `Err($\"unknown command '{cmd}'\")`. So Task 10's test 'the fallback triggers on an {\"ok\":false,\"error\":\"unknown command...\"} reply' is written against text that exists today.\n\nAnd the milestone's workload is inside the proven envelope. agwinterm's own gap analysis (`docs/agterm-gap-analysis.md:41`) records that the file-based control-pipe path is the shipping Kitty-graphics route, used by docxy; agwinterm's design spec (`docs/superpowers/specs/2026-06-30-agwinterm-design.md:204`) records that docxy emits static images. Task 8's deliverable is 'a static page legibly on screen' — a static image, which is precisely the workload image.frame is already in production for. The performance question that motivates shm is the *animated* case, and Task 8 is correctly placed to produce the measurement that justifies it rather than assuming it.\n\nWhat would overturn it: if a full-pane 1920x1080 PNG encode plus file write plus agwinterm's PNG decode is slow enough that even a single static page takes seconds to appear, Task 8 would stall on a performance problem it was not scoped to solve. I could not measure this — measuring means running a build, which is outside this review — and the number does not exist yet on either side; the agwinterm plan's Task 6 is where it gets produced.",
+      "fix": "",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "thesis-4",
+      "file": "docs/plans/20260821-windows-port.md",
+      "line": 126,
+      "end_line": 126,
+      "severity": "major",
+      "confidence": 85,
+      "title": "Task 2's real deliverable buys a live 200-test tripwire for exactly the failure mode you are afraid of",
+      "body": "The argument holds; the counts are off and are worth correcting since the whole point is the size of the tripwire. Actual figures for pixel-core: 246 `#[test]` functions across 25 source files, not 252 across 29 (the crate has no tests/ or benches/ dir, so src is the whole count). Of those, 33 are in terminal.rs, 12 in herdr.rs and 4 in ghostty.rs, leaving ~197 in the keep-unchanged modules rather than ~203.\n\nEverything structural is verified. lib.rs declares `pub mod ghostty;`, `mod herdr;` and `mod terminal;` unconditionally within its first 26 lines, and additionally re-exports `pub use terminal::SessionEnv;` at crate level — so today the crate cannot compile on Windows and none of those ~197 tests can run, exactly as claimed. Once Task 2 lands the gates they become a per-task regression net enforced by the plan's \"tests must pass before Task N+1\" rule at each of Tasks 2-11, with Task 12's git diff at :260-261 closing the loop.\n\nThe stated caveat is the right one and connects to the terminal.rs finding: text_input.rs's tests use `crate::terminal::Mods` and `KeyKind` (:1345-1351), so a naive module-level cfg gate would take those tests down with it. The net is only ~197 strong if Task 2 takes the re-export-facade route rather than the literal one.",
+      "fix": "",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-2",
+      "file": ".reference/terminal-browser/browser/package.json",
+      "line": 7,
+      "end_line": 7,
+      "severity": "critical",
+      "confidence": 88,
+      "title": "Nothing in the 13 tasks installs or launches Electron on Windows; Task 8 is blocked from both ends",
+      "body": "Goal item 3 asks whether the Task 8 milestone is reachable where it sits. It is not, for two reasons that both sit outside Task 8.\n\n**Task 1 aborts.** `browser/package.json:7` is `\"postinstall\": \"bash ../scripts/fetch-electron.sh\"`. Task 1 (docs/plans/20260821-windows-port.md:102-103) explicitly does *not* copy `scripts/`, naming `fetch-electron.sh`, so the postinstall points at a file that will not exist. Even if it were copied, `scripts/fetch-electron.sh:8-13` is a `uname` case ending `*) echo \"fetch-electron: unsupported platform\"; exit 1` — Git Bash reports `MINGW64_NT`, which falls through to that arm. Either way `pnpm install` — Task 1's own checklist item at :106 — fails on the browser package rather than producing the \"which packages install cleanly\" record it asks for. No task in the plan removes or replaces that postinstall.\n\n**Task 8's launcher is deferred to Task 11.** `cli/src/main.ts` is what spawns Electron (`browser/package.json:10` `\"start\": \"... exec node ../cli/dist/main.js\"`, itself a POSIX shell builtin that fails under cmd.exe). `electronBinary()` at `cli/src/main.ts:74-78` resolves `browser/node_modules/electron/dist/` + `ELECTRON_DEV_BIN`, which is `[\"electron\"]` on every non-darwin platform (:65-68). On Windows that artifact is `electron.exe`, so the `fs.existsSync` guard in `browserLaunchCommand` at :80-86 fails and reports `missing … — build the browser first`, which is the wrong diagnosis. `cli/src/main.ts` is Task 11 (:241-252), three tasks after Task 8 (:198-210).\n\n**Correction to the original aside.** It is *not* true that stock Electron for Windows arrives through an ordinary install once the postinstall is neutralised. `pnpm-workspace.yaml` sets `onlyBuiltDependencies: [better-sqlite3, esbuild]`, and `electron` is not in that list, so under pnpm 10 the `electron` package's own binary-download postinstall is blocked. That is precisely why upstream populates `node_modules/electron/dist` from `fetch-electron.sh` instead. Dropping the fork fetch without also allowing electron's build (or fetching the binary another way) leaves `node_modules/electron/dist` empty and no `electron.exe` anywhere — a worse failure than the one being fixed, and one an executor would hit at Task 8 rather than Task 1.\n\nEstablished by reading; I did not run `pnpm install` (this review is read-only) and node_modules is not present, so the `.exe` suffix is from the electron package's standard Windows layout rather than from disk. The remaining soft spot is whether pnpm runs a workspace project's own postinstall during a recursive install — it does; `onlyBuiltDependencies` gates dependency build scripts, not the project's own lifecycle scripts.",
+      "fix": "Add to Task 1: remove browser/package.json's postinstall AND add `electron` to `onlyBuiltDependencies` in pnpm-workspace.yaml (or fetch the stock binary explicitly), so `pnpm install` both completes and actually lands `electron.exe`. Move the `electronBinary()`/`ELECTRON_DEV_BIN` `.exe` fix out of Task 11 into a task before Task 8, or state in Task 8 that it launches Electron directly and defers the CLI.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "antithesis-5",
+      "file": ".reference/terminal-browser/browser/package.json",
+      "line": 7,
+      "end_line": 7,
+      "severity": "major",
+      "confidence": 88,
+      "title": "Task 1's `pnpm install` runs the patched-Electron fetch script the plan forbids, via bash",
+      "body": "`browser/package.json:7` is `\"postinstall\": \"bash ../scripts/fetch-electron.sh\"`.\n\nTask 1 says to run `pnpm install` and record what installs cleanly, and in the same task says \"do **not** copy `scripts/` wholesale — `install.sh`, `fetch-electron.sh`, `apparmor.sh` and `bundle.sh` are unix/patched-Electron specific\". Those two bullets are in direct conflict: with `scripts/` uncopied, `pnpm install` runs `bash` on a file that is not there; with it copied, it runs the script the Constraints section forbids (\"Do not fetch or build a patched Electron\"). Either way `pnpm install` fails or does the wrong thing, in the very first task, and the plan presents its outcome as a recording exercise rather than a thing that needs fixing.\n\nThis also makes Task 7's premise slightly optimistic. Task 7 correctly identifies `presentBitmap` as a stock-Electron path, but the vendored package still declares `electron: 43.3.0` as a devDependency *and* overrides it at postinstall with the fork. Task 7 never says to delete the postinstall hook, so the fork-fetch stays in the tree as a live install step that Task 12's \"verify ... no patched Electron anywhere in the dependency chain\" would then have to catch at the end.\n\nEstablished by reading the manifest. What would overturn it: if `fetch-electron.sh` is a no-op on unrecognized platforms and exits 0 — but it is not copied, so `bash` fails on a missing file regardless, and `bash` itself is not guaranteed present.",
+      "fix": "Add an explicit Task 1 item: remove the `postinstall` hook from `browser/package.json`, and in the same breath add `electron` to `onlyBuiltDependencies` in `pnpm-workspace.yaml` — pnpm 10 blocks the electron package's own binary download, which is why upstream substituted the fork fetch there. Removing the hook alone yields an install that succeeds and still has no Electron binary. Record it as the first intentional divergence from upstream.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "antithesis-1",
+      "file": ".reference/terminal-browser/cli/src/main.ts",
+      "line": 119,
+      "end_line": 133,
+      "severity": "critical",
+      "confidence": 94,
+      "title": "The engine runs in a detached daemon that opens the client's tty by path — a mechanism with no Windows analogue, and no task addresses it",
+      "body": "Upstream is a daemon/client split, and the daemon reaches the user's terminal by opening a *path*. I traced the whole chain: `cli/src/main.ts:119` `ownTtyPath()` shells out to the unix `tty` command and keeps the result only if it `startsWith(\"/dev/\")`; `main.ts:301-303` refuses to run without it (`\"not running on a tty\"`); the path is sent over a unix socket to the daemon, which at `browser/src/daemon.ts:96-106` rejects any open without a `tty` and passes it into `createSession`; `browser/src/session/session.tsx:315-316` hands it to `createRoot({ tty: this.ctx.tty, ... })`; and `pixel-core/src/terminal.rs:348-349` does `File::options().read(true).write(true).open(tty_path)`. Meanwhile `main.ts:155` spawns the daemon `{ detached: true, stdio: \"ignore\" }` — it has no console of its own by construction.\n\nOn Windows there is no path that names another process's ConPTY. `CONIN$`/`CONOUT$` resolve to the *calling* process's own console, and a detached process has none. `AttachConsole(pid)` is the only handle-across-processes mechanism, it is one-console-per-process, and it attaches to a console the caller does not own.\n\nThis is established. What follows from it is that Task 3's design is placed in the wrong process: it says \"read from the console input handle\" and \"enable VT input with `SetConsoleMode`\", which assumes the engine owns the user's console. In upstream's architecture the engine is the daemon and never does. The output side is accidentally immune — frames leave out-of-band via the control pipe addressed by `AGWINTERM_SESSION_ID`, so it does not need the tty — which is likely why this never surfaced during design. Input has no such escape: nothing in the 13 tasks proposes forwarding stdin from the CLI client to the daemon, hosting the engine in the foreground process instead, or duplicating a console handle across the boundary. An autonomous executor reaching Task 3 has to invent one of those architectures with no brief to work from.\n\nThe proposed overturner is narrower than it looks. `createRoot({tty: null})` is indeed a supported shape (`pixel-react/src/index.ts:262-264` falls back to the stdio bridge, and `session.tsx:313` has a `!this.ctx.tty` branch), but `browser/src/main.tsx:55` calls `runDaemon(cdpPort)` unconditionally — it does not even inspect the `--daemon` argument the CLI passes. There is no foreground mode in the Electron entry point to switch to. So abandoning the daemon model is not a configuration choice; it is a rewrite of the browser process's top level, which makes the case for it being a named task stronger, not weaker.",
+      "fix": "Add a task before Task 3 that decides where the engine process lives on Windows and how console input reaches it — foreground-hosted engine (which means restructuring `browser/src/main.tsx`, currently daemon-only), or client-forwards-stdin-over-IPC. Task 3's console work cannot be specified until that is settled.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "antithesis-2",
+      "file": ".reference/terminal-browser/cli/src/main.ts",
+      "line": 109,
+      "end_line": 109,
+      "severity": "critical",
+      "confidence": 90,
+      "title": "Task 8 cannot launch the browser: the only launcher is the CLI, which Task 11 ports three tasks later",
+      "body": "Task 8's first checkbox is \"launch Electron OSR\". There is exactly one launcher in the tree and it is unported at that point.\n\n`browser/package.json:9` — `\"start\": \"... \u0026\u0026 exec node ../cli/dist/main.js\"`. The CLI is the entry point. `cli/src/main.ts:109` builds the launch command as `return { command: [\"/bin/sh\", \"-c\", line], cwd: browserDir };` — every browser launch goes through `/bin/sh`, which does not exist on Windows. Before that, `main.ts:65-68` sets `ELECTRON_DEV_BIN` to `[\"electron\"]` for every non-darwin platform, and `main.ts:83-86` does `fs.existsSync` on it and calls `fail()` if missing — on Windows the artifact is `electron.exe`, so it fails there first. `main.ts:105-108` also wraps arguments in POSIX single-quote escaping and appends `2\u003e\u003e'...'` shell redirection.\n\nThat work is Task 11 (\"port `cli/src/` entry points: `main.ts`, ...\"). So Task 8 — the milestone the goal names as the most valuable thing to get right — sits three tasks before the code that makes it possible. This is established from the two files; what follows is that an autonomous executor at Task 8 either stalls or silently pulls Task 11's work forward, which makes Task 11's later \"tests pass\" gate meaningless because the code will already be there under a different task's name.\n\nWhat would overturn this: if Task 8 is meant to bypass the CLI and invoke `electron.exe browser/dist/main.js` by hand as throwaway scaffolding. The plan does not say that, and it would still need the daemon-vs-foreground question above answered first.",
+      "fix": "Move the `main.ts` launch path (electron binary resolution, spawn without `/bin/sh`) out of Task 11 and into a task before Task 8, leaving Task 11 with the registry/paths/`ssh`/`sandbox`/`upgrade` surface it also covers.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-7",
+      "file": ".reference/terminal-browser/engine/packages/pixel-react/scripts/build-native.mjs",
+      "line": 9,
+      "end_line": 14,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "The napi build script hardcodes .dylib/.so and will not find the Windows artifact",
+      "body": "`engine/packages/pixel-react/scripts/build-native.mjs:9` is `const library = process.platform === \"darwin\" ? \"libpixel_node.dylib\" : \"libpixel_node.so\";`, and line 14 does `fs.copyFileSync(source, destination)` unguarded. `pixel-node`'s manifest declares `crate-type = [\"cdylib\"]`, which on Windows produces `pixel_node.dll` — no `lib` prefix, different extension. The copy throws ENOENT.\n\nThis sits on the critical path for Task 6 (\"confirm the napi module loads under Node v22 on Windows\") and Task 8 (which needs a built engine), because `pixel-react`'s `build` script is `npm run build:native \u0026\u0026 tsc`, and `browser`'s `start` script runs `build:engine` first. Neither task mentions this file.\n\nThe fix is three lines. The objection is not its size — it is that the plan's Task 6 scopes the Windows work on `pixel-node` entirely to Rust (`SurfacePixels` variants, `draw_frame` match arms), so an executor working that checklist has no reason to look at the JS build script until the build breaks, which is exactly the class of stall that costs a long autonomous run.\n\nEstablished by reading both files. Nothing would overturn it short of the script being replaced during vendoring, which no task proposes.",
+      "fix": "Add a Task 6 item covering `build-native.mjs`: platform-select `pixel_node.dll` on win32 and fail with a named path rather than a raw ENOENT.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "cost-3",
+      "file": ".reference/terminal-browser/engine/packages/pixel-react/scripts/build-native.mjs",
+      "line": 9,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "Windows build and launch plumbing is unbudgeted; the distribution leg is out of scope by design",
+      "body": "[cost] Established: the native build helper treats every non-macOS target as `libpixel_node.so` (`build-native.mjs:9`) while `pixel-node` declares `crate-type = [\"cdylib\"]`, so the copy at :15 cannot find the Windows `pixel_node.dll`; `browser/package.json:7-10` invokes `bash` and the POSIX builtin `exec`; and `cli/src/main.ts:61-109` assumes Unix Electron names, POSIX shell quoting, `/bin/sh` and `2\u003e\u003e` redirection. Task 6's Rust match-arm work therefore cannot by itself produce a loadable `pixel.node`, and no task names the JS build script or the package scripts. That much is a genuine gap in the plan's budget.\n\nThe distribution half does not stand on the same footing. Task 1 states the unix scripts are deliberately unvendored and will be \"ported later, individually, when needed\", the Overview scopes the deliverable to a browser running in a pane rather than an installable artifact, and Task 12 verifies against that Overview. Requiring a reproducible installation before the price is justified imports a success criterion the plan explicitly did not adopt, so the \"ongoing cost of keeping release packaging synchronized\" is not an unbudgeted cost of this plan. Overturned if the acceptance criteria are later widened to include a shippable Windows install.",
+      "fix": "",
+      "sources": [
+        "cost"
+      ],
+      "lenses": [
+        "cost"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "thesis-6",
+      "file": ".reference/terminal-browser/browser/src/page/offscreen.ts",
+      "line": 6,
+      "end_line": 26,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "Task 7's first two bullets already hold on Windows — the branch it adds would be dead code",
+      "body": "Verified against the source. `offscreen.ts:4` makes SHM_FRAMES false off Linux; `offscreenPreferences` tests darwin first (line 9) and otherwise returns `{useSharedTexture:false, useSharedMemory:SHM_FRAMES, deviceScaleFactor}` — on Windows that is `{false, false, dsf}`, which is what Task 7's first bullet asks a new branch to return. `initOffscreenMode` throws only under `darwin \u0026\u0026 !sharedTextures` (line 20) and logs mode `bitmap` on Windows (line 23), satisfying the second bullet.\n\nDownstream is unguarded as claimed: `paint.ts:41-43` falls through to `presentBitmap`, which at line 108 calls `surface.present({bgra: image.toBitmap(), width, height, damage})`; `pixel-react/src/surface.ts:8` declares that union member and line 39 routes it to `engine.updateSurface`. So the Electron half needs no new code.\n\nOne caveat that cuts the other way and is worth keeping: Task 7's proposed branch omits `useSharedMemory` entirely, whereas the existing default passes it as `false` through an `as` cast (line 16) because the key is not in Electron's public offscreen type. If stock Electron were to reject the unknown key rather than ignore it, the branch would not be dead — it would be the fix. That is unverified here, so the rescope should be stated as conditional on the per-platform test actually passing on stock Electron.",
+      "fix": "Rescope Task 7's first two bullets from 'add a Windows branch' / 'make initOffscreenMode report bitmap' to 'assert the existing defaults already resolve to bitmap on Windows and lock that in with the per-platform test'. Keep a branch only if the test shows stock Electron objects to the `useSharedMemory: false` key.",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "thesis-7",
+      "file": ".reference/terminal-browser/scripts/install.sh",
+      "line": 9,
+      "end_line": 16,
+      "severity": "major",
+      "confidence": 85,
+      "title": "Nothing else reaches this place: upstream's own tooling excludes Windows and the patched-Electron mirror has no Windows build",
+      "body": "The case for acting includes what declining costs, and here declining does not mean 'wait for a better route' — I checked whether one exists.\n\nEstablished: `scripts/install.sh:9–16` maps only `Darwin-arm64`, `Linux-x86_64|Linux-amd64` and `Linux-aarch64|Linux-arm64`, and everything else exits 1 with 'terminal-browser does not support …'. `scripts/fetch-electron.sh:9–11` offers the same three platforms and pulls from the `zenbu-labs/electron-releases` mirror at line 15. Independently confirmed by grep: there is no `cfg(…windows…)` anywhere in the engine workspace.\n\nWhat follows: for upstream to reach Windows they would have to build and host a Windows Electron fork they do not currently produce, on top of porting the tty layer — i.e. strictly more work than this plan, which avoids the fork entirely by using the bitmap path. So there is no upstream-will-get-there-eventually option that arrives sooner or cheaper. With WSL ruled out by your framing, the alternative to this plan is not a slower browser in an agwinterm pane; it is no browser in an agwinterm pane.\n\nWhat this unlocks that is otherwise out of reach is specific rather than general: agwinterm's graphics capability is currently exercised by one static-image producer. A Chromium surface in a pane makes the control-pipe image path a general rendering target, and the plan's own out-of-scope note identifies where that leads — stock Electron on Windows can expose a D3D11 shared-texture handle and agwinterm already renders with Direct2D, so a genuine zero-copy path exists behind this work and behind nothing else.\n\nWhat would overturn it: upstream announcing or landing Windows support, which I could not check — this review has no network access, and the context directory contains no upstream issue tracker, release notes or roadmap. My evidence is the vendored tree at `.reference/terminal-browser/` as it stands, and it may be behind upstream's HEAD; `docs/design/UPSTREAM.md`, which would pin the commit, is only created at Task 1.",
+      "fix": "",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "cost-2",
+      "file": ".reference/terminal-browser/store/src/paths.ts",
+      "line": 48,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 97,
+      "title": "Windows requires porting two existing Unix-socket protocols, not only the new control-pipe client",
+      "body": "[cost] Established from `store/src/paths.ts:46-48`, `browser/src/daemon.ts:38-39,66,152-157`, and `browser/src/registry.ts:52-57`: upstream has a daemon Unix-domain socket and a separate per-browser socket, both represented as filesystem paths and deleted with `fs.rmSync`. Their endpoint strings are also stored in the instances database (`store/src/schema.ts:7`) and consumed by `cli/src/main.ts`, `control.ts`, `instances.ts`, and `action.ts`. Porting them to Windows named pipes therefore reaches path policy, two servers, all clients, stale-endpoint cleanup, persisted instance records, and lifecycle tests; it also creates a permanent endpoint-naming contract distinct from the agwinterm frame pipe. The price is warranted if the multiprocess daemon and per-instance CLI-control model are required on Windows. This point is overturned if Task 11 supplies and tests one shared endpoint abstraction covering both protocols, every listed consumer, persistence, and cleanup.",
+      "fix": "",
+      "sources": [
+        "cost"
+      ],
+      "lenses": [
+        "cost"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "cost-4",
+      "file": ".reference/terminal-browser/terminals/src/terminal.ts",
+      "line": 57,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 91,
+      "title": "Preserving CLI pane integration expands the agwinterm-side scope",
+      "body": "[cost] Established: `pixel-terminals` has no agwinterm detector (`terminals/src/terminals/index.ts:15-25`), while its `split` contract requires opening a directional pane and running a supplied command, and `cli/src/main.ts:402-404` depends on that contract. agwinterm's current control API exposes `session.new` with a command but `session.split` accepts only an operation (`../agwinterm/src/Agwinterm.Pty/ControlServer.cs:134-135,163`), so matching upstream `--split` semantics requires either multi-command discovery/targeting orchestration or another agwinterm contract change beyond the `image.frameshm` dependency plan. That adds a host adapter, pane-identity and direction mapping, failure cleanup, and cross-repository tests; it is worth paying only if agent-driven split placement and current-tab browser discovery are part of the Windows product value. This point is overturned by a documented existing agwinterm command sequence that atomically returns the new pane identity and runs the requested command with direction and size semantics.",
+      "fix": "",
+      "sources": [
+        "cost"
+      ],
+      "lenses": [
+        "cost"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "facts-5",
+      "file": ".revmux/tasks/plan-windows-port/01-initial/input/context/agwinterm-dependency-plan.md",
+      "line": 198,
+      "end_line": 203,
+      "severity": "major",
+      "confidence": 70,
+      "title": "The two-slot scheme's stated tear-proof invariant does not follow from the mechanism given",
+      "body": "The plan sets a hard constraint at :47-49 — \"Frames must never tear ... the design must make a torn read impossible, not unlikely\" — and Technical Details at :198-203 claims two slots plus a release/acquire `ready` deliver it: \"A frame in flight is therefore never the frame being read.\"\n\nThat does not follow from what is written. With exactly two slots and no consumer→producer signal, a producer free to run ahead wraps around: consumer reads ready=N and begins copying slot A; producer fills slot B and publishes ready=N+1; producer now needs a slot for frame N+2 and the only other one is A, still being copied. A 1920x1080 BGRA copy is ~8 MB, so the window is not narrow. I grepped every mention of slot/ready/seq/lock/barrier in the plan: nothing adds an acknowledgement.\n\nWhat I have to correct from the original report is that the code makes the safe case likely rather than the tearing case likely. The Windows plan's Task 4 specifies a client that writes one JSON request and reads the reply back, and agwinterm's `HandleImageFrame` (ControlServer.cs:426-438) does its phase-1 pixel copy inline before returning the reply string — so a producer that blocks on each reply cannot reuse a slot the consumer is still reading. The defect is therefore that the invariant rests on an unstated mechanism, not on the one the plan names. That matters because the round-trip per frame is exactly the cost a video-rate fast path invites someone to pipeline away later, and because `docs/specs/image-frameshm.md` — written at Task 1, and the contract winterm-browser codes against — would not record the requirement.",
+      "fix": "In agwinterm Task 1, make the spec state the actual invariant: either that the producer must not reuse a slot until the `image.frameshm` reply for the frame two ago has returned, or raise the slot count (the header already carries one, :100-102) / add a consumer-published `reading` index so a pipelining producer is safe. Either way, correct the Technical Details paragraph so its stated reason matches the mechanism, and decide it before the layout is a published contract.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "facts-8",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/clipboard_image.rs",
+      "line": 88,
+      "end_line": 92,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "clipboard_image.rs compiles clean on Windows and silently rejects every Windows path",
+      "body": "The clipboard half is confirmed and I reproduced the supporting counts. `clipboard_image.rs:88` rejects any path not starting with `/` or `~`, and `:92` resolves `~/` through `std::env::var(\"HOME\")`, which Windows does not set. The 64/2/2 split with 19 zero-hit modules reproduces exactly (`terminal.rs` 64, `herdr.rs` 2, `ghostty.rs` 2), and re-running the same pattern over the 24 additional `.rs` files in `engine/`, `scroll/`, `selection/`, `surfaces/`, `tree/` returns zero hits, so widening the sample does strengthen the claim. The five `include_bytes!` font sites are at the exact lines named and `engine/assets/fonts/` is a real directory, so fontdue carries no system-font tax.\n\nOne correction to the mechanism: `file:///C:/Users/...` is not rejected by the `/`-prefix guard. `strip_prefix(\"file://\")` leaves `/C:/Users/...`, which passes line 88 and instead fails at the `is_file()` check on line 95. The outcome is the same `None`, but the guard named is not the one that fires.\n\n**The throttle instance does not hold and should be dropped.** `throttle.rs:71-73` does return `cfg!(target_os = \"macos\")` as described, but the behaviour is neither silent nor Windows-specific. The single consumer, `engine/mod.rs:565-569`, opens with `if !CpuThrottle::supported() \u0026\u0026 rate \u003e 1.0 { logging::warn(\"engine\", \"cpu throttle is only supported on macOS\"); return; }` — an explicit, logged refusal. The type is inert on Linux in exactly the same way, so this is upstream's shipped behaviour on two of three platforms rather than a porting gap, and nothing in it needs changing or sanctioning against the keep-19 constraint. It is also not frame pacing: `set_rate` clamps to 1.0..50.0 and `run_controller` suspends and resumes worker threads to cap CPU consumption, so its absence on Windows makes the Task 8 frame budget more favourable, not less.\n\nWhat survives is one module in the keep-unchanged 19 that compiles clean and does the wrong thing, which is enough to establish that the zero-hit column is not a sufficient proxy. Note also that four of the five tests in this file construct paths from `std::env::temp_dir()` and feed them back through `image_path_from_paste`, so they fail on Windows — the module's own regression net breaks, which the finding does not mention.",
+      "fix": "Add to Task 1's ➕ findings that `clipboard_image.rs` needs Windows path acceptance and `USERPROFILE`, and that its tests at lines 142-171 fail on Windows as written. Record it as a sanctioned exception to \"keep 19 unchanged\" so Task 12's diff check at :260-261 does not treat it as a violation. Do not record `throttle.rs` — it needs no change.",
+      "sources": [
+        "facts"
+      ],
+      "lenses": [
+        "grounding"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "thesis-1",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/terminal.rs",
+      "line": 1333,
+      "end_line": 1909,
+      "severity": "major",
+      "confidence": 95,
+      "title": "The module the brief writes off as a rewrite is ~25% portable VT decoder, already tested — and it is exactly what Task 3 needs",
+      "body": "Confirmed in full detail; I could not find a fact in this that does not hold.\n\nThe unix hit lines in `terminal.rs` are 4, 193-1250, then nothing until 1956. Line 1910 does open the first `#[cfg(test)] mod tests` (the `mod tests` is at 1911). The `#[cfg(test)]` at line 1332 is not a counterexample — it attributes a single three-line helper `parse_event` at 1333-1335, not a module. So lines 1251-1909 are 659 lines of production code with zero references to rustix, `std::os::unix`, termios, libc or `/dev/tty`, and 659 of the file's 2617 lines is 25% exactly.\n\nAll eight function line numbers are exact: `parse_event_kitty` 1337, `parse_plain_bytes` 1383, `byte_key_event` 1430, `parse_csi` 1452, `parse_kitty_key` 1630, `parse_sgr_mouse` 1771, `parse_kitty_keyboard` 1811, `parse_osc_color` 1860. The finding's own stated overturn condition is resolved rather than left open: I read the signatures of every free function in that range and all take `\u0026[u8]` or `\u0026[u8]`-derived params — `parse_csi(buf: \u0026[u8])`, `parse_sgr_mouse(params: \u0026[u8], press: bool)`, `parse_event_kitty(buf: \u0026[u8], kitty_active: bool)` — with no fd or Termios argument anywhere in 1251-1909.\n\nThe test position holds too. `mod tests` at 1911 is gated only on `#[cfg(test)]`, not on unix, and contains 29 tests plus two helpers (`key`, `key_mods`). `shm_roundtrip` is at 1951 and is the only test in the module carrying rustix calls; `a_frame_file_is_rewritten_in_place_and_removed_on_drop` at 1932 goes through `FrameFile`. The remaining 27 are byte-sequence parser tests, and `parse_event_consumes_one_event_and_reports_incomplete_tails` at 2144 is indeed the split-across-two-reads case Task 3 lists as work to be written. `tty_tests` at 2481 holds four openpty-based tests and is separate.\n\n**Severity lowered to major.** The plan is not blind to this — Task 3 already says \"feed the bytes to the existing VT input decoder rather than writing a second decoder\", so the reuse instruction exists and a ralphex run following the plan literally would not reimplement the parser. What the finding correctly establishes is that the cost line is overstated and the reuse is larger and better-tested than the plan conveys. That is a real correction to make before execution, but it does not put the plan at risk of failing.\n\n**One thing the finding implies but does not state, and which is the sharper risk.** Task 2's bullet \"move the existing unix implementation behind `#[cfg(unix)]`\" applied to `terminal.rs` wholesale would carry the 659-line decoder and its 27 portable tests behind `cfg(unix)` along with the tty code, making them unavailable to the Windows backend Task 3 then has to build. That is the concrete mechanism by which this decoder gets lost, and it is worth naming in the fix.",
+      "fix": "Rewrite Task 3's decode bullet to say the decoder at terminal.rs:1251-1909 is reused rather than written. In Task 2, state explicitly that the `#[cfg(unix)]` gate covers the tty and frame-transport code only and must leave the decoder and its tests unconditional, since gating the whole module strands both. Move the four decoder-test bullets into Task 2 as \"keep these tests running\".",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "thesis-3",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/clipboard_image.rs",
+      "line": 56,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "Both portability risks you named by hand — arboard and fontdue — resolve clean, and the font path has no system dependency at all",
+      "body": "Verified against the manifests in the local registry, and every specific is exact.\n\n`arboard-3.6.1/Cargo.toml` declares `[target.\"cfg(windows)\".dependencies.clipboard-win]` and `[target.\"cfg(windows)\".dependencies.windows-sys]` — a first-class Windows backend. Line 43 is `wayland-data-control = [\"wl-clipboard-rs\"]`, line 45 is `wl-clipboard-rs = [\"dep:wl-clipboard-rs\"]`, and the dependency itself sits under `[target.'cfg(all(unix, not(any(target_os=\"macos\", target_os=\"android\", target_os=\"emscripten\"))))'.dependencies.wl-clipboard-rs]`. Enabling a feature that names a target-gated optional dependency does not build that dependency for a non-matching target, so the workspace's `arboard = { version = \"3.6\", features = [\"wayland-data-control\"] }` at `engine/Cargo.toml:20` pulls nothing extra on Windows. The single call site at `clipboard_image.rs:56` is `arboard::Clipboard::new().ok()?`, degrading to `None`.\n\n`fontdue-0.9.3/Cargo.toml` has no `[target.…]` sections at all — only `hashbrown`, `rayon`, and `ttf-parser` with `default-features = false`.\n\nThe font point is the strongest part and it holds: every font acquisition in `pixel-core` is `include_bytes!(\"../../../assets/fonts/JetBrainsMono-Regular.ttf\")` at `menu.rs:356`, `paint.rs:775`, `text_input.rs:917`, `wrap.rs:139` and `tree/tests.rs:8`, and a repo-wide grep for fontconfig, CoreText, DirectWrite, font_kit and system-font enumeration returns nothing. `engine/assets/fonts/` is a real directory holding the ttf.\n\n**Severity lowered to minor.** This is accurate and it does answer a question the goal posed by name, which is why I am not dismissing it — but it confirms rather than changes the plan's existing position that the text stack ports for free, and the reviewer proposes no action. Major implies something needs attention here; nothing does.",
+      "fix": "",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "antithesis-3",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/terminal.rs",
+      "line": 869,
+      "end_line": 889,
+      "severity": "major",
+      "confidence": 93,
+      "title": "Nothing supplies cell pixel metrics on Windows — both of pixel-core's mechanisms are unavailable against agwinterm",
+      "body": "Confirmed on both halves, and the reviewer's own escape hatch closes.\n\nOn the pixel-core side every line reference is exact. `terminal.rs:869-889` `cell_size()` tries `self.size()?.cell_size()` when relayed, then writes `b\"\\x1b[16t\"` at :880 and waits 300ms via `read_report`, setting `cell_query_unsupported` on timeout, then falls back to `self.size()?.cell_size()` at :888. `size()` at :847-855 is `retry_intr(|| termios::tcgetwinsize(\u0026self.io.read_fd()))` reading `ws_xpixel`/`ws_ypixel`, which has no `GetConsoleScreenBufferInfo` equivalent. `herdr.rs:260` does carry `cell_width_px`/`cell_height_px` in the info payload, confirming that upstream's non-tty answer is to ask the terminal over a side channel.\n\nOn the agwinterm side I read the full `csi_dispatch` at `emulator.rs:964-1045`. The match arms are exactly `H f A B C D G d J K X m r L M @ P S T q`; the `?`-prefix branch handles only `h`, `l` and DECRQM `?2026$p`; everything else, `t` included, falls to `HostAction::Unhandled`. There is no XTWINOPS.\n\n**Confidence raised because I ran the search the reviewer flagged as narrow.** Rather than four identifier spellings in one file, I searched the whole `Agwinterm.Pty` layer for any cell-width/height spelling (nothing), every response field matching cols/rows/width/height/px/dpi/scale in `ControlServer.cs` (one hit, `:445`, and it is `cols`/`rows` read as *input* to `image.frame`), the full control verb list (no pane-geometry or pane-info verb), and all 17 `AGWINTERM_*` environment variable spellings in the repo. The session env dictionary at `MainWindow.xaml.cs:227-234` sets `AGWINTERM`, `AGWINTERM_ENABLED`, `AGWINTERM_PIPE`, `AGWINTERM_SESSION_ID`, `AGWINTERM_WORKSPACE_ID`, `AGWINTERM_WINDOW_ID` and nothing dimensional. `AGWINTERM_DPI_OVERRIDE` exists elsewhere in the codebase but is a DPI knob, not cell metrics, and is not exported to sessions. So no verb and no environment variable carries cell metrics.\n\nWorth adding: `terminal.rs:840-843` already falls back to a hardcoded `.unwrap_or((16, 32))` when cell size is unknown. That is not a mitigation — a hardcoded guess against agwinterm's real `_cellW`/`_cellH` is precisely the wrong-click-target failure Task 9 names at :219, and it fails silently rather than reporting that metrics are unavailable.",
+      "fix": "Either add a cell-metrics field to an agwinterm control response (a third repo-crossing contract, so it belongs in the agwinterm plan next to `image.frameshm`), or add `CSI 16 t` to agwinterm's CSI dispatch. Pin it before Task 5, not during it.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "cost-1",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/terminal.rs",
+      "line": 227,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 94,
+      "title": "The proposed backend seam is much broader than five platform operations",
+      "body": "The central claim is exact. Counting public methods in `impl Terminal` at `terminal.rs:336-1061` gives precisely 24: `new`, `open`, `reports_color_scheme`, `relayed`, `kitty_keyboard`, `set_key_event_types`, `draw`, `read_event`, `poll_event`, `waker`, `watch_resize`, `size`, `reports_pixel_mouse`, `frames_are_inline`, `forget_cell_size`, `cell_size`, `query_colors`, `request_colors`, `set_pointer_shape`, `set_clipboard`, `request_clipboard`, `clipboard_data_supported`, `request_clipboard_types`, `request_clipboard_data`. That spans wakeups, event polling, resizing, rendering, capability probes, colors, pointer shape and clipboard, exactly as described, and it is far wider than the five operations Task 2's first bullet enumerates.\n\n**The caller list needs correcting.** Three of the five hold: `engine/mod.rs` calls the concrete API; `engine/clipboard.rs` takes `\u0026mut Terminal` in five signatures (`:96`, `:121`, `:157`, `:181`, `:220`); `engine/doc.rs` calls `self.term.set_clipboard(\u0026text)` at `:16`. The other two do not. `native.rs:7` is only `use crate::terminal::Waker;`, and `pixel-node/src/lib.rs:26` imports `TerminalColors` and `Waker` from `pixel_core` — both consume *types* that happen to be defined in `terminal.rs`, not methods on `Terminal`. A reader sent to `native.rs` looking for `Terminal` calls will find none.\n\nThat correction does not weaken the conclusion; if anything it widens it. The seam Task 2 has to preserve is not only 24 methods but also a type surface — `Waker`, `TerminalColors`, `Key`, `KeyEvent` — that leaves `terminal.rs` and reaches `native.rs`, `engine/doc.rs` and the napi crate. Any `#[cfg(unix)]` gate over the module has to keep those types resolvable on Windows or those callers stop compiling, which is the same problem the finding names, arriving through types rather than methods.",
+      "fix": "",
+      "sources": [
+        "cost"
+      ],
+      "lenses": [
+        "cost"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "cost-5",
+      "file": ".reference/terminal-browser/engine/crates/pixel-core/src/clipboard_image.rs",
+      "line": 88,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 94,
+      "title": "One supposedly unchanged pixel-core module needs Windows path work",
+      "body": "[cost] Established from `clipboard_image.rs:78-98`: pasted image paths are accepted only when they begin with `/` or `~`, and home expansion reads `HOME`; a normal `C:\\...` path is rejected before `PathBuf` is consulted. The existing tests at lines 142-171 also feed native temporary paths back through this parser, so this module and its tests cannot remain unchanged on Windows. The reach is small—one parser plus platform cases—and does not materially undermine retaining `pixel-core`; supporting pasted local images is enough value to justify it. This point is overturned if every Windows paste reaching `Engine` is independently normalized to a slash-prefixed file URL before `image_path_from_paste` is called.",
+      "fix": "",
+      "sources": [
+        "cost"
+      ],
+      "lenses": [
+        "cost"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "thesis-9",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 80,
+      "title": "The agwinterm half is chartered by agwinterm's own prior design and keeps its justification if winterm-browser stalls",
+      "body": "On whether the two-repo split is right: the usual objection to splitting work across repos is that one half is dead weight without the other. That does not apply here, and the evidence predates this port.\n\nEstablished from agwinterm's own documents: `docs/agterm-gap-analysis.md:41` marks 'Image protocols / graphics' as **Partial** and describes only the out-of-band file path; `docs/superpowers/specs/2026-06-30-agwinterm-design.md:204` records that animation and video-like Kitty frames are 'supported structurally but not the optimization target (docxy emits static images)'. So agwinterm named this exact gap for itself before winterm-browser existed. The dependency plan's own overview lists non-browser consumers — a video preview, an animating plot, a remote frame buffer — and locates the cost correctly ('the expensive part of image.frame is not the placement machinery, which is already good — it is the format and the transport'), which matches what I read in `HandleImageFrame`: the placement and caching machinery is sound and the PNG-file round trip is the only thing being replaced.\n\nWhat follows: the split places the work in the repository whose own roadmap already wanted it, and the frameshm command is worth building on agwinterm's terms whether or not the browser port completes. That is a different and better reason for the split than 'these are two codebases'.\n\nWhat would overturn it: if the frameshm layout ends up shaped narrowly around Electron's BGRA paint buffer, the general-purpose justification thins out. The plan's Task 1 header carries per-slot `(width, height, stride, format)` rather than a fixed format, which points the other way, but the spec does not exist yet — `docs/specs/image-frameshm.md` is a Task 1 deliverable and I confirmed it is not on disk today, which is also the thing Task 10's precondition is written to catch.",
+      "fix": "",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-4",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 86,
+      "title": "Mouse input is permanently cell-quantized against agwinterm; the brief's \"Input is solved\" overstates what the host can deliver",
+      "body": "The brief states \"**Input is solved** — SGR mouse ... No macOS-style background helper app is needed\". The host cannot deliver pointer position better than one cell, and `pixel-core` has an explicit capability flag for exactly this that will read false.\n\nagwinterm's encoder, `src/Agwinterm.Win32/Program.Input.cs:442-453`, computes `int col = ...(pxX - ox) / cw` and `int row = ...(pxY - oy) / ch` and emits `\\x1b[\u003c{btn};{col+1};{row+1}M`. Cell integers only — the sub-cell pixel offset is discarded before the sequence is built.\n\n`pixel-core` probes for better: `terminal.rs:361` requests `\\x1b[?1016h` (SGR-pixel mouse) at startup, and `terminal.rs:945-948` `probe_mouse_pixels()` sends `\\x1b[?1016$p` and waits 150ms for a DECRQM reply. agwinterm has no `1016` anywhere (`emulator.rs:621-623` handles 1002/1003/1006 only), and its DECRQM handler at `emulator.rs:768-774` answers *only* for mode 2026. So the probe times out and `mouse_pixels = false`.\n\nThat flag is load-bearing, not cosmetic: `engine/mod.rs:352` sets it from `term.reports_pixel_mouse()`, `engine/pointer.rs:61` gates `let located = self.pixel_mouse.then_some(point)` so hover/pairing get no position, and `engine/scroll.rs:192` gates `wants_cursor` on it.\n\nEstablished: the encoder, the probe, and agwinterm's lack of 1016. What follows is that a real Chromium browser gets pointer resolution of roughly one cell — upstream's own fixture at `herdr.rs:260` uses 9x19 px cells — so small link targets, hover states, drag-select and scrollbar grabs all quantize. Task 9 does plan a \"cell coordinates to page pixels\" translation, so the plan encodes the right arithmetic; the objection is that the brief presents this as parity when it is a permanent fidelity ceiling on the headline feature (\"a real Chromium browser ... with working keyboard and mouse\").\n\nWhat would overturn this: adding `?1016` support to agwinterm and a pixel-coordinate branch to `SendMouse`. That is a small, well-localized change on the host side — but it is a second agwinterm dependency the plan does not have, and it is not in the agwinterm plan.",
+      "fix": "Either add `?1016` + pixel coordinates to agwinterm's mouse encoder as a second item in the agwinterm plan, or state the cell-resolution ceiling in the brief so it reads as an accepted cost rather than an oversight.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-6",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 72,
+      "title": "The two-slot shm design delivers \"unlikely\" tearing, not the \"impossible\" its own hard requirement demands, and states no producer-side invariant",
+      "body": "The agwinterm plan states a hard requirement — \"Frames must never tear. ... the design must make a torn read impossible, not unlikely\" — and its Technical Details claim the two-slot scheme delivers it: \"A frame in flight is therefore never the frame being read.\"\n\nWhat the scheme actually guarantees is narrower: a half-written slot is never *published*. That is the property the paragraph's own supporting sentence argues for (\"a producer that dies mid-write leaves a half-written slot that is simply never published\"). With only two slots, a producer that gets two frames ahead of the consumer wraps back onto the slot being copied, and the acquire/release pair on `ready` does not prevent it — the barrier orders the producer's publish, not the consumer's copy.\n\n**Correction to the original finding.** It claimed \"nothing in the design gives the producer any way to know whether it has [fallen behind]\", and named a consumer-side acknowledgement as the thing that would overturn it. That acknowledgement is in both plans. The control pipe is request/response: winterm-browser's Task 4 specifies a client that writes one JSON request and reads the `{\"ok\":true,\"result\":...}` envelope back, and agwinterm's Task 4 returns that result only after phase 2 completes — I confirmed the shape against `HandleImageFrame`, which returns `Ok($\"frame:{count}/{transmits}\")` at `ControlServer.cs:481`, after the copy at line 457 and the locked swap at 467-478. A producer that serializes on the reply can never have two unacknowledged frames outstanding, so for that producer two slots are sufficient and tearing is genuinely impossible.\n\nWhat survives is a specification gap rather than a design flaw:\n\n- The invariant is nowhere stated. Neither plan says \"a producer must not fill a third slot before the reply to frame N-1 arrives\", and the Technical Details argument does not rest on the reply at all — it argues from the two-slot alternation alone, which does not carry the claim.\n- The plan sells the command as general-purpose beyond the browser (\"a video preview, a plot that animates, a remote frame buffer\"). A producer that pipelines requests to hide pipe latency — a natural optimisation, and not forbidden anywhere — tears.\n- Even the serializing producer is exposed if two paints land during one outstanding request, which the render-lock acquisition in phase 2 makes possible under a heavy repaint.\n- No test covers it. Task 3's tests are argument validation (short view, bad stride, slot out of range, bad name); Task 4's are the `(id, seq)` cache and malformed args. There is no test in which the producer runs ahead of the consumer.\n\nThe consequence is a visibly torn frame, not a crash — Task 3's bounds validation keeps the copy inside the view either way.\n\nReasoned from the plan text and from `HandleImageFrame`, since the shm code does not exist yet.",
+      "fix": "State the producer invariant explicitly in `docs/specs/image-frameshm.md` — a producer must not begin filling a slot until the reply to the request two frames back has been received — since that is what actually makes two slots sufficient. If the verb is to be safe for pipelining producers, add an in-use word per slot the reader sets and clears, or more slots plus a released-sequence the producer must respect. Either way add a test where the producer publishes N frames faster than the consumer drains them.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "antithesis-8",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 82,
+      "title": "The portability measurement's scope excluded every layer where the port actually breaks",
+      "body": "The goal asks whether the reference count is a proxy that fails. Within its own scope it does not fail — I reproduced it exactly. Per-file counts of `rustix::|std::os::unix|termios|libc::|/dev/tty` across `pixel-core/src/*.rs` give 64 for `terminal.rs`, 2 for `herdr.rs`, 2 for `ghostty.rs`, 0 for the other 19. I also checked the 24 files the count never reached — `src/` has 46 `.rs` files, not 22, because `engine/`, `scroll/`, `selection/`, `surfaces/` and `tree/` are subdirectories — and all 24 score zero on the same pattern. On the two dependencies the goal names specifically: `fontdue` is fine (fonts are `include_bytes!`-bundled at `paint.rs:775` and `menu.rs:356`, not loaded from a system font path), and `arboard` is fine (one guarded call site, `clipboard_image.rs:56`, `.ok()?`; `engine/Cargo.lock:27-32` already resolves it to `clipboard-win` on this platform). `rustix` itself builds on Windows — I read `rustix-1.1.4/Cargo.toml:61,238-243` and `src/lib.rs:265,289,301`, where `pipe`/`shm`/`termios` are `#[cfg(not(windows))]` behind a target that is explicitly supported. So `cfg`-gating the source, as Task 2 proposes, is sufficient for `pixel-core`.\n\nThe problem is what the measurement was pointed at. It counted Rust identifiers inside one crate, and the brief promotes that to \"the port is: replace one module, port one, drop one, keep nineteen\" — a claim about the whole port. Every blocker I found is outside the measured region: the tty-by-path daemon architecture lives in `cli/` and `browser/` TypeScript; the `/bin/sh` launcher is `cli/src/main.ts:109`; the `bash` postinstall is `browser/package.json:7`; the `.so` assumption is a `.mjs` build script; the missing cell metrics are a *host* gap, not a guest one. `throttle.rs` — one of the nineteen — is even 60% macOS-only under `cfg`, though it degrades to a no-op cleanly (`supported()` returns `false`) and is not a build problem.\n\nEstablished: the counts, the file inventory, the three dependency checks. What follows is that the brief's confidence is calibrated to a measurement of the one layer that turned out to be the least risky, and the maintainer is being asked to fund the port on that number.\n\nWhat would overturn this: it does not overturn the architectural bet itself, which I think survives — keeping `pixel-core` really does look cheaper than dropping it, and the chrome really is untouched. It overturns the *sufficiency* of the evidence offered for it.",
+      "fix": "Before Task 1, run the same disposition pass over `browser/`, `cli/`, `store/`, `terminals/` and the JS build scripts, and record the result next to the `pixel-core` table so the two halves of the port carry the same standard of evidence.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-9",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 72,
+      "title": "The file-based bring-up path has a read/write race and a staleness hole at frame rate, and its claimed cache benefit is nil for a browser",
+      "body": "Task 5 specifies \"write it to a temp path\" (singular) and \"reuse ids across frames so agwinterm's content-signature cache behaves as designed\". Reading the consumer, both halves are a problem at video rate.\n\n`ControlServer.cs:451-460` computes `long sig = ContentSignature(path)` and transmits only if it differs from the last accepted signature for that id. `ContentSignature` (`ControlServer.cs:487-496`) is `LastWriteTimeUtc.Ticks ^ (Length \u003c\u003c 1) ^ hash(path)` — it never reads the bytes. Two consecutive browser frames written to the same path whose PNGs happen to be the same length, within whatever timestamp granularity the filesystem actually delivers, produce the same signature and the new frame is silently dropped in favour of the cached one. There is no error and no counter that distinguishes it from a legitimately-unchanged frame.\n\nWorse, phase 1 does `ContentSignature(path)` then `File.ReadAllBytes(path)` synchronously while the producer, running free at paint rate, is already writing frame N+1 to that same path. `ReadAllBytes` either hits a sharing violation — caught by the bare `catch { data = null; }` at line 458, which silently degrades to \"place the cached image\" — or returns a partially-written PNG that the renderer's async decoder then fails on. Task 5 has a bullet for \"survive a frame whose file write fails\"; it has none for the read side, and the plan never specifies a unique path per frame or an atomic rename.\n\nSeparately, the stated rationale is inverted. The content-signature cache exists to skip re-transmits of *unchanged* images. A browser frame differs every frame, so the cache never skips, and \"reuse ids across frames so the cache behaves as designed\" buys nothing — every frame pays a full stat, a full file read, a PNG encode upstream and an async PNG decode downstream (`ControlServer.cs:474` hardcodes `KittyFormat.Png`). That matters because Task 8's frame-budget measurement is \"the case for the shm path\", and the plan describes the file path as a reasonable bring-up floor rather than as something that may be too slow to demonstrate the milestone at all.\n\nThe cache mechanics and the `catch` are established from the code. The race and the timestamp collision are reasoned from it — I did not measure NTFS `LastWriteTime` update granularity or attempt a concurrent read, and I could not, since the producer does not exist yet.\n\nWhat would overturn this: writing each frame to a unique path, or `File.Move`-ing into place atomically, closes both holes — but then the id-reuse cache genuinely never fires, since `hash(path)` is in the signature.",
+      "fix": "Specify unique-path-per-frame (or atomic rename) in Task 5, drop the id-reuse rationale, and add cleanup of the resulting file churn to the existing temp-file bullet.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-10",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "major",
+      "confidence": 88,
+      "title": "The brief and the agwinterm plan already describe different `image.frameshm` wire shapes, and the brief is the document the plan tells you to read first",
+      "body": "The goal asks whether the contract between the repos is pinned. Two documents currently describe it and they do not agree.\n\nThe brief's transport diagram (`docs/design/00-port-brief.md:124`) shows `{\"cmd\":\"image.frameshm\",\"args\":{\"handle\":..,\"w\":..,\"h\":..}}` — a **handle**, flat args, `w`/`h`. The agwinterm plan's Task 1 defines `{\"images\":[{\"id\":N,\"name\":\"Local\\\\...\",\"slot\":N,\"seq\":N,\"width\":N,\"height\":N,\"stride\":N,\"format\":N,\"row\":N,\"col\":N,\"cols\":N,\"rows\":N}]}` — a **name**, an images array mirroring `image.frame`, and `width`/`height`. Different field names, different nesting, and a materially different mechanism: passing a `HANDLE` across processes needs `DuplicateHandle` against the target process; passing a `Local\\` name needs neither. The agwinterm plan's design is the coherent one; the brief's is the stale one, and the Windows plan's own Overview instructs the reader to \"Read it first — it records what was measured rather than assumed\".\n\nA second field is unpinned even in the good version: the agwinterm plan's Task 3 says \"restrict accepted names to a fixed prefix in the `Local\\` namespace\" without ever stating the prefix, and the Windows plan's Task 10 says \"create the named mapping\" without one. Neither document contains the string a producer must actually use.\n\nThe Windows plan's Task 10 precondition — that `docs/specs/image-frameshm.md` exists — is the right instinct and mitigates most of this. But that spec is also where the agwinterm plan's Task 6 writes its throughput measurement, so the file exists and is authoritative from agwinterm Task 1 while remaining incomplete until agwinterm Task 6. \"The spec file exists\" is a weaker gate than it reads.\n\nEstablished by reading both documents side by side.",
+      "fix": "Correct the brief's diagram to the `images[]`/`name` shape now, before either plan starts, and state the literal `Local\\` prefix in the agwinterm plan's Task 1 so both sides code against the same string.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "antithesis-11",
+      "file": "",
+      "line": 0,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 62,
+      "title": "pixel-core's mouse and keyboard reports must survive ConPTY's input translation, and no task probes it until Task 9, after the milestone is declared",
+      "body": "The brief treats the ConPTY boundary as lossy in one direction only — \"ConPTY strips APC\" — and calls the other direction solved: \"Input arrives *through* the pty as ordinary VT sequences ... so it needs no side channel\". The input direction is also a translation layer rather than a byte pipe: agwinterm writes bytes into the ConPTY input pipe, conhost converts them to `INPUT_RECORD`s, and re-synthesizes VT from those records for a child with `ENABLE_VIRTUAL_TERMINAL_INPUT`. Everything the host sends the child crosses it — I confirmed `src/Agwinterm.Win32/Program.Sessions.cs:290`, `public void Respond(string reply) { _s.NotifyActivity(); _s.Write(...); } // query reply -\u003e PTY`, is the same `Write` that `SendMouse` uses.\n\n**Two corrections to the original finding.**\n\nFirst, the evidence was misattributed. `native/agwinterm-core/src/emulator.rs:1051-1056` — \"this is the cwd form that conhost/ConPTY passes THROUGH to the client (it swallows OSC 7)\" — describes the *output* path: the shell writes OSC 7 toward the terminal and conhost swallows it before agwinterm sees it. That is a documented loss in the child-to-terminal direction, on a different pipe from the one this finding is about. It is suggestive that ConPTY translates rather than forwards, but it is not evidence about the input path, and the original title claimed agwinterm's source documents this specific hazard. It does not.\n\nSecond, the DECRQM half is largely moot for this port. Task 3 already says \"decode SGR mouse reports (`?1006`) and kitty keyboard sequences — agwinterm emits both, so the work is consuming them, not negotiating them\", so the Windows backend need not round-trip `\\x1b[?1016$p` at all; it knows its host. (Separately, that probe would return false regardless — see the pixel-mouse finding.)\n\nWhat remains, and it is the load-bearing part: the SGR mouse reports and kitty-keyboard CSI-u reports that Tasks 3 and 9 depend on are synthesized host-side and pushed through conhost's `INPUT_RECORD` round-trip before the child sees them. agwinterm 0.17.2 is in daily use, so ordinary SGR mouse evidently survives for ordinary apps; kitty-keyboard CSI-u forms are far more exotic and are exactly what `pixel-core`'s decoder expects.\n\nI established the mechanism and the code path, not a failure. The reason it bears on the plan is placement: the earliest task that would expose a loss is Task 9, after Task 8's \"a page on screen\" milestone has been declared reached. A cheap check costs about an hour and de-risks both tasks.\n\nWhat would overturn it: that check coming back clean.",
+      "fix": "Add a probe to Task 1's baseline: from a child under a Debug agwinterm with `ENABLE_VIRTUAL_TERMINAL_INPUT` set, record the exact bytes received for an SGR mouse report and a kitty-keyboard CSI-u report. Record it next to the `cargo check` baseline.",
+      "sources": [
+        "antithesis"
+      ],
+      "lenses": [
+        "antithesis"
+      ],
+      "verdict": "refined"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [],
+  "immaterial": [
+    {
+      "id": "thesis-8",
+      "file": ".reference/terminal-browser/engine/crates/pixel-node/src/surface.rs",
+      "line": 12,
+      "end_line": 16,
+      "severity": "minor",
+      "confidence": 80,
+      "title": "pixel-node is already structured for a third platform, and the Owned path it hands Windows is tuned rather than vestigial",
+      "body": "Task 6 reads like a porting task; the code suggests it is closer to filling in an existing pattern. Established: `pixel-node/Cargo.toml` puts rustix and libc under `[target.'cfg(target_os = \"linux\")'.dependencies]`, so the crate has no unconditional unix dependency; `lib.rs:5–12` gates `mod iosurface` on macos and `mod shm` on linux at the declaration, not inside the module. `surface.rs:7–17` defines `SurfacePixels` with `IoSurface` gated to macos, `Shm` gated to linux, and `Owned { bgra, width, height }` ungated — so on Windows the enum has exactly one variant, which is why the plan can say the Windows path 'already exists'.\n\nThe part worth knowing beyond that: `Owned` is not an unexercised fallback. `SurfaceMailbox::submit` at surface.rs:53–58 reclaims the dropped frame's `Vec\u003cu8\u003e` into `slot.spare` when a frame is coalesced, and the same buffer-reuse handling appears at lines 101, 125 and 146. Upstream built allocation recycling specifically around the owned-bitmap path. Combined with `BitmapPresenter`'s coalescing in `browser/src/page/paint.ts` — which unions damage rects across dropped frames — the copy path Windows inherits has already had its two obvious costs addressed by someone who cared about frame rate.\n\nWhat would overturn it, and I want this stated rather than buried: I could not verify that pixel-node builds on Windows, because building is outside this review. Its dependency list includes `openh264 = { version = \"0.9.7\", features = [\"source\"] }`, which compiles C++ from source via a build script, plus seven tree-sitter grammars that also build C. Whether those compile under MSVC is unchecked and is a real Task 6 risk that the plan's checklist does not mention; my claim here is about the crate's own platform structure, not about its transitive build.",
+      "fix": "Add a bullet to Task 6 to build pixel-node's native dependencies (openh264 with the source feature, the tree-sitter grammars) under MSVC before touching draw_frame, so a toolchain problem surfaces as its own finding rather than as a confusing napi failure.",
+      "sources": [
+        "thesis"
+      ],
+      "lenses": [
+        "thesis"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "0001-01-01T00:00:00Z",
+    "finished_at": "0001-01-01T00:00:00Z",
+    "duration_ms": 0,
+    "tokens": 15310041,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 784887
+      },
+      {
+        "name": "verify",
+        "duration_ms": 695264,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}
