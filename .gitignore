@@ -1,0 +1,17 @@
+# upstream sources kept locally for reference only, never committed
+.reference/
+
+# rust
+target/
+
+# node
+node_modules/
+dist/
+out/
+
+# revmux run archives (task inputs under .revmux/tasks/*/ *are* committed via
+# the negations below; the round outputs and logs are not)
+.revmux/tasks/*/*/output/
+.revmux/tasks/*/*/logs/
+
+*.log
