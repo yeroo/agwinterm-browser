@@ -22,3 +22,4 @@ out/
 .revmux/tasks/*/*/logs/
 
 *.log
+.revmux/tasks/*/*/stages/
