@@ -222,6 +222,20 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
   every key down — `keyUp` never reached the page and only a blur flushed it. `PageInput`
   now closes the press itself when the host reports no releases. Lifted by agwinterm
   implementing the kitty keyboard protocol.
+- **The clipboard is the OS clipboard, not the terminal's.** Upstream writes `OSC 52`
+  and lets the terminal decide; agwinterm implements none, and ConPTY would strip the
+  reply exactly as it strips Kitty graphics, so that route is closed here for the same
+  reason the frame route was. `set_clipboard` and `request_clipboard` go through
+  `arboard` instead — already a `pixel-core` dependency and already used on this
+  platform by `clipboard_image.rs`. A read answers immediately rather than arriving as
+  a reply, so it is parked and handed back by `poll_event` as the same `Event::Paste`
+  the `OSC 52` decode would have produced; nothing above the backend can tell.
+  **Typed** clipboard data (`OSC 5522`) is still unimplemented, and unreachable:
+  `clipboard_data_supported()` is false, which is the gate `engine/clipboard.rs` checks
+  before asking. This was not optional — while `set_clipboard` answered `Unsupported`,
+  the error propagated through `?` from `engine/doc.rs` and `engine/clipboard.rs` out of
+  `Engine::pump`, which `pixel-node` treats as a fatal engine exit: **Ctrl+C in the
+  address bar closed the browser**.
 - **No Super modifier**, for the same reason, so `cmdModifier` is `ctrl` on Windows:
   new tab, address bar, reload, back, forward and zoom are Ctrl chords. Not a degradation
   — it is the Windows convention — but it is why a `cmd+p` chord written for a Mac is

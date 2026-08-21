@@ -30,12 +30,25 @@ UNC = chr(92) + chr(92) + "?" + chr(92)
 
 def complaints():
     """Every (path, line) rustfmt objects to, one per removed or displaced line."""
-    out = subprocess.run(
+    proc = subprocess.run(
         ["cargo", "fmt", "--all", "--check"],
         cwd=os.path.join(REPO, "engine"),
         capture_output=True,
         text=True,
-    ).stdout
+    )
+    out = proc.stdout
+    # `cargo fmt --check` exits 1 when it has complaints and prints them; it exits
+    # non-zero with *nothing* on stdout when it could not run at all (no rustfmt in
+    # the toolchain, a file it cannot parse). Without this the second case reports
+    # "0 complaints" and exits green, which reads as "the port's lines are clean"
+    # when in fact nothing was read.
+    if proc.returncode != 0 and not out.strip():
+        sys.stderr.write(proc.stderr)
+        sys.stderr.write(
+            f"cargo fmt exited {proc.returncode} with no diff to attribute: "
+            "it could not run, so nothing was checked.\n"
+        )
+        raise SystemExit(2)
     found = []
     path, line = None, 0
     for raw in out.splitlines():

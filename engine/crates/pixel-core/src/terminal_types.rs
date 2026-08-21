@@ -352,10 +352,33 @@ mod tests {
         let key = "PIXEL_TERMINAL_TYPES_TEST_VAR";
         let mut map = std::collections::HashMap::new();
         map.insert(key.to_string(), "from-session".to_string());
+        // The process has its own value for the same key, which is what makes this
+        // a test of precedence rather than of lookup. Without it both sides answer
+        // "from-session" and "before the process" is never exercised.
+        //
+        // SAFETY: `set_var` is unsound only against a concurrent *reader* of the
+        // environment in another thread. This key is unique to this test, and the
+        // value is removed before the test returns.
+        // SAFETY: see above.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(key, "from-process")
+        };
+        assert_eq!(
+            SessionEnv::of_process().var(key),
+            Some("from-process".to_string()),
+            "the process shape must read the process",
+        );
         assert_eq!(
             SessionEnv::of_session(map).var(key),
-            Some("from-session".to_string())
+            Some("from-session".to_string()),
+            "the session map must win over the process it is running in",
         );
+        // SAFETY: the same key, in the same single-threaded test, put back.
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var(key)
+        };
         // An absent key is None rather than an error, in both shapes.
         assert_eq!(SessionEnv::of_session(Default::default()).var(key), None);
         assert_eq!(SessionEnv::of_process().var(key), None);

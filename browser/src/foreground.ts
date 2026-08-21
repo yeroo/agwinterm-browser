@@ -1,5 +1,6 @@
 import { app } from "electron";
 
+import { callerCwd } from "./entry";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
 
@@ -35,11 +36,23 @@ export async function runForeground(cdpPort: number | null, argv: string[]): Pro
     key: `${process.pid}-1`,
     argv,
     env: process.env,
-    cwd: process.cwd(),
+    // Not `process.cwd()`: that is `browser/`, the directory this process was
+    // spawned in. The caller's is the one a relative url, `--preload` or
+    // `--main-script` has to resolve against.
+    cwd: callerCwd(process.env, process.cwd()),
     cdpPort,
     onClose: (code) => {
       closing = true;
-      app.exit(code);
+      // Deferred by one turn of the loop, and that turn is load-bearing.
+      // `Session.shutdown` ends here synchronously, and one of the things it has
+      // just done is `Registry.dispose`, which deletes this browser's `instances`
+      // row through the store's *async* proxy client. `app.exit` in the same tick
+      // runs before that microtask ever drains, so the row outlived the process --
+      // and `listInstances` prunes by pid, so once Windows recycled the pid the
+      // phantom row was permanent and every `ls` and `new-tab` had to disambiguate
+      // against a browser that had been gone for days. `setImmediate` drains the
+      // microtask queue first, which is exactly what the delete is waiting in.
+      setImmediate(() => app.exit(code));
     },
   });
   await session.ready;

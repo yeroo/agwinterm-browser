@@ -393,6 +393,13 @@ export class PageInput {
       autoRepeat: event.kind === "repeat",
       commands,
     });
+    // The same synthetic release `dispatchEnter` and the `sendInputEvent` path
+    // already send. Without it these keys -- backspace, the four arrows and the
+    // ctrl/cmd editing combos -- are the one route left that opens a press and
+    // never closes it, on exactly the hosts that report no releases of their own.
+    if (!keyReleasesReported) {
+      await this.target.cdp("Input.dispatchKeyEvent", { type: "keyUp", ...base });
+    }
   }
 
   private nextClickCount(button: "left" | "middle" | "right", x: number, y: number) {

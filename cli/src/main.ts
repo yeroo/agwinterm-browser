@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -21,8 +22,11 @@ import { commandHelp, helpTopics, rootHelp } from "./help";
 import { browsers, describe, recordKey, scopeHere } from "./instances";
 import type { Browser } from "./instances";
 import {
+  FOREGROUND_SIGNALS,
+  FOREGROUND_SIGNAL_GRACE_MS,
   browserLaunchPlan,
   electronBinaryPath,
+  foregroundSpawnEnv,
   missingLaunchArtifact,
 } from "./launch";
 import type { LaunchPlan } from "./launch";
@@ -349,25 +353,73 @@ async function kill(pid: number, why: string): Promise<number> {
  */
 async function openInForeground(argv: string[]): Promise<number> {
   const plan = browserLaunchCommand(argv);
-  const child = spawn(plan.file, plan.args, {
-    cwd: plan.cwd,
-    stdio: "inherit",
-    env: { ...process.env, TERMINAL_BROWSER_CONSOLE_PID: String(process.pid) },
-  });
-  const exited = await new Promise<number>((resolve) => {
+  // Chromium's stderr goes to the log rather than to the pane. fd 0 and 1 stay
+  // inherited — they are the pane's console, which is the point — but fd 2 is
+  // where Electron writes its GPU and sandbox chatter, and one line of that
+  // painted over a frame agwinterm is holding as a placement corrupts a picture
+  // the browser has no way to know it needs to repair. `spawnDaemon` already
+  // redirects it; this path was the one that did not.
+  let stderr: number | "inherit" = "inherit";
+  try {
+    stderr = fs.openSync(plan.stderrLog, "a");
+  } catch {}
+  let child: ChildProcess;
+  try {
+    child = spawn(plan.file, plan.args, {
+      cwd: plan.cwd,
+      stdio: ["inherit", "inherit", stderr],
+      env: foregroundSpawnEnv(process.env, process.pid, process.cwd()),
+    });
+  } finally {
+    // Closing our copy leaves the child's open.
+    if (typeof stderr === "number") fs.closeSync(stderr);
+  }
+
+  const exited = new Promise<number>((resolve) => {
     child.on("error", (error) => {
       process.stderr.write(`could not start ${plan.file}: ${error.message}\n`);
       resolve(1);
     });
     child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
   });
-  // Whatever just happened to the browser, the pane is ours again — and a frame is
-  // a placement agwinterm holds until something replaces it, so without this the
-  // last page stays painted over a shell that is running underneath. The engine
-  // clears it on an ordinary exit; this covers the exits that run no destructor.
-  // Failure means the placement is gone anyway, so it cannot change the exit code.
-  await clearPaneFrame(process.env);
-  return exited;
+
+  // Ctrl+C is how a foreground job is normally stopped, and a Windows console
+  // delivers it to *every* process attached to that console — this one and the
+  // browser. Node with no listener for it terminates immediately, so without these
+  // the CLI died alongside the browser and the clear below never ran: the last
+  // page stayed painted over the shell that had just got the pane back. That is
+  // the exact failure `pane.ts` exists to prevent, reached by the most common way
+  // a user stops a browser.
+  //
+  // The handlers kill nothing. The child already received the same Ctrl+C; all
+  // this process has to do is outlive it, which is what the grace period is. If
+  // the browser is wedged and never exits, the clear still runs — a pane with no
+  // placement is recoverable, a pane holding a dead browser's last frame is not.
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  const stopped = new Promise<number>((resolve) => {
+    for (const [signal, code] of FOREGROUND_SIGNALS) {
+      const handler = () => setTimeout(() => resolve(code), FOREGROUND_SIGNAL_GRACE_MS);
+      handlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+  });
+
+  try {
+    const code = await Promise.race([exited, stopped]);
+    // Whatever just happened to the browser, the pane is ours again — and a frame
+    // is a placement agwinterm holds until something replaces it, so without this
+    // the last page stays painted over a shell that is running underneath. The
+    // engine clears it on an ordinary exit; this covers the exits that run no
+    // destructor. Failure means the placement is gone anyway, so it cannot change
+    // the exit code.
+    await clearPaneFrame(process.env);
+    return code;
+  } finally {
+    // A registered signal listener keeps Node's event loop alive, and `main`
+    // only calls `process.exit` for a non-zero code — so leaving these on would
+    // hang every clean quit.
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+  }
 }
 
 async function attachHere(argv: string[]): Promise<never> {
@@ -523,7 +575,7 @@ async function newTabCommand(url: string | undefined, key: string | undefined): 
   const list = (browsers: Browser[]) => browsers.map((browser) => `  ${describe(browser)}`).join("\n");
   if (key && here.length === 0) fail(`no browser ${key}. Running:\n${list(found)}`);
   if (here.length > 1) {
-    fail(`${here.length} browsers in this tab, so say which with --browser:\n${list(here)}`);
+    fail(`${here.length} ${WINDOWS ? "browsers running" : "browsers in this tab"}, so say which with --browser:\n${list(here)}`);
   }
   const target = here[0];
   if (target) {

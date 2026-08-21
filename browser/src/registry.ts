@@ -6,7 +6,14 @@ import { removeInstance, upsertInstance } from "pixel-store";
 import type { InstanceRow } from "pixel-store";
 
 import type { BrowserState } from "./page/types";
-import { INSTANCES_DIR, instanceEndpoint, isPipeEndpoint, removeEndpoint } from "pixel-store";
+import {
+  INSTANCES_DIR,
+  endpointKind,
+  instanceEndpoint,
+  isPipeEndpoint,
+  reclaimEndpoint,
+  removeEndpoint,
+} from "pixel-store";
 
 export interface Where {
   terminal: string | null;
@@ -44,20 +51,75 @@ export class Registry {
   private cdpPort: number | null = null;
   private server: net.Server | null = null;
   private disposed = false;
+  /** Whether `listen` has succeeded. Until it has, there is nothing to advertise. */
+  private listening = false;
+
+  /**
+   * Resolves once the endpoint is listening, or once binding it has failed.
+   *
+   * Nothing in the browser awaits this: the session carries on while the pipe
+   * comes up. It exists because binding became asynchronous (see `bind`) and
+   * "the control channel is ready" stopped being true at the end of the
+   * constructor, which is something a caller, and a test, has to be able to wait
+   * for rather than guess at.
+   */
+  readonly ready: Promise<void>;
 
   constructor(host: ControlHost) {
     this.host = host;
     this.tty = host.tty ?? callerTty().path;
     this.endpoint = instanceEndpoint(host.key);
+    this.ready = this.bind();
+  }
+
+  /**
+   * Takes the name, then listens on it, then publishes the row — in that order.
+   *
+   * Upstream did all three at once and read none of the answers, which on unix was
+   * nearly safe: the unlink before `listen` made a failed bind hard to reach. On
+   * Windows there is nothing to unlink (`store/src/endpoint.ts`), so `EADDRINUSE`
+   * is reachable for the first time — and publishing through it would write an
+   * endpoint nobody is listening on into the `instances` row, which every `ls`,
+   * `new-tab` and `action` then dials. A browser advertising a control channel it
+   * does not have is worse than one advertising none, because the row is what tells
+   * the CLI there is something to talk to.
+   *
+   * `reclaimEndpoint` rather than a bare `removeEndpoint`: it probes before it
+   * unlinks, so a *live* socket keeps its name instead of being detached from the
+   * server still holding it. That probe is what makes this asynchronous, and why
+   * the row appears a few milliseconds after the browser starts rather than
+   * instantly.
+   */
+  private async bind(): Promise<void> {
     // A pipe name has no directory to create and nothing to unlink; a socket path
-    // has both. `removeEndpoint` already knows which it was handed, but the mkdir
+    // has both. `reclaimEndpoint` already knows which it was handed, but the mkdir
     // is meaningful only in the filesystem case, so that one is asked directly.
     if (!isPipeEndpoint(this.endpoint)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
-    removeEndpoint(this.endpoint);
-    this.server = net.createServer((connection) => this.serve(connection));
-    this.server.on("error", () => {});
-    this.server.listen(this.endpoint);
-    this.write();
+    await reclaimEndpoint(this.endpoint);
+    if (this.disposed) return;
+    const server = net.createServer((connection) => this.serve(connection));
+    this.server = server;
+    await new Promise<void>((resolve) => {
+      server.on("error", (error: NodeJS.ErrnoException) => {
+        if (this.listening || this.disposed) return;
+        process.stderr.write(
+          `terminal-browser: could not listen on the ${endpointKind(this.endpoint)} ` +
+            `${this.endpoint} (${error.message}). This browser is not reachable from ` +
+            `the command line, and is not being advertised as though it were.\n`,
+        );
+        resolve();
+      });
+      server.once("listening", () => {
+        this.listening = true;
+        this.write();
+        resolve();
+      });
+      // A `dispose` that lands while `listen` is still in flight closes the server
+      // without ever emitting `listening` or `error`, so this is what keeps `ready`
+      // from being a promise that never settles.
+      server.once("close", resolve);
+      server.listen(this.endpoint);
+    });
   }
 
   setCdpPort(port: number | null) {
@@ -88,6 +150,7 @@ export class Registry {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.listening = false;
     this.server?.close();
     this.server = null;
     void removeInstance(this.host.key).catch(() => {});
@@ -95,7 +158,7 @@ export class Registry {
   }
 
   private write() {
-    if (this.disposed) return;
+    if (this.disposed || !this.listening) return;
     void upsertInstance(this.record()).catch(() => {});
   }
 

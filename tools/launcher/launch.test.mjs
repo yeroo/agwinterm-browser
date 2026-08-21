@@ -219,3 +219,87 @@ describe("the CLI's use of the plan", () => {
     }
   });
 });
+
+describe("the environment a foreground browser is started with", () => {
+  // The two variables the child cannot work out for itself, and the whole reason
+  // the Windows foreground shape works at all. Both were inline string literals at
+  // the spawn until this suite gave them a definition to point at.
+  const rust = fs.readFileSync(
+    path.join(REPO, "engine", "crates", "pixel-core", "src", "terminal_windows.rs"),
+    "utf8",
+  );
+  const entry = fs.readFileSync(path.join(REPO, "browser", "src", "entry.ts"), "utf8");
+
+  it("names the console pid variable the engine actually reads", () => {
+    // Rename it on one side and the browser starts, draws, and never receives a
+    // keystroke -- `AttachConsole` falls back to the parent process, which under a
+    // wrapper is not the pane. Nothing else in either suite would notice.
+    assert.match(
+      rust,
+      new RegExp(`CONSOLE_PID_VAR: &str = "${launch.CONSOLE_PID_VAR}"`),
+      `terminal_windows.rs does not read ${launch.CONSOLE_PID_VAR}`,
+    );
+  });
+
+  it("names the caller-cwd variable the browser actually reads", () => {
+    assert.match(
+      entry,
+      new RegExp(`CALLER_CWD_VAR = "${launch.CALLER_CWD_VAR}"`),
+      `browser/src/entry.ts does not read ${launch.CALLER_CWD_VAR}`,
+    );
+  });
+
+  it("carries the caller's environment through, and adds the two", () => {
+    const env = launch.foregroundSpawnEnv({ PATH: "/x", TERM: "dumb" }, 4242, "C:\work\site");
+    assert.equal(env.PATH, "/x");
+    assert.equal(env.TERM, "dumb");
+    assert.equal(env[launch.CONSOLE_PID_VAR], "4242");
+    assert.equal(env[launch.CALLER_CWD_VAR], "C:\work\site");
+  });
+
+  it("does not mutate the environment it was handed", () => {
+    const original = { PATH: "/x" };
+    launch.foregroundSpawnEnv(original, 1, "/here");
+    assert.deepEqual(original, { PATH: "/x" });
+  });
+
+  it("overrides an inherited value rather than deferring to it", () => {
+    // A browser opened from inside a browser's own shell would otherwise inherit
+    // the *outer* pane's console pid and attach to the wrong console.
+    const env = launch.foregroundSpawnEnv(
+      { [launch.CONSOLE_PID_VAR]: "11", [launch.CALLER_CWD_VAR]: "/old" },
+      22,
+      "/new",
+    );
+    assert.equal(env[launch.CONSOLE_PID_VAR], "22");
+    assert.equal(env[launch.CALLER_CWD_VAR], "/new");
+  });
+
+  it("stringifies the pid, because spawn refuses a numeric env value", () => {
+    assert.equal(typeof launch.foregroundSpawnEnv({}, 7, "/here")[launch.CONSOLE_PID_VAR], "string");
+  });
+});
+
+describe("the signals a foreground CLI must not die on", () => {
+  it("covers Ctrl+C, Ctrl+Break and both unix stop signals", () => {
+    assert.deepEqual(
+      launch.FOREGROUND_SIGNALS.map(([signal]) => signal),
+      ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"],
+      "SIGBREAK is Ctrl+Break and has no unix equivalent; dropping it loses that key",
+    );
+  });
+
+  it("reports the conventional 128+signo exit code for each", () => {
+    assert.deepEqual(
+      launch.FOREGROUND_SIGNALS.map(([, code]) => code),
+      [130, 143, 130, 129],
+    );
+  });
+
+  it("gives the browser a grace period that is neither zero nor unbounded", () => {
+    // Zero would take the pane's picture back while an ordinary teardown was still
+    // running; unbounded would let a wedged browser hold it for ever.
+    assert.ok(launch.FOREGROUND_SIGNAL_GRACE_MS >= 500);
+    assert.ok(launch.FOREGROUND_SIGNAL_GRACE_MS <= 5_000);
+  });
+});

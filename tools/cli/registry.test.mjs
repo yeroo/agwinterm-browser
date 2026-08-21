@@ -25,9 +25,16 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import esbuild from "esbuild";
 
+import { requireBuilt } from "../lib/built.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
-const STORE = path.join(REPO, "store", "dist", "index.js");
+const STORE = requireBuilt(
+  REPO,
+  "store/dist/index.js",
+  "store/src",
+  "corepack pnpm --filter pixel-store build",
+);
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "winterm-registry-"));
 after(() => fs.rmSync(scratch, { recursive: true, force: true }));
@@ -54,6 +61,7 @@ const stubWorkspace = {
         `export const isPipeEndpoint = (...a) => real.isPipeEndpoint(...a);`,
         `export const removeEndpoint = (...a) => real.removeEndpoint(...a);`,
         `export const endpointKind = (...a) => real.endpointKind(...a);`,
+        `export const reclaimEndpoint = (...a) => real.reclaimEndpoint(...a);`,
         // and a recorder in place of the database
         `export async function upsertInstance(row) { (globalThis.__rows ??= []).push(row); }`,
         `export async function removeInstance(key) { (globalThis.__removed ??= []).push(key); }`,
@@ -119,6 +127,10 @@ const uniqueKey = () => `${process.pid}-t${++seq}`;
 async function withRegistry(fn, overrides = {}) {
   const key = uniqueKey();
   const registry = new Registry(host(key, overrides));
+  // Binding is asynchronous: the endpoint is probed before it is taken, and the
+  // row is written only once `listen` has actually succeeded, so that nothing
+  // advertises a control channel it does not have. `ready` is that moment.
+  await registry.ready;
   try {
     return await fn(registry, key);
   } finally {
@@ -219,12 +231,14 @@ describe("disposal", () => {
   it("stops answering, and frees the name", async () => {
     const key = uniqueKey();
     const registry = new Registry(host(key));
+    await registry.ready;
     const endpoint = registry.record().endpoint;
     assert.equal(await store.endpointAlive(endpoint, 1000), true);
     registry.dispose();
     assert.equal(await store.endpointAlive(endpoint, 1000), false);
     // and the name is free for the next browser with the same key
     const again = new Registry(host(key));
+    await again.ready;
     try {
       assert.equal(await store.endpointAlive(endpoint, 1000), true);
     } finally {
@@ -236,12 +250,14 @@ describe("disposal", () => {
     globalThis.__removed = [];
     const key = uniqueKey();
     const registry = new Registry(host(key));
+    await registry.ready;
     registry.dispose();
     assert.ok(globalThis.__removed.includes(key), "the row was not removed");
   });
 
   it("is idempotent, so a second close is not an error", async () => {
     const registry = new Registry(host(uniqueKey()));
+    await registry.ready;
     registry.dispose();
     registry.dispose();
   });

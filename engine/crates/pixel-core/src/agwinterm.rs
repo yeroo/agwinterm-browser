@@ -463,7 +463,7 @@ impl ControlClient {
         not(test),
         expect(
             dead_code,
-            reason = "the bring-up path's liveness check; Task 7 and Task 10 call it"
+            reason = "driven only by the pipe fixture's round-trip tests; the frame path never pings, because the `image.frame` reply is itself the proof"
         )
     )]
     pub(crate) fn ping(&mut self) -> io::Result<String> {

@@ -69,7 +69,14 @@ export function removeEndpoint(endpoint: string): boolean {
   return true;
 }
 
-/** Connects, or rejects. Shared by every caller so the timeout is one rule. */
+/**
+ * Connects, or rejects, under one deadline.
+ *
+ * Used by `endpointAlive` below, and therefore by `reclaimEndpoint` and by
+ * `listInstances`' staleness check. `cli/src/control.ts` deliberately does not use
+ * it: its timer has to cover the *reply* as well as the connect, and a caller that
+ * only needs "is anyone there" should not be made to wait that long.
+ */
 export function connectEndpoint(endpoint: string, timeoutMs = 10_000): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(endpoint);

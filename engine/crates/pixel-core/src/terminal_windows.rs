@@ -92,13 +92,14 @@ use windows_sys::Win32::System::Console::{
     ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
     ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleScreenBufferInfo, SetConsoleMode,
 };
+use windows_sys::Win32::System::IO::CancelIoEx;
 
 use crate::agwinterm::{self, ControlClient};
 use crate::canvas::Canvas;
 use crate::frame_file;
 use crate::terminal::{
-    ColorSlot, Event, RawEvent, SessionEnv, TerminalColors, Waker, WindowSize, parse_event_kitty,
-    parse_osc_color,
+    ColorSlot, Event, Key, KeyEvent, RawEvent, SessionEnv, TerminalColors, Waker, WindowSize,
+    parse_event_kitty, parse_osc_color,
 };
 use crate::wrapper::Wrapper;
 
@@ -117,6 +118,12 @@ const RESIZE_POLL: Duration = Duration::from_millis(100);
 /// that answers at the same speed produces the same result on both platforms.
 const COLOR_QUERY_DEADLINE: Duration = Duration::from_millis(300);
 const COLOR_QUERY_IDLE: Duration = Duration::from_millis(60);
+
+/// How long a lone `0x1b` waits for a second byte before it is reported as the
+/// Escape key. The same 50 ms upstream's tty backend uses (`terminal.rs`), copied
+/// rather than shared because that constant is `#[cfg(unix)]` and un-gating it
+/// would be an edit to the file this port promises to leave alone.
+const LONE_ESCAPE_WAIT: Duration = Duration::from_millis(50);
 
 /// The 18 slots `query_colors` asks about: foreground, background, and 16 palette
 /// entries.
@@ -345,10 +352,7 @@ impl Drop for ConsoleHandle {
 /// normal answer for a console-subsystem process launched in the pane.
 #[allow(unsafe_code)]
 fn attach_console(env: &SessionEnv) -> io::Result<()> {
-    let named = env
-        .var(CONSOLE_PID_VAR)
-        .and_then(|value| value.trim().parse::<u32>().ok());
-    for target in named.into_iter().chain([ATTACH_PARENT_PROCESS]) {
+    for target in attach_targets(env) {
         // SAFETY: the argument is a process id or the documented sentinel, and the
         // call is safe to make in any attachment state.
         if unsafe { AttachConsole(target) } != 0 {
@@ -370,6 +374,33 @@ fn attach_console(env: &SessionEnv) -> io::Result<()> {
         }
     }
     Err(io::Error::last_os_error())
+}
+
+/// The consoles [`attach_console`] will try, in the order it will try them.
+///
+/// Split out from the attaching because it is the whole of the decision and the
+/// only part a test can reach: `AttachConsole` can only be exercised by a process
+/// that has no console, which a test suite is not.
+///
+/// The named pid comes **first**, which is the point of naming one: Task 9's
+/// launcher may put a wrapper between the pane and the engine, and the parent of
+/// that engine is then the wrapper rather than the pane. `trim` before `parse`
+/// because a `.cmd` launcher setting the variable leaves the line ending on it, and
+/// a pid with a trailing carriage return that silently failed to parse would
+/// attach to the wrong console and present as a browser that never receives a key.
+///
+/// Anything unparseable falls through to the parent rather than failing, so a stale
+/// or malformed value degrades to the pre-Task-9 behaviour instead of refusing to
+/// start.
+fn attach_targets(env: &SessionEnv) -> Vec<u32> {
+    env.var(CONSOLE_PID_VAR)
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        // Zero is the System Idle Process and owns no console. Trying it costs a
+        // failed call and a warning that names a pid nobody set.
+        .filter(|pid| *pid != 0)
+        .into_iter()
+        .chain([ATTACH_PARENT_PROCESS])
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -394,11 +425,24 @@ pub(crate) fn vt_output_mode(previous: u32) -> u32 {
     previous | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN
 }
 
-/// One handle's mode, and what it was before.
+/// One handle's mode, what it was before, and what has to be written to it while
+/// the old mode is still in force.
 struct Restore {
     token: u64,
     handle: HANDLE,
     mode: u32,
+    /// Written to `handle` *before* `mode` goes back.
+    ///
+    /// The reporting modes this backend turns on (`ENABLE_REPORTING`) are escape
+    /// sequences, not console modes, so restoring `mode` does not undo them — and
+    /// they are the visible half: the alternate screen, the hidden cursor, and
+    /// any-motion mouse reporting. Registering the mirror sequence here is what
+    /// lets the panic hook put those back too, in the one case the hook exists for
+    /// (a panic on another thread, or a leaked guard) where no `Drop` will.
+    ///
+    /// It must go out before `SetConsoleMode`, because it needs the VT *output*
+    /// mode this backend turned on; written after, it would be printed literally.
+    farewell: Option<&'static [u8]>,
 }
 
 // SAFETY: the handle is stored only to be handed back to `SetConsoleMode`, which
@@ -416,15 +460,51 @@ fn registry() -> MutexGuard<'static, Vec<Restore>> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Puts every registered console mode back. Called from the panic hook, and safe to
-/// call at any time: `SetConsoleMode` with the mode a handle already has is a no-op,
-/// so it does not matter that `ModeGuard::drop` may also run.
+/// Puts every registered console back the way it was found: the farewell sequences
+/// first, while the modes that carry them are still in force, then the modes.
+///
+/// Called from the panic hook. It *drains* the registry rather than reading it, so
+/// a `ModeGuard::drop` that runs afterwards (unwinding past the guard the hook
+/// already cleaned up) finds its tokens gone and does nothing — which is what keeps
+/// the farewell from being written a second time, with VT output already off, where
+/// it would be printed as literal escape bytes rather than obeyed.
 #[allow(unsafe_code)]
 pub(crate) fn restore_registered_modes() {
-    for entry in registry().iter() {
+    let entries = std::mem::take(&mut *registry());
+    for entry in entries.iter() {
+        if let Some(bytes) = entry.farewell {
+            write_raw(entry.handle, bytes);
+        }
+    }
+    for entry in entries.iter() {
         // SAFETY: the handle was live when registered and is only closed after the
         // guard that owns it has deregistered; the mode is a plain bitfield.
         unsafe { SetConsoleMode(entry.handle, entry.mode) };
+    }
+}
+
+/// Best-effort `WriteFile` to a raw handle, for the restore paths that have a
+/// `HANDLE` rather than the [`ConsoleHandle`] that owns it. Failure here means the
+/// console has already gone, which is not something a restore can act on.
+#[allow(unsafe_code)]
+fn write_raw(handle: HANDLE, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let mut written: u32 = 0;
+        // SAFETY: `bytes` is a live slice and `written` a valid out-param; the last
+        // argument is the documented null for a synchronous handle.
+        let ok = unsafe {
+            WriteFile(
+                handle,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || written == 0 {
+            return;
+        }
+        bytes = &bytes[written as usize..];
     }
 }
 
@@ -465,6 +545,17 @@ impl ModeGuard {
         handle: &Arc<ConsoleHandle>,
         next: impl FnOnce(u32) -> u32,
     ) -> io::Result<()> {
+        self.apply_with_farewell(handle, next, None)
+    }
+
+    /// [`ModeGuard::apply`], plus bytes to write to the handle before its mode goes
+    /// back — see [`Restore::farewell`].
+    fn apply_with_farewell(
+        &mut self,
+        handle: &Arc<ConsoleHandle>,
+        next: impl FnOnce(u32) -> u32,
+        farewell: Option<&'static [u8]>,
+    ) -> io::Result<()> {
         let previous = handle.mode()?;
         handle.set_mode(next(previous))?;
         let token = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
@@ -472,6 +563,7 @@ impl ModeGuard {
             token,
             handle: handle.raw(),
             mode: previous,
+            farewell,
         });
         self.entries.push((Arc::clone(handle), token));
         Ok(())
@@ -479,11 +571,19 @@ impl ModeGuard {
 }
 
 impl Drop for ModeGuard {
+    /// In reverse, so that two guards overlapping on one handle unwind in the order
+    /// they were taken: the inner one restores the mode the outer one set, and the
+    /// outer one then restores the mode the console started in. Restoring in
+    /// insertion order would leave the console in the *inner* guard's mode, which
+    /// on this backend is raw.
     fn drop(&mut self) {
         let mut registry = registry();
-        for (handle, token) in self.entries.drain(..) {
+        for (handle, token) in self.entries.drain(..).rev() {
             if let Some(at) = registry.iter().position(|entry| entry.token == token) {
                 let entry = registry.remove(at);
+                if let Some(bytes) = entry.farewell {
+                    let _ = handle.write_all(bytes);
+                }
                 let _ = handle.set_mode(entry.mode);
             }
         }
@@ -685,6 +785,9 @@ pub struct Terminal {
     inbox: Arc<Inbox>,
     /// Bytes read but not yet parsed into an event — the decoder's incomplete tail.
     pending: Vec<u8>,
+    /// The console input handle the reader thread is blocked on. Kept only so that
+    /// [`Terminal::drop`] can cancel that read; every byte comes through the inbox.
+    conin: Option<Arc<ConsoleHandle>>,
     conout: Option<Arc<ConsoleHandle>>,
     /// Dropped last, after the disable sequences have gone out.
     modes: Option<ModeGuard>,
@@ -710,6 +813,14 @@ pub struct Terminal {
     /// creating it is the one part of `draw` that can fail before any pixels move.
     frames: Option<frame_file::FramePublisher>,
     color_query: Option<ColorQuery>,
+    /// Clipboard text read by [`Terminal::request_clipboard`] and not yet handed to
+    /// the engine. The OS answers synchronously, so this is a one-slot queue rather
+    /// than an in-flight request.
+    clipboard_reply: Option<String>,
+    /// When a lone `0x1b` first appeared at the head of [`Terminal::pending`], or
+    /// `None` when the tail does not start with one. See
+    /// [`Terminal::lone_escape_deadline`].
+    lone_escape_since: Option<Instant>,
     waker: Option<Waker>,
 }
 
@@ -726,6 +837,20 @@ fn no_console<T>(what: &str) -> io::Result<T> {
         io::ErrorKind::NotConnected,
         format!("{what} needs the pane's console, and this terminal has none"),
     ))
+}
+
+/// Opens the OS clipboard. Separate from the two methods that use it so that both
+/// report a locked or unavailable clipboard the same way.
+fn clipboard() -> io::Result<arboard::Clipboard> {
+    arboard::Clipboard::new().map_err(clipboard_error)
+}
+
+/// `arboard`'s error as an `io::Error`. Deliberately *not* `Unsupported`: the
+/// callers that matter treat that kind as "this backend cannot do it" and some of
+/// them propagate it out of the engine, while a clipboard another process is
+/// holding open is a transient failure of a supported operation.
+fn clipboard_error(err: arboard::Error) -> io::Error {
+    io::Error::other(format!("the Windows clipboard: {err}"))
 }
 
 impl Terminal {
@@ -751,7 +876,11 @@ impl Terminal {
 
         let mut modes = ModeGuard::new();
         modes.apply(&conin, raw_input_mode)?;
-        modes.apply(&conout, vt_output_mode)?;
+        // The mirror of `ENABLE_REPORTING` rides with the output mode rather than
+        // being written by `Terminal::drop`, so that the one place that puts the
+        // console back is also the only place that can — including from the panic
+        // hook, where no `Drop` runs. See `Restore::farewell`.
+        modes.apply_with_farewell(&conout, vt_output_mode, Some(DISABLE_REPORTING))?;
         conout.write_all(ENABLE_REPORTING)?;
 
         let inbox = Inbox::new();
@@ -762,6 +891,7 @@ impl Terminal {
             env,
             inbox,
             pending: Vec::new(),
+            conin: Some(conin),
             conout: Some(conout),
             modes: Some(modes),
             focused: true,
@@ -772,6 +902,8 @@ impl Terminal {
             host_absent: false,
             frames: None,
             color_query: None,
+            clipboard_reply: None,
+            lone_escape_since: None,
             waker: None,
         })
     }
@@ -798,6 +930,7 @@ impl Terminal {
             env: SessionEnv::of_session(Default::default()),
             inbox,
             pending: Vec::new(),
+            conin: None,
             conout,
             modes: None,
             focused: true,
@@ -808,6 +941,8 @@ impl Terminal {
             host_absent: false,
             frames: None,
             color_query: None,
+            clipboard_reply: None,
+            lone_escape_since: None,
             waker: None,
         }
     }
@@ -912,6 +1047,9 @@ impl Terminal {
     pub fn poll_event(&mut self, timeout: Option<Duration>) -> io::Result<Option<Event>> {
         let deadline = timeout.map(|timeout| Instant::now() + timeout);
         loop {
+            if let Some(text) = self.clipboard_reply.take() {
+                return Ok(Some(Event::Paste(text)));
+            }
             if let Some((raw, used)) = parse_event_kitty(&self.pending, self.kitty_keyboard()) {
                 self.pending.drain(..used);
                 match self.lift(raw) {
@@ -922,9 +1060,10 @@ impl Terminal {
             if let Some(size) = self.resize_since_last_look() {
                 return Ok(Some(Event::WindowSize(size)));
             }
+            let escape_deadline = self.lone_escape_deadline();
             let color_deadline = self.color_query.as_ref().map(ColorQuery::deadline);
             let resize_deadline = self.watching_resize.then(|| Instant::now() + RESIZE_POLL);
-            let until = [deadline, color_deadline, resize_deadline]
+            let until = [deadline, escape_deadline, color_deadline, resize_deadline]
                 .into_iter()
                 .flatten()
                 .min();
@@ -934,6 +1073,11 @@ impl Terminal {
                 Taken::Woken => return Ok(None),
                 Taken::Eof => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Taken::Timeout => {
+                    if escape_deadline.is_some_and(|at| Instant::now() >= at) {
+                        self.pending.drain(..1);
+                        self.lone_escape_since = None;
+                        return Ok(Some(Event::Key(KeyEvent::plain(Key::Escape))));
+                    }
                     if color_deadline.is_some_and(|at| Instant::now() >= at) {
                         match self.take_settled_colors() {
                             Some(colors) => return Ok(Some(Event::Colors(colors))),
@@ -947,6 +1091,45 @@ impl Terminal {
                 }
             }
         }
+    }
+
+    /// Unblocks the reader thread's parked `ReadFile`.
+    ///
+    /// `CancelIoEx` rather than `CancelIo`: the read was issued on the reader
+    /// thread, and `CancelIo` only reaches operations the *calling* thread started.
+    /// Best effort — `ERROR_NOT_FOUND` means the read had already returned, which is
+    /// the outcome this is trying to produce.
+    #[allow(unsafe_code)]
+    fn cancel_pending_read(&self) {
+        let Some(conin) = self.conin.as_ref() else {
+            return;
+        };
+        // SAFETY: the handle is owned by this `Terminal` and by the reader thread,
+        // both of which are still alive here; the null second argument is the
+        // documented "every operation on this handle".
+        unsafe { CancelIoEx(conin.raw(), std::ptr::null()) };
+    }
+
+    /// When a `0x1b` sitting alone at the head of the tail should be given up on and
+    /// reported as the Escape key.
+    ///
+    /// Under `ENABLE_VIRTUAL_TERMINAL_INPUT` conhost delivers Escape as a bare
+    /// `0x1b` and nothing more, and `parse_event_kitty` cannot decide a one-byte
+    /// buffer — it needs `buf[1]` to tell `ESC [` from `ESC O` from Alt+key. So
+    /// without a deadline the byte sits in `pending` for ever: Escape is never
+    /// delivered *and* the stale byte turns the next keystroke into Alt+that-key.
+    ///
+    /// This is upstream's `lone_escape_deadline` (`terminal.rs`), with one
+    /// difference: upstream applies it only under a relaying wrapper, because a
+    /// direct tty read gets the whole sequence in one `read` and a lone escape can
+    /// be trusted immediately. Here every byte arrives through the reader thread's
+    /// inbox, one `ReadFile` at a time, so the wait is unconditional.
+    fn lone_escape_deadline(&mut self) -> Option<Instant> {
+        if self.pending.len() != 1 || self.pending.first() != Some(&0x1b) {
+            self.lone_escape_since = None;
+            return None;
+        }
+        Some(*self.lone_escape_since.get_or_insert_with(Instant::now) + LONE_ESCAPE_WAIT)
     }
 
     /// Turns one decoded [`RawEvent`] into the event the engine sees. `None` means
@@ -998,9 +1181,19 @@ impl Terminal {
         // than a cell-unit coordinate, because a pointer mapped in different units
         // than the canvas was drawn in is precisely the wrong-click-target bug.
         let (width, height) = self.cell.unwrap_or(agwinterm::FALLBACK_CELL);
+        // Saturating throughout. `x` and `y` come from `param()`, which parses
+        // whatever digits an SGR mouse report carried without an upper bound, so a
+        // malformed `\x1b[<0;4294967295;1M` reaches here as `u32::MAX`. The
+        // multiply would then panic a debug build and wrap a release one into a
+        // click somewhere near the origin; saturating clamps it to the far edge,
+        // which is where the report claimed to be.
         (
-            x.saturating_sub(1) * width + width / 2,
-            y.saturating_sub(1) * height + height / 2,
+            x.saturating_sub(1)
+                .saturating_mul(width)
+                .saturating_add(width / 2),
+            y.saturating_sub(1)
+                .saturating_mul(height)
+                .saturating_add(height / 2),
         )
     }
 
@@ -1175,12 +1368,43 @@ impl Terminal {
         unimplemented("setting the pointer shape", "Task 11")
     }
 
-    pub fn set_clipboard(&mut self, _text: &str) -> io::Result<()> {
-        unimplemented("writing the clipboard", "Task 11")
+    /// The clipboard, through the OS rather than through the terminal.
+    ///
+    /// Upstream writes `OSC 52` and lets the terminal decide. agwinterm implements
+    /// no `OSC 52`, and ConPTY would strip the reply the same way it strips Kitty
+    /// graphics — so the escape route is closed here for the same reason the frame
+    /// route was. Windows has a clipboard of its own, and `arboard` is already a
+    /// dependency of this crate and already used on this platform
+    /// ([`crate::clipboard_image::read_for_worker`]), so this is a capability the
+    /// port has rather than one it refuses.
+    ///
+    /// Refusing it was not free. `set_clipboard` is reached through `?` from
+    /// `engine/clipboard.rs`'s `begin_rich_capture` and `engine/doc.rs`'s
+    /// `InputAction::Copy`, so an `Unsupported` error unwound out of
+    /// `Engine::handle_event` → `Engine::pump`, which `pixel-node` treats as a
+    /// fatal engine exit: Ctrl+C in the address bar closed the browser. A
+    /// capability the host lacks must not be able to end the process.
+    pub fn set_clipboard(&mut self, text: &str) -> io::Result<()> {
+        clipboard()?
+            .set_text(text.to_owned())
+            .map_err(clipboard_error)
     }
 
+    /// The read half. There is no reply to wait for — the OS answers now — so the
+    /// text is parked and [`Terminal::poll_event`] hands it back as the
+    /// `Event::Paste` the `OSC 52` reply would have decoded into. Same event, same
+    /// engine path (`engine/clipboard.rs`'s `pending_pastes`), no protocol.
     pub fn request_clipboard(&mut self) -> io::Result<()> {
-        unimplemented("reading the clipboard", "Task 11")
+        let text = match clipboard()?.get_text() {
+            Ok(text) => text,
+            // A clipboard holding an image, or nothing at all, is not a failure:
+            // it is a paste with nothing in it. A terminal that owned no selection
+            // answered the same way, by never replying at all.
+            Err(arboard::Error::ContentNotAvailable) => String::new(),
+            Err(err) => return Err(clipboard_error(err)),
+        };
+        self.clipboard_reply = Some(text);
+        Ok(())
     }
 
     pub fn clipboard_data_supported(&self) -> bool {
@@ -1199,13 +1423,18 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         self.clear_frame();
-        if let Some(conout) = self.conout.as_ref() {
-            let _ = conout.write_all(DISABLE_REPORTING);
-        }
-        // Before the modes go back, so the sequences above still get through the VT
-        // output mode this backend turned on.
-        drop(self.modes.take());
+        // Both before the modes go back. `abandon` stops the reader thread the next
+        // time it has something to push; `CancelIoEx` is what gives it that next
+        // time, because otherwise it is parked in a blocking `ReadFile` on `CONIN$`
+        // and only a keystroke would return it — a keystroke typed at the shell
+        // that has the pane back, read in the *line* mode the console has just been
+        // restored to, and therefore swallowed whole.
         self.inbox.abandon();
+        self.cancel_pending_read();
+        // Last: `ModeGuard::drop` writes `DISABLE_REPORTING` before it restores the
+        // mode, so the sequences still go out through the VT output mode this
+        // backend turned on.
+        drop(self.modes.take());
     }
 }
 
@@ -1705,6 +1934,91 @@ mod tests {
     }
 
     #[test]
+    fn the_panic_hooks_restore_takes_the_registry_with_it() {
+        // The double-write guard. The hook writes each handle's farewell -- for the
+        // real terminal that is `DISABLE_REPORTING`, which pops the alternate
+        // screen and puts the cursor and mouse reporting back -- and then restores
+        // the mode that carried it. If a `ModeGuard::drop` unwinding past it found
+        // its entry still registered, it would write those escape bytes a second
+        // time with VT output already off, and the pane would show them as text.
+        let _serial = one_at_a_time();
+        let buffer = private_screen_buffer();
+        let before = buffer.mode().expect("a real console mode");
+        let mut guard = ModeGuard::new();
+        guard
+            .apply_with_farewell(&buffer, vt_output_mode, Some(b"[?25h"))
+            .expect("apply");
+
+        restore_registered_modes();
+        assert!(
+            registry().is_empty(),
+            "the hook left entries behind for a later Drop to write again",
+        );
+
+        drop(guard);
+        assert_eq!(
+            buffer.mode().unwrap(),
+            before,
+            "the guard's Drop disturbed a console the hook had already restored",
+        );
+    }
+
+    #[test]
+    fn overlapping_mode_guards_unwind_in_the_order_they_were_taken() {
+        // Two guards on one handle: the inner one must restore the mode the outer
+        // one set, and the outer one the mode the console started in. Restoring in
+        // insertion order instead leaves the console in the *inner* guard's mode,
+        // which on this backend is raw -- a shell with no echo and no line editing.
+        let _serial = one_at_a_time();
+        let buffer = private_screen_buffer();
+        let before = buffer.mode().expect("a real console mode");
+
+        let mut outer = ModeGuard::new();
+        outer.apply(&buffer, vt_output_mode).expect("outer");
+        let middle = buffer.mode().unwrap();
+        assert_ne!(middle, before);
+
+        let mut inner = ModeGuard::new();
+        inner
+            .apply(&buffer, |mode| mode | DISABLE_NEWLINE_AUTO_RETURN)
+            .expect("inner");
+
+        drop(inner);
+        assert_eq!(buffer.mode().unwrap(), middle, "the inner guard overshot");
+        drop(outer);
+        assert_eq!(
+            buffer.mode().unwrap(),
+            before,
+            "the console was left in the inner guard's mode",
+        );
+    }
+
+    #[test]
+    fn the_reporting_sequences_are_registered_rather_than_written_by_drop() {
+        // `Terminal::drop` used to write `DISABLE_REPORTING` itself, which meant the
+        // panic hook -- the one path that exists *because* no Drop will run --
+        // restored the modes and left the pane on the alternate screen with the
+        // cursor hidden and any-motion mouse reporting on. Registering it as the
+        // output handle's farewell is what puts both paths through one place.
+        //
+        // `Terminal::new` needs a real console, so the wiring is pinned where it is
+        // written; the behaviour of the farewell itself is covered above.
+        let source = include_str!("terminal_windows.rs");
+        let registered = concat!(
+            "apply_with_farewell(&conout, ",
+            "vt_output_mode, Some(DISABLE_REPORTING))",
+        );
+        assert!(
+            source.contains(registered),
+            "the disable sequences are no longer registered with the output mode",
+        );
+        assert!(
+            !source.contains(concat!("conout.write_all(", "DISABLE_REPORTING)")),
+            "something writes DISABLE_REPORTING outside the guard again",
+        );
+    }
+
+    #[test]
     fn a_panicking_exit_path_leaves_the_console_as_it_was_found() {
         let _serial = one_at_a_time();
         let buffer = private_screen_buffer();
@@ -2060,12 +2374,182 @@ mod tests {
             );
         };
         fails(term.set_pointer_shape("pointer"), "set_pointer_shape");
-        fails(term.set_clipboard("text"), "set_clipboard");
-        fails(term.request_clipboard(), "request_clipboard");
+        // The typed-clipboard pair stays unimplemented, and stays *unreachable*:
+        // `engine/clipboard.rs` asks `clipboard_data_supported()` first, and both
+        // of its call sites then take the answer through `is_ok()`. The plain text
+        // pair below is the one that had to be real.
+        assert!(!term.clipboard_data_supported());
         fails(term.request_clipboard_types(), "request_clipboard_types");
         fails(
             term.request_clipboard_data("text/html"),
             "request_clipboard_data",
+        );
+    }
+
+    #[test]
+    fn copying_reaches_the_os_clipboard_rather_than_ending_the_engine() {
+        // The regression this replaces: `set_clipboard` answered `Unsupported`, and
+        // `engine/clipboard.rs` and `engine/doc.rs` both take it through `?`, so the
+        // error unwound out of `Engine::pump` and `pixel-node` treated that as a
+        // fatal engine exit. Ctrl+C in the address bar closed the browser.
+        //
+        // What is asserted is the round trip, because "did not error" would also be
+        // true of a `set_clipboard` that quietly did nothing.
+        let mut term = Terminal::detached(Inbox::new(), None);
+        let text = "winterm-browser clipboard round trip";
+        if let Err(err) = term.set_clipboard(text) {
+            // A machine with no window station (a service, some CI images) has no
+            // clipboard to reach. That is the one honest failure, and it must not be
+            // `Unsupported`, which is the kind the engine treats as fatal.
+            assert_ne!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+            return;
+        }
+        term.request_clipboard().expect("reading it back");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(0)))
+                .expect("the parked reply needs no console"),
+            Some(Event::Paste(text.to_owned())),
+            "the clipboard read must arrive as the Paste event an OSC 52 reply would decode into",
+        );
+    }
+
+    // -- attaching ---------------------------------------------------------
+
+    #[test]
+    fn the_named_console_is_tried_before_the_parent_process() {
+        // The ordering is the point of the variable. Task 9's launcher may put a
+        // wrapper between the pane and the engine, in which case the *parent* is
+        // the wrapper and attaching to it takes the wrong console -- which presents
+        // as a browser that starts, draws, and never receives a keystroke.
+        let env = |value: &str| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(CONSOLE_PID_VAR.to_string(), value.to_string());
+            SessionEnv::of_session(map)
+        };
+        assert_eq!(
+            attach_targets(&env("4242")),
+            vec![4242, ATTACH_PARENT_PROCESS],
+        );
+    }
+
+    #[test]
+    fn a_console_pid_survives_the_whitespace_a_launcher_leaves_on_it() {
+        // A `.cmd` wrapper setting the variable leaves the line ending attached. A
+        // pid that silently failed to parse would fall through to the parent and
+        // take the wrong console, with nothing said.
+        let env = |value: &str| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(CONSOLE_PID_VAR.to_string(), value.to_string());
+            SessionEnv::of_session(map)
+        };
+        for spelling in ["4242", " 4242", "4242 ", "4242\r", "4242\r\n", "\t4242\n"] {
+            assert_eq!(
+                attach_targets(&env(spelling)),
+                vec![4242, ATTACH_PARENT_PROCESS],
+                "{spelling:?} did not resolve to a pid",
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_console_pid_falls_back_rather_than_failing() {
+        // Degrading to the pre-Task-9 behaviour is right: the parent *is* the pane
+        // in the ordinary case, so a stale or malformed value should cost a
+        // fallback and not a refusal to start.
+        let env = |value: &str| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(CONSOLE_PID_VAR.to_string(), value.to_string());
+            SessionEnv::of_session(map)
+        };
+        for junk in [
+            "",
+            "   ",
+            "not-a-pid",
+            "-1",
+            "4242abc",
+            // Beyond u32, which is what a pid is.
+            "99999999999999999999",
+            // The System Idle Process owns no console; trying it costs a failed
+            // call and a warning naming a pid nobody set.
+            "0",
+        ] {
+            assert_eq!(
+                attach_targets(&env(junk)),
+                vec![ATTACH_PARENT_PROCESS],
+                "{junk:?} was treated as a console to attach to",
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_variable_at_all_the_parent_is_the_only_candidate() {
+        assert_eq!(
+            attach_targets(&SessionEnv::of_session(Default::default())),
+            vec![ATTACH_PARENT_PROCESS],
+        );
+    }
+
+    #[test]
+    fn a_dropped_terminal_stops_its_reader_thread() {
+        // The reader thread outlives the `Terminal` -- it is parked in a blocking
+        // `ReadFile` and only a byte returns it. What `abandon` guarantees is that
+        // the byte it eventually gets is the last thing it does: `push` answers
+        // `false`, which is the thread's signal to return rather than to go on
+        // holding the console handle open.
+        let inbox = Inbox::new();
+        let term = Terminal::detached(Arc::clone(&inbox), None);
+        assert!(inbox.push(b"before"), "a live terminal accepts bytes");
+        drop(term);
+        assert!(
+            !inbox.push(b"after"),
+            "the reader was not told to stop, so it keeps the console open",
+        );
+    }
+
+    #[test]
+    fn a_lone_escape_is_reported_rather_than_left_to_poison_the_next_key() {
+        // Under `ENABLE_VIRTUAL_TERMINAL_INPUT` conhost sends Escape as a bare
+        // `0x1b` and nothing more. `parse_event_kitty` cannot decide a one-byte
+        // buffer, so without the deadline the byte sat in `pending` for ever: every
+        // Escape was lost (closing the url bar, the palette, the find bar), and the
+        // *next* key arrived as Alt+that-key because the stale `0x1b` prefixed it.
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        inbox.push(b"\x1b");
+        assert_eq!(
+            term.poll_event(Some(LONE_ESCAPE_WAIT * 4))
+                .expect("waiting out a lone escape is not an error"),
+            Some(Event::Key(KeyEvent::plain(Key::Escape))),
+        );
+        // And the tail is clean, so the following key is itself.
+        inbox.push(b"a");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(50)))
+                .expect("the next key"),
+            Some(Event::Key(KeyEvent::plain(Key::Char('a')))),
+        );
+    }
+
+    #[test]
+    fn an_escape_that_starts_a_sequence_is_not_flushed_as_escape() {
+        // The other half: `ESC [ A` arrives in pieces through the reader thread, and
+        // giving up on the head after 50 ms would turn every arrow key into Escape
+        // followed by a stray `[A`. The deadline only ever applies to a tail that is
+        // exactly one byte long.
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        inbox.push(b"\x1b[");
+        assert_eq!(
+            term.poll_event(Some(LONE_ESCAPE_WAIT * 2))
+                .expect("an incomplete sequence is not an error"),
+            None,
+            "an incomplete CSI must wait for its tail, not be flushed as Escape",
+        );
+        inbox.push(b"A");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(50)))
+                .expect("the completed sequence"),
+            Some(Event::Key(KeyEvent::plain(Key::Up))),
         );
     }
 

@@ -99,3 +99,63 @@ export function missingLaunchArtifact(
   }
   return null;
 }
+
+/**
+ * The variable the engine reads to find the process that owns the pane's console.
+ *
+ * Named here rather than inline at the spawn, so the one string the whole
+ * foreground process model rests on has a definition a test can point at. Its
+ * other end is `CONSOLE_PID_VAR` in `engine/crates/pixel-core/src/terminal_windows.rs`;
+ * `tools/launcher/launch.test.mjs` asserts the two still spell it the same way.
+ */
+export const CONSOLE_PID_VAR = "TERMINAL_BROWSER_CONSOLE_PID";
+
+/**
+ * The variable the browser reads to find the directory the CLI was run in.
+ *
+ * The child is spawned with `cwd: browser/` (that is where its `main.js` and its
+ * `node_modules` are), so `process.cwd()` inside it is not the user's directory.
+ * On unix that never mattered: the daemon request carried `cwd` from the caller.
+ * The Windows foreground path has no request to put it in, and without this a
+ * relative `open ./page.html`, `--preload=./x.js` or `--main-script=./y.js`
+ * resolved against `browser/` and silently became a web search.
+ */
+export const CALLER_CWD_VAR = "TERMINAL_BROWSER_CALLER_CWD";
+
+/**
+ * The environment a foreground browser is started with: the caller's, plus the two
+ * things the child cannot work out for itself.
+ */
+export function foregroundSpawnEnv(
+  env: Record<string, string | undefined>,
+  consolePid: number,
+  cwd: string,
+): Record<string, string | undefined> {
+  return { ...env, [CONSOLE_PID_VAR]: String(consolePid), [CALLER_CWD_VAR]: cwd };
+}
+
+/**
+ * The signals a foreground browser's CLI must not die on, and the exit code each
+ * one means. `SIGBREAK` is Windows' Ctrl+Break and has no unix equivalent;
+ * `SIGTERM` and `SIGHUP` are never raised by a Windows console but are what
+ * `process.kill` and a closing unix terminal send, so all four are listened for on
+ * both platforms.
+ *
+ * The point of listening is not to handle them but to *not be killed by them*:
+ * Node terminates immediately on an unhandled SIGINT, which would skip the pane
+ * clear and leave the browser's last frame painted over the shell.
+ */
+export const FOREGROUND_SIGNALS: ReadonlyArray<readonly [NodeJS.Signals, number]> = [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+  ["SIGBREAK", 130],
+  ["SIGHUP", 129],
+];
+
+/**
+ * How long the CLI waits, after a signal, for a browser that got the same signal
+ * to leave on its own before taking the pane back. Long enough for an ordinary
+ * teardown (the engine's `Drop` clears its own frame); short enough that a wedged
+ * browser does not hold the pane's picture hostage.
+ */
+export const FOREGROUND_SIGNAL_GRACE_MS = 2_000;

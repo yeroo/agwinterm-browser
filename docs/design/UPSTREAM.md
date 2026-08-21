@@ -83,6 +83,27 @@ fails loudly rather than at the Task 10 milestone.
 3. **`package.json` — a root `test` script added**, running the vendor-check suite.
    Upstream has no root test entry point.
 
+   Two things about that script are deliberate and would otherwise read as
+   oversights. It does **not** build first: a nested bare `pnpm` is not on `PATH`
+   unless `corepack enable` has been run, so `pnpm -r build && …` fails on a stock
+   machine. The three suites that import the built `pixel-store` instead call
+   `requireBuilt` (`tools/lib/built.mjs`), which refuses a missing *or stale*
+   `dist/` and names the build command — a stale one would otherwise pass green
+   against the previous source. And it does **not** include
+   `terminals/test/terminals.test.js`: that suite is upstream's, is vendored
+   byte-identical, and is **red at this baseline** — `herdr falls back when the
+   running herdr predates --right-click` expects a fallback `herdr.ts` does not
+   implement. Fixing it means editing vendored code for a host this port
+   permanently disables ([`07-as-built.md`](07-as-built.md) §2) and cannot test
+   against, so it is left to upstream. The one line of `pixel-terminals` this port
+   *did* change — `callerTty`'s Windows early return — is covered in
+   `tools/vendor-check/inventory.test.mjs` instead.
+
+   The inherited `build:dist`, `install:dist`, `dist` and `release:*` scripts all
+   target `scripts/`, which was not copied (see below), and `browser` runs a `start`
+   script built around the POSIX `exec`. All six are inert here and are kept only to
+   keep the diff against upstream small.
+
 4. **`engine/crates/pixel-core/src/clipboard_image.rs` — POSIX path assumptions
    widened** (Task 4). This is the first edit to one of the 43 supposedly-portable
    files, and it was found by running their tests rather than by reading them: the

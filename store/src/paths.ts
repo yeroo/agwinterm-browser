@@ -35,6 +35,26 @@ export interface PathOptions {
   appDirName: string;
 }
 
+/**
+ * A short, stable stand-in for "this user", mixed into every pipe name.
+ *
+ * Only Windows needs it, and it is not cosmetic. The unix endpoints are files under
+ * `XDG_RUNTIME_DIR`, which is per-user and mode 0700, so a name is already scoped
+ * to whoever can reach the directory. The Win32 pipe namespace has no directory and
+ * no owner: it is machine-global, enumerable, and *creating* a name is unrestricted.
+ * Without a user in the name, two people signed in to the same machine from the same
+ * install collide -- the second browser's `listen` fails with EADDRINUSE -- and any
+ * local process can take a name it can predict before its owner does.
+ *
+ * Derived from the home directory rather than the user name because that is what
+ * `PathOptions` already carries and what already differs per profile, and hashed so
+ * that a name with spaces or non-ASCII in it cannot reshape the pipe name through
+ * `pipeSegment`.
+ */
+function userScope(home: string): string {
+  return `u${crypto.createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
+}
+
 function xdgBase(env: NodeJS.ProcessEnv, home: string, variable: string, fallback: string): string {
   const value = env[variable];
   return value && path.posix.isAbsolute(value) ? value : path.posix.join(home, fallback);
@@ -69,7 +89,7 @@ export function appPaths(options: PathOptions): AppPaths {
       faviconsDir: join(root, "cache", "favicons"),
       instancesDir: join(root, "instances"),
       agentSocketsDir: join(root, "agent-browser"),
-      daemonEndpoint: pipeEndpoint(appDirName, "daemon"),
+      daemonEndpoint: pipeEndpoint(appDirName, userScope(home), "daemon"),
       dbFile: join(root, "data", "terminal-browser.db"),
     };
   }
@@ -94,13 +114,14 @@ export function appPaths(options: PathOptions): AppPaths {
  * Where one browser listens.
  *
  * On unix this is the socket file upstream created under the runtime directory. On
- * Windows it is a pipe named from the same two parts — the install-scoped app
- * directory name and the session key — so two installs, or two panes, never
- * collide, and neither does a Windows pipe with a unix path.
+ * Windows it is a pipe named from three parts — the install-scoped app directory
+ * name, the user (see `userScope`) and the session key — so two installs, two
+ * signed-in users, or two panes never collide, and neither does a Windows pipe with
+ * a unix path.
  */
 export function instanceEndpointIn(paths: AppPaths, options: PathOptions, key: string): string {
   if (options.platform === "win32") {
-    return pipeEndpoint(options.appDirName, "instance", key);
+    return pipeEndpoint(options.appDirName, userScope(options.home), "instance", key);
   }
   return path.posix.join(paths.instancesDir, `${key}.sock`);
 }

@@ -84,15 +84,39 @@ export function windowsHostRefusal(
   env: Record<string, string | undefined>,
 ): string | null {
   if (platform !== "win32") return null;
-  if (env.AGWINTERM_ENABLED === "1" && (env.AGWINTERM_SESSION_ID || env.AGWINTERM_PANE_ID)) {
-    return null;
-  }
+  if (inAgwintermPane(env)) return null;
   return [
     "terminal-browser on Windows draws into an agwinterm pane and there is no other host.",
     "Frames leave over agwinterm's control pipe rather than through the terminal's own",
     "output, because ConPTY strips the graphics escapes every other terminal would use.",
     "Run this from inside an agwinterm pane (AGWINTERM_ENABLED=1).",
   ].join(" ");
+}
+
+/**
+ * The one rule for "am I in an agwinterm pane", shared by everything that asks.
+ *
+ * There were three, and they disagreed. This one is the engine's, because the
+ * engine is what actually has to draw: `agwinterm.rs`'s `hosted` accepts any
+ * non-empty `AGWINTERM_ENABLED` other than `"0"`, and `cli/src/pane.ts` matches it.
+ * Requiring exactly `"1"` here made the CLI refuse to open a browser the engine
+ * would have drawn into perfectly well, for a host that spelled the flag `true`.
+ *
+ * The addressing rule is the engine's too. `"active"` names whichever pane happens
+ * to be in front, which is not the same pane a moment later, so it is refused
+ * rather than accepted -- taking it would have let the CLI launch a browser that
+ * then refused every frame, which is a browser that starts and shows nothing.
+ *
+ * `pane.ts` deliberately repeats this instead of importing it: that module is kept
+ * free of workspace imports so it can run after the browser has gone. What is
+ * shared is the rule, and `tools/cli/unsupported.test.mjs` drives the same table
+ * through both.
+ */
+export function inAgwintermPane(env: Record<string, string | undefined>): boolean {
+  const enabled = env.AGWINTERM_ENABLED?.trim();
+  if (!enabled || enabled === "0") return false;
+  const target = env.AGWINTERM_SESSION_ID?.trim() || env.AGWINTERM_PANE_ID?.trim();
+  return !!target && target !== "active";
 }
 
 /**

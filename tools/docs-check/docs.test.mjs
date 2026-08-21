@@ -171,6 +171,11 @@ test("what the docs say is refused is what the CLI refuses", () => {
   assert.deepEqual(
     exported.sort(),
     [
+      // Not a refusal: the shared "am I in an agwinterm pane" predicate that
+      // `windowsHostRefusal` decides on, kept here because `cli/src/pane.ts` and
+      // `agwinterm.rs` have to agree with it. Listed so the count below still
+      // means "one entry per row of the as-built table".
+      "inAgwintermPane",
       "sandboxSetupNote",
       "splitUnsupported",
       "sshUnsupported",

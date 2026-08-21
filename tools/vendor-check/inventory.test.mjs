@@ -777,3 +777,36 @@ describe("the Windows path fixes in clipboard_image.rs", () => {
     );
   });
 });
+
+/**
+ * `terminals/src/shared.ts` — the one line of `pixel-terminals` this port changed,
+ * and the only one, so it is covered here rather than in the package's own suite.
+ *
+ * That suite (`terminals/test/terminals.test.js`) is upstream's, is vendored
+ * byte-identical, and is **red at the vendor baseline**: one herdr case expects a
+ * `--right-click` fallback that `herdr.ts` does not implement. It is therefore not
+ * wired into the repo's `test` script, and fixing it is upstream's business, not
+ * this port's — `herdr` is permanently disabled here (`docs/design/07-as-built.md`
+ * §2), so the port has no way to verify a change to it. Recorded in `UPSTREAM.md`
+ * rather than left as a silent gap.
+ */
+describe("callerTty on Windows", () => {
+  const source = fs.readFileSync(path.join(REPO, "terminals", "src", "shared.ts"), "utf8");
+  const body = source.slice(source.indexOf("export function callerTty"));
+
+  it("answers before the ps walk, rather than letting it fail", () => {
+    // `ps` does not exist on Windows, so the walk throws on its first hop and
+    // reports `denied: true` — which callers read as a sandbox refusal and answer
+    // with advice about escalating permissions. There is no tty path to find here
+    // at all; that absence is the fact the whole port is built around.
+    const early = body.indexOf('process.platform === "win32"');
+    const walk = body.indexOf("execFileSync");
+    assert.ok(early > 0, "the Windows early return is gone from callerTty");
+    assert.ok(early < walk, "the ps walk now runs before the Windows check");
+    assert.match(
+      body.slice(early, walk),
+      /\{\s*path:\s*null,\s*denied:\s*false\s*\}/,
+      "the Windows answer must be `not found`, not `refused`",
+    );
+  });
+});

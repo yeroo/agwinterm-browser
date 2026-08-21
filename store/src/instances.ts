@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 
 import { store } from "./client";
-import { removeEndpoint } from "./endpoint";
+import { endpointAlive, isPipeEndpoint, removeEndpoint } from "./endpoint";
 import { instances } from "./schema";
 import type { InstanceRow, NewInstanceRow } from "./schema";
 
@@ -42,7 +42,7 @@ export async function listInstances(): Promise<InstanceRow[]> {
   const rows = await store().db.select().from(instances);
   const live: InstanceRow[] = [];
   for (const row of rows) {
-    if (alive(row.pid)) {
+    if (await stillThere(row)) {
       live.push(row);
       continue;
     }
@@ -51,3 +51,33 @@ export async function listInstances(): Promise<InstanceRow[]> {
   }
   return live.sort((a, b) => a.startedAt - b.startedAt);
 }
+
+/**
+ * Whether the browser a row describes is still running.
+ *
+ * The pid is the cheap answer and is usually the whole answer. It is not
+ * sufficient on its own, because pids are recycled: a browser that failed to
+ * delete its own row leaves one behind, and the moment the operating system hands
+ * that pid to any other process the row starts looking alive again -- permanently,
+ * and with no command to clear it. So a pid that *is* live has its endpoint probed
+ * as well, which is the only check a named pipe supports (`endpoint.ts`) and which
+ * a recycled pid cannot pass: the pipe name went with the process that owned it.
+ *
+ * The probe is skipped where it would be misleading rather than merely slow. A
+ * socket *file* outlives its server, so `endpointAlive` answering `false` for one
+ * does not mean the browser is gone -- `removeEndpoint` returning `true` is what
+ * says "this endpoint is a file", and those rows are trusted to the pid alone,
+ * which is exactly upstream's rule.
+ */
+async function stillThere(row: InstanceRow): Promise<boolean> {
+  if (!alive(row.pid)) return false;
+  if (!isPipeEndpoint(row.endpoint)) return true;
+  return endpointAlive(row.endpoint, ENDPOINT_PROBE_MS);
+}
+
+/**
+ * How long a row's endpoint gets to answer before it is treated as gone. Short: a
+ * live browser answers a local pipe connect immediately, and this runs once per
+ * row on every `ls`.
+ */
+const ENDPOINT_PROBE_MS = 250;

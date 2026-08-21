@@ -147,12 +147,34 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **406 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 349 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **223 passed**, 62 suites |
+| `cargo nextest run --workspace` | **418 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 361 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **254 passed**, 66 suites |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
+
+### The two probe crates are not in this table, on purpose
+
+`tools/conpty-probe` and `tools/console-inherit-probe` are standalone cargo packages
+with their own lockfiles, absent from `engine/Cargo.toml`'s workspace members — so
+`cargo test --workspace` does not reach their 278 lines of tests, and nothing in CI
+does either.
+
+That is deliberate rather than an oversight, but it has a cost worth stating. They
+are **one-shot measurements**, not regression tests: they answered "does a ConPTY
+child read SGR mouse reports" (Task 1) and "does a GUI-subsystem child inherit its
+parent's console" (Task 3), and those answers are what the process model and
+`ENABLE_REPORTING` were built on. Adding them to the workspace would mean every
+`cargo test` spawning real pseudoconsoles and real child processes, which is slow and
+flaky in a way unit tests should not be.
+
+The cost is that a Windows or toolchain change invalidating either measurement is
+invisible here. What stands in for them is narrower and cheap: `tools/process-model/
+entry.test.mjs` pins `electron.exe`'s PE subsystem, which is the property the
+inheritance measurement turns on. Run the probes by hand
+(`cd tools/console-inherit-probe && cargo test`) when that pin fails, or when the
+foreground shape stops working on a new Windows build.
 
 ### Why the two lint checks are scoped, and how the scope is enforced
 

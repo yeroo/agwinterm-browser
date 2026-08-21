@@ -42,6 +42,15 @@ const {
   windowsHostRefusal,
 } = await loadModule("cli/src/unsupported.ts");
 
+// The other reader of the same rule. `pane.ts` cannot import `unsupported.ts`
+// (both are kept workspace-import-free for different reasons), so the agreement is
+// asserted rather than assumed.
+const { paneClearRequest } = await loadModule("cli/src/pane.ts");
+
+// The other place a refusal has to appear: what a user reads *before* running the
+// command, rather than the sentence they meet when they do.
+const help = await loadModule("cli/src/help.ts");
+
 const OTHERS = ["linux", "darwin", "freebsd"];
 
 describe("--ssh", () => {
@@ -157,6 +166,42 @@ describe("the host refusal", () => {
     );
   });
 
+  // One table, three readers. `agwinterm.rs`'s `hosted` is the rule the engine
+  // draws by, `cli/src/pane.ts` repeats it (it must stay import-free), and this
+  // refusal is the CLI's copy. They disagreed: this one required exactly `"1"` and
+  // accepted `"active"`, so `AGWINTERM_ENABLED=true` refused a pane the engine
+  // would have drawn into, and `AGWINTERM_SESSION_ID=active` launched a browser
+  // that then refused every frame -- a browser that starts and shows nothing.
+  const HOST_CASES = [
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1" }, true, "the ordinary case"],
+    [{ AGWINTERM_ENABLED: "true", AGWINTERM_SESSION_ID: "s1" }, true, "any truthy spelling"],
+    [{ AGWINTERM_ENABLED: " 1 ", AGWINTERM_SESSION_ID: "s1" }, true, "padded by a shell"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_PANE_ID: "s1" }, true, "the older variable"],
+    [{ AGWINTERM_ENABLED: "0", AGWINTERM_SESSION_ID: "s1" }, false, "explicitly off"],
+    [{ AGWINTERM_ENABLED: "", AGWINTERM_SESSION_ID: "s1" }, false, "empty is not set"],
+    [{ AGWINTERM_SESSION_ID: "s1" }, false, "a session id with no host flag"],
+    [{ AGWINTERM_ENABLED: "1" }, false, "a host flag with no pane to address"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "  " }, false, "a blank session id"],
+    [
+      { AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "active" },
+      false,
+      "`active` names whichever pane is in front, which is not a pane",
+    ],
+    [{}, false, "no agwinterm at all"],
+  ];
+
+  it("uses the engine's rule for what counts as a pane", () => {
+    for (const [env, accepted, why] of HOST_CASES) {
+      assert.equal(windowsHostRefusal("win32", env) === null, accepted, why);
+    }
+  });
+
+  it("agrees with the pane-clear addressing, which repeats rather than imports it", () => {
+    for (const [env, accepted, why] of HOST_CASES) {
+      assert.equal(paneClearRequest(env) !== null, accepted, `pane.ts: ${why}`);
+    }
+  });
+
   it("refuses anywhere else on Windows, and says why the usual probe is not used", () => {
     for (const env of [{}, { AGWINTERM_ENABLED: "1" }, { AGWINTERM_SESSION_ID: "s1" }]) {
       const reason = windowsHostRefusal("win32", env);
@@ -191,5 +236,58 @@ describe("shutdown", () => {
     assert.ok(guard > at, "shutdownDaemon has no Windows branch");
     assert.ok(guard < pid, "daemonPid runs before the Windows branch");
     assert.match(source.slice(guard, pid), /no daemon on Windows/);
+  });
+});
+
+// The help text is the other place a refusal has to appear. `unsupported.ts` owns
+// the wording a user meets when they run a refused command; `help.ts` is what they
+// read *before* running it, and it was inherited unchanged — still advertising
+// --split, --ssh, upgrade and shutdown as though they worked here. A user who reads
+// the help and then hits a refusal has been sent the long way round for an answer
+// that could have been on the page.
+describe("the help text on Windows", () => {
+  const REFUSED_FLAGS = ["--split", "--ssh", "--ssh-bundle", "--ssh-bundle-dir"];
+
+  it("marks the commands that refuse, in the list they are listed in", () => {
+    const root = help.rootHelp("win32");
+    for (const command of ["upgrade", "shutdown"]) {
+      const line = root.split("\n").find((entry) => entry.trim().startsWith(command));
+      assert.ok(line, `${command} left the command list`);
+      assert.match(line, /not supported on Windows/, `${command} is listed as though it works`);
+    }
+  });
+
+  it("still gives a refused command a page, because 'why' is the question", () => {
+    for (const command of ["upgrade", "shutdown"]) {
+      const page = help.commandHelp(command, "win32");
+      assert.match(page, /Not supported on Windows/, `${command} has no explanation`);
+    }
+  });
+
+  it("says of every flag it advertises for `open` that Windows refuses it", () => {
+    const page = help.commandHelp("open", "win32");
+    const note = page.slice(page.indexOf("On Windows:"));
+    assert.ok(note, "`open` has no Windows note");
+    for (const flag of REFUSED_FLAGS) {
+      assert.ok(note.includes(flag), `the Windows note does not mention ${flag}`);
+    }
+  });
+
+  it("says `ls` is always every browser, which is what scopeHere does here", () => {
+    const page = help.commandHelp("ls", "win32");
+    assert.match(page.slice(page.indexOf("On Windows:")), /--all is the only behaviour/);
+  });
+
+  it("leaves every other platform's help exactly as upstream wrote it", () => {
+    for (const platform of OTHERS) {
+      assert.ok(!help.rootHelp(platform).includes("not supported on Windows"));
+      for (const topic of help.helpTopics()) {
+        assert.ok(
+          !help.commandHelp(topic, platform).includes("On Windows:"),
+          `${topic} leaks a Windows note on ${platform}`,
+        );
+        assert.ok(!help.commandHelp(topic, platform).includes("Not supported on Windows"));
+      }
+    }
   });
 });

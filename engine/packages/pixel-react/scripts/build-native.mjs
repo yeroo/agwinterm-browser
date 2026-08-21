@@ -33,13 +33,49 @@ export function build() {
   }
 
   fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.rmSync(destination, { force: true });
-  fs.copyFileSync(source, destination);
+  try {
+    fs.rmSync(destination, { force: true });
+    fs.copyFileSync(source, destination);
+  } catch (error) {
+    // `force: true` covers a *missing* file, not a busy one. Windows refuses to
+    // unlink or overwrite a DLL that is currently mapped, which here means a
+    // browser is still running on the previous build — and `EBUSY`/`EPERM` from a
+    // path called `pixel.node` reads as a permissions problem rather than as
+    // "close the browser and build again".
+    if (error.code === "EBUSY" || error.code === "EPERM" || error.code === "EACCES") {
+      throw new Error(
+        `${destination} is in use (${error.code}) — a browser is still running on ` +
+          `the previous build. Close it and build again.`,
+      );
+    }
+    throw error;
+  }
   return destination;
+}
+
+/**
+ * Whether this module is the process entry point.
+ *
+ * Both sides are resolved through `realpath`, because they arrive in different
+ * shapes: `import.meta.filename` has already been realpath'd by the ESM loader,
+ * while `process.argv[1]` is the path as typed. Comparing them directly made any
+ * invocation through a symlink — which is how a linked `node_modules/.bin` entry or
+ * a junctioned checkout runs — silently build nothing and exit 0.
+ */
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  const real = (file) => {
+    try {
+      return fs.realpathSync(path.resolve(file));
+    } catch {
+      return path.resolve(file);
+    }
+  };
+  return real(process.argv[1]) === real(import.meta.filename);
 }
 
 // Importing this module — which the tests do, for `libraryName` — must not shell out
 // to cargo, so the build runs only when the file is the entry point.
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isEntryPoint()) {
   build();
 }

@@ -26,6 +26,17 @@ def warnings():
         capture_output=True,
         text=True,
     )
+    # A workspace that does not compile emits errors, not warnings, so the regex
+    # below matches nothing and the whole check would report "0 warnings" and exit
+    # green -- which is exactly backwards. cargo's exit code is the only thing that
+    # separates "clean" from "never ran".
+    if proc.returncode != 0 and "warning:" not in proc.stderr:
+        sys.stderr.write(proc.stderr)
+        sys.stderr.write(
+            f"cargo clippy exited {proc.returncode} without producing warnings: "
+            "the workspace does not build, so nothing was checked.\n"
+        )
+        raise SystemExit(2)
     found = {}
     for line in proc.stderr.splitlines() + proc.stdout.splitlines():
         m = WARNING.match(line.strip())

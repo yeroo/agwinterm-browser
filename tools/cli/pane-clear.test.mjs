@@ -198,11 +198,16 @@ describe("sending the clear", () => {
 });
 
 describe("the CLI's foreground wait", () => {
-  it("clears after the child exits, not before", () => {
+  const body = mainSource.slice(
+    mainSource.indexOf("async function openInForeground"),
+    mainSource.indexOf("async function attachHere"),
+  );
+
+  it("clears after the browser is done, not before", () => {
     // The ordering is the whole point: clearing before the wait would take the
     // picture down while the browser is still drawing it.
-    const wait = mainSource.indexOf('child.on("exit"');
-    const clear = mainSource.indexOf("clearPaneFrame(process.env)");
+    const wait = body.indexOf("await Promise.race([exited, stopped])");
+    const clear = body.indexOf("clearPaneFrame(process.env)");
     assert.ok(wait > 0, "openInForeground no longer waits for the child");
     assert.ok(clear > wait, "the clear does not follow the wait");
   });
@@ -210,11 +215,33 @@ describe("the CLI's foreground wait", () => {
   it("does not let the clear decide the exit code", () => {
     // The browser's exit code is the pane's exit code (`docs/design/03-process-model.md`).
     // A failed cleanup of a placement that is already gone must not overwrite it.
-    const body = mainSource.slice(
-      mainSource.indexOf("async function openInForeground"),
-      mainSource.indexOf("async function attachHere"),
+    assert.match(body, /const code = await Promise\.race/);
+    assert.match(body, /await clearPaneFrame\(process\.env\);[\s\S]*return code;/);
+  });
+
+  it("listens for the signals that used to skip the clear entirely", () => {
+    // Ctrl+C reaches every process attached to a Windows console, and Node with no
+    // listener for SIGINT terminates immediately -- so the CLI died alongside the
+    // browser and the clear above never ran, leaving the last page painted over the
+    // shell that had just got the pane back. Listening is what keeps this process
+    // alive long enough to finish; it is not about handling the signal, and the
+    // handler here kills nothing.
+    //
+    // The list itself is `FOREGROUND_SIGNALS` in `cli/src/launch.ts`, exercised by
+    // `tools/launcher/launch.test.mjs`; what is checked here is that this function
+    // registers it and that the registration precedes the wait.
+    const listen = body.indexOf("process.on(signal, handler)");
+    assert.ok(listen > 0, "openInForeground registers no signal handlers");
+    assert.ok(
+      listen < body.indexOf("await Promise.race([exited, stopped])"),
+      "the handlers go on after the wait has already begun",
     );
-    assert.match(body, /const exited = await new Promise<number>/);
-    assert.match(body, /await clearPaneFrame\(process\.env\);\s*\n\s*return exited;/);
+  });
+
+  it("takes the listeners off again, so a clean quit does not hang", () => {
+    // A registered signal listener keeps Node's event loop alive, and `main` only
+    // calls `process.exit` for a non-zero code -- so leaving them on would hang
+    // every ordinary `q`.
+    assert.match(body, /finally \{[\s\S]*process\.removeListener\(signal, handler\)/);
   });
 });

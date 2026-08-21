@@ -878,10 +878,25 @@ mod tests {
         // Windows has no SIGWINCH, and Electron's stdout is a pipe rather than a
         // `tty.WriteStream`, so that event never fires. `poll_event` polling the
         // screen buffer is the only route left.
-        assert_eq!(
-            super::WATCH_RESIZE,
-            cfg!(windows),
-            "on Windows this must be on -- it is the only resize mechanism there              is; off Windows it must stay off, because upstream's signal handler              is better than polling",
+        // Asserted against the source rather than against the value. Comparing
+        // `WATCH_RESIZE` with `cfg!(windows)` restates its own definition -- the
+        // assertion cannot fail, and clippy says so -- while what a re-vendor
+        // actually breaks is one of two lines of text: the definition, or the use.
+        // `Engine::new` cannot be constructed in a unit test, so the use is pinned
+        // where it is written. Reverting `watch_resize: WATCH_RESIZE` to
+        // `watch_resize: false` compiles, passes every other test, and brings back
+        // the Task 10 bug where a resized pane went on drawing the old size.
+        //
+        // Each needle is spelled in two pieces so it cannot satisfy itself: this
+        // file *is* the haystack.
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains(concat!("WATCH_RESIZE: bool = ", "cfg!(windows)")),
+            "the constant no longer follows the platform",
+        );
+        assert!(
+            source.contains(concat!("watch_resize: ", "WATCH_RESIZE,")),
+            "EngineConfig no longer takes its watch_resize from the constant",
         );
     }
 }

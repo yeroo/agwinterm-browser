@@ -137,15 +137,73 @@ Examples:
   },
 };
 
+// -- what the help says differently on Windows -------------------------------
+//
+// The bodies above are upstream's, deliberately: leaving them byte-for-byte is what
+// keeps a re-vendor of this file a no-op. But four of the things they advertise are
+// refused here (`cli/src/unsupported.ts`) and two more behave differently, and help
+// text describing commands the shipped binary will not run is worse than no help at
+// all — it sends the reader to a refusal for an answer they could have had here.
+//
+// So the platform notes are appended rather than edited in, and a refused command
+// is marked in the list rather than removed from it: "why is it refused" is the
+// question a reader arrives with, so it still needs a page.
+
+/** Commands that exist, are listed, and refuse on Windows. */
+const WINDOWS_REFUSED = new Set(["upgrade", "shutdown"]);
+
+/** Appended to a command's body on Windows. Short; the reasons are in the docs. */
+const WINDOWS_NOTES: Record<string, string> = {
+  open: `
+On Windows:
+  --split, --ssh, --ssh-bundle and --ssh-bundle-dir are refused. Run one and it
+  names its own obstacle; the reasoning is in docs/design/07-as-built.md.
+  The browser runs in the foreground of the pane it was started from and holds
+  that pane's console until it exits, so its exit code is this command's.
+  Requires an agwinterm pane — there is no other host.
+`,
+  ls: `
+On Windows:
+  --all is the only behaviour there is. One browser per pane holds that pane's
+  console for as long as it lives, so no CLI can be running in the same tab as a
+  browser and "this terminal tab" would always be empty. Every browser is listed;
+  pass --browser <key> to pick one.
+`,
+  "new-tab": `
+On Windows:
+  There is no "browser in this terminal tab" to prefer, so with more than one
+  browser open --browser <key> is required. With none, a browser opens here, in
+  this pane, in the foreground — not in a split.
+`,
+  upgrade: `
+Not supported on Windows:
+  This runs the release channel's install URL through bash, and no Windows release
+  channel publishes one. Pull the repository and rebuild instead.
+`,
+  shutdown: `
+Not supported on Windows:
+  There is no daemon to stop — each browser runs in its own pane
+  (docs/design/03-process-model.md). Close one with q, or stop its process.
+`,
+  setup: `
+On Windows:
+  There is no sandbox to configure. Chromium sandboxes its own processes here; the
+  AppArmor profile this installs on Linux is a workaround for Ubuntu withholding
+  unprivileged user namespaces.
+`,
+};
+
 function block(text: string): string {
   return `${text.trim()}\n`;
 }
 
-export function rootHelp(): string {
+export function rootHelp(platform: NodeJS.Platform = process.platform): string {
   const width = Math.max(...Object.keys(COMMANDS).map((name) => name.length));
-  const lines = Object.entries(COMMANDS).map(
-    ([name, help]) => `  ${name.padEnd(width)}  ${help.summary}`,
-  );
+  const lines = Object.entries(COMMANDS).map(([name, help]) => {
+    const refused = platform === "win32" && WINDOWS_REFUSED.has(name);
+    const summary = refused ? `${help.summary} (not supported on Windows)` : help.summary;
+    return `  ${name.padEnd(width)}  ${summary}`;
+  });
   return block(`
 Usage: terminal-browser [url] [options]
        terminal-browser <command> [args]
@@ -157,10 +215,14 @@ terminal-browser --version prints the installed version
 `);
 }
 
-export function commandHelp(name: string): string | null {
+export function commandHelp(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
   const help = COMMANDS[name];
   if (!help) return null;
-  return block(`Usage: ${help.usage}\n${help.body}`);
+  const note = platform === "win32" ? (WINDOWS_NOTES[name] ?? "") : "";
+  return block(`Usage: ${help.usage}\n${help.body}${note}`);
 }
 
 export function helpTopics(): string[] {

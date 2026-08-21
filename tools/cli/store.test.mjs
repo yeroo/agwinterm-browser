@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,10 +16,32 @@ import { after, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
+import { requireBuilt } from "../lib/built.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
+// Before the import, and that order is the whole trick. `store/src/paths.ts`
+// resolves `DB_FILE` from the environment once, at module load, and `store()` is a
+// lazy singleton over it -- so pointing the roots at a scratch directory *first* is
+// what lets these tests call the shipped `listInstances` rather than restate its
+// contract against a database they opened themselves. The previous version of this
+// suite reimplemented the pruning rule in the test file, which meant inverting the
+// rule in `instances.ts` left every assertion green.
+const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "winterm-store-root-"));
+process.env.LOCALAPPDATA = stateRoot;
+process.env.XDG_DATA_HOME = path.join(stateRoot, "data");
+process.env.XDG_STATE_HOME = path.join(stateRoot, "state");
+process.env.XDG_CACHE_HOME = path.join(stateRoot, "cache");
+process.env.XDG_RUNTIME_DIR = path.join(stateRoot, "run");
+
+requireBuilt(REPO, "store/dist/index.js", "store/src", "corepack pnpm --filter pixel-store build");
+
 const store = await import(pathToFileURL(path.join(REPO, "store", "dist", "index.js")).href);
+assert.ok(
+  store.DB_FILE.startsWith(stateRoot),
+  `the scratch roots did not take: ${store.DB_FILE}`,
+);
 const { migrations } = await import(
   pathToFileURL(path.join(REPO, "store", "dist", "migrations.gen.js")).href
 );
@@ -28,9 +51,11 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "winterm-store-"));
 after(() => {
   // A failed assertion can leave a database handle open, and Windows will not
   // unlink an open file. Losing a scratch directory is not worth a second failure.
-  try {
-    fs.rmSync(scratch, { recursive: true, force: true });
-  } catch {}
+  for (const dir of [scratch, stateRoot]) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {}
+  }
 });
 
 /** `node:sqlite` returns null-prototype rows; `deepEqual` will not have them. */
@@ -97,101 +122,111 @@ describe("the endpoint column", () => {
 });
 
 describe("pruning a dead browser", () => {
-  /** `listInstances` against a scratch database, without touching the real one. */
-  async function withRows(rows, fn) {
-    const opened = store.openStore(dbFile());
+  const sqlite = () => store.store().sqlite;
+  const rowsNow = () => plain(sqlite().prepare("SELECT key FROM instances ORDER BY key").all());
+
+  /** Nothing carried between tests: the store is one process-wide singleton. */
+  function seed(rows) {
+    sqlite().exec("DELETE FROM instances");
     for (const row of rows) {
-      opened.sqlite
+      sqlite()
         .prepare(
           "INSERT INTO instances (key, pid, endpoint, started_at, url, title) VALUES (?, ?, ?, ?, '', '')",
         )
         .run(row.key, row.pid, row.endpoint, row.startedAt ?? 0);
     }
-    try {
-      return await fn(opened);
-    } finally {
-      opened.sqlite.close();
-    }
   }
 
-  it("keeps a row whose process is alive", async () => {
-    await withRows(
-      [{ key: "live", pid: process.pid, endpoint: store.pipeEndpoint("app", "instance", "live") }],
-      async (opened) => {
-        const live = await listVia(opened);
-        assert.deepEqual(live.map((row) => row.key), ["live"]);
-      },
-    );
+  /** An endpoint of the shape this platform actually uses, with a server on it. */
+  const servers = [];
+  async function listening(name) {
+    const endpoint =
+      process.platform === "win32"
+        ? store.pipeEndpoint("winterm-test", String(process.pid), name)
+        : path.join(scratch, `${name}-${process.pid}.sock`);
+    const server = net.createServer(() => {});
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(endpoint, resolve);
+    });
+    servers.push(server);
+    return endpoint;
+  }
+
+  /** An endpoint of the same shape with nothing behind it. */
+  const gone = (name) =>
+    process.platform === "win32"
+      ? store.pipeEndpoint("winterm-test", String(process.pid), `${name}-gone`)
+      : path.join(scratch, `${name}-gone.sock`);
+
+  after(() => {
+    for (const server of servers) server.close();
   });
 
-  it("drops a row whose process is gone — the thing that actually goes stale", async () => {
-    // Pid 1 on Windows is the System Idle Process and never matches a browser;
-    // a pid this large is reliably absent.
-    await withRows(
-      [
-        { key: "live", pid: process.pid, endpoint: store.pipeEndpoint("app", "instance", "live") },
-        { key: "dead", pid: 0x7ffffff0, endpoint: store.pipeEndpoint("app", "instance", "dead") },
-      ],
-      async (opened) => {
-        const live = await listVia(opened);
-        assert.deepEqual(live.map((row) => row.key), ["live"]);
-        const remaining = plain(opened.sqlite.prepare("SELECT key FROM instances").all());
-        assert.deepEqual(remaining, [{ key: "live" }]);
-      },
-    );
+  it("keeps a browser whose process is alive and whose endpoint answers", async () => {
+    seed([{ key: "live", pid: process.pid, endpoint: await listening("live") }]);
+    const live = await store.listInstances();
+    assert.deepEqual(live.map((row) => row.key), ["live"]);
+  });
+
+  it("drops a row whose process is gone - the thing that actually goes stale", async () => {
+    // A pid this large is reliably absent; pid 1 on Windows is the System Idle
+    // Process and would look alive.
+    seed([
+      { key: "live", pid: process.pid, endpoint: await listening("survivor") },
+      { key: "dead", pid: 0x7ffffff0, endpoint: gone("dead") },
+    ]);
+    const live = await store.listInstances();
+    assert.deepEqual(live.map((row) => row.key), ["live"]);
+    assert.deepEqual(rowsNow(), [{ key: "live" }], "the dead row is still in the table");
+  });
+
+  it("drops a row whose pid is alive but whose pipe is nobody's - the recycled pid", async () => {
+    // The failure this rule exists for: a browser that exited without deleting its
+    // row leaves one behind, and the moment the operating system hands that pid to
+    // any other process the row starts looking alive again. Permanently, with no
+    // command to clear it, and on Windows `scopeHere` puts every browser in scope --
+    // so one phantom made every `new-tab` ask which browser was meant.
+    //
+    // A pipe name cannot be recycled with the pid: it went with the process that
+    // owned it. `process.pid` here is this test runner, which is certainly alive.
+    if (process.platform !== "win32") return;
+    seed([{ key: "phantom", pid: process.pid, endpoint: gone("phantom") }]);
+    assert.deepEqual(await store.listInstances(), []);
+    assert.deepEqual(rowsNow(), [], "the phantom row survived");
+  });
+
+  it("trusts a socket file to the pid alone, because a socket file outlives its server", async () => {
+    // The asymmetry `endpoint.ts` is about. A pipe that does not answer is proof the
+    // server is gone; a socket *file* that does not answer proves nothing about
+    // whether it is about to be listened on again, so upstream's rule -- the pid
+    // decides -- is the right one for it.
+    if (process.platform === "win32") return;
+    const orphan = path.join(scratch, "orphan.sock");
+    fs.writeFileSync(orphan, "");
+    seed([{ key: "filed", pid: process.pid, endpoint: orphan }]);
+    assert.deepEqual((await store.listInstances()).map((row) => row.key), ["filed"]);
   });
 
   it("unlinks a dead row's socket file, and is untroubled by a pipe name", async () => {
     const socket = path.join(scratch, "dead.sock");
     fs.writeFileSync(socket, "");
-    await withRows(
-      [
-        { key: "dead-file", pid: 0x7ffffff0, endpoint: socket },
-        { key: "dead-pipe", pid: 0x7ffffff0, endpoint: store.pipeEndpoint("app", "gone") },
-      ],
-      async (opened) => {
-        assert.deepEqual(await listVia(opened), []);
-        assert.equal(fs.existsSync(socket), false);
-      },
-    );
+    seed([
+      { key: "dead-file", pid: 0x7ffffff0, endpoint: socket },
+      { key: "dead-pipe", pid: 0x7ffffff0, endpoint: store.pipeEndpoint("app", "gone") },
+    ]);
+    assert.deepEqual(await store.listInstances(), []);
+    assert.equal(fs.existsSync(socket), false);
   });
 
   it("returns the survivors oldest first", async () => {
-    await withRows(
-      [
-        { key: "b", pid: process.pid, endpoint: store.pipeEndpoint("app", "b"), startedAt: 200 },
-        { key: "a", pid: process.pid, endpoint: store.pipeEndpoint("app", "a"), startedAt: 100 },
-      ],
-      async (opened) => {
-        assert.deepEqual((await listVia(opened)).map((row) => row.key), ["a", "b"]);
-      },
-    );
+    seed([
+      { key: "b", pid: process.pid, endpoint: await listening("b"), startedAt: 200 },
+      { key: "a", pid: process.pid, endpoint: await listening("a"), startedAt: 100 },
+    ]);
+    assert.deepEqual((await store.listInstances()).map((row) => row.key), ["a", "b"]);
   });
 });
-
-/**
- * `listInstances` reads the process-wide store, so this reimplements its contract
- * against an explicitly opened one — the pruning rule, not the singleton.
- */
-async function listVia(opened) {
-  const rows = opened.sqlite.prepare("SELECT * FROM instances").all();
-  const live = [];
-  for (const row of rows) {
-    let alive = true;
-    try {
-      process.kill(row.pid, 0);
-    } catch (error) {
-      alive = error.code === "EPERM";
-    }
-    if (alive) {
-      live.push(row);
-      continue;
-    }
-    opened.sqlite.prepare("DELETE FROM instances WHERE key = ?").run(row.key);
-    store.removeEndpoint(row.endpoint);
-  }
-  return live.sort((a, b) => a.started_at - b.started_at);
-}
 
 describe("the pruning rule in the shipped module", () => {
   const source = fs.readFileSync(path.join(REPO, "store", "src", "instances.ts"), "utf8");

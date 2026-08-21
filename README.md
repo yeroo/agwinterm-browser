@@ -12,8 +12,10 @@ graphics APC escapes written to stdout — is stripped by ConPTY before any Wind
 Both are covered in [`docs/design/00-port-brief.md`](docs/design/00-port-brief.md).
 
 So the port **keeps** upstream's Electron browser, its React chrome and its `pixel-core` compositor
-— 43 of `pixel-core`'s 46 source files needed no change, because taffy, tiny-skia and fontdue are
-already portable — and replaces the layer underneath: the tty module is split and its Windows half
+— 43 of `pixel-core`'s 46 source files use no unix API at all, and 40 of them ended up
+byte-identical (the other three have a written reason in
+[`UPSTREAM.md`](docs/design/UPSTREAM.md)), because taffy, tiny-skia and fontdue are already
+portable — and replaces the layer underneath: the tty module is split and its Windows half
 rewritten, and frames leave over agwinterm's control pipe instead of through the terminal's own
 output. In one line: **split one module, port one, drop one, keep forty-three.**
 
@@ -23,7 +25,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 406 Rust tests and 223 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 418 Rust tests and 254 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -41,6 +43,11 @@ fast path, blocked on an unpublished contract — so frames go out as PNG at abo
 | Node | 22.x |
 | pnpm | 10.13.1, via `corepack` (bundled with Node) |
 | Rust | 1.93.1 — pinned by `engine/rust-toolchain.toml`, with the MSVC toolchain |
+| `cargo-nextest` | only for the test command below: `cargo install --locked cargo-nextest`. Not part of the pinned toolchain. |
+| Python | 3.x, only for the two vendor-scope lint checks below |
+
+`engine/justfile` is upstream's recipe set and installs its tools with `brew`; it is not the
+Windows entry point. The commands in this file are.
 
 The browser draws into an agwinterm pane over its control pipe and nothing else. Run outside one
 and the CLI says so rather than starting a browser you cannot see.

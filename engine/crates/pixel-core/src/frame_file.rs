@@ -512,9 +512,9 @@ impl FramePublisher {
             Ok(result) => {
                 cost.publish = started.elapsed();
                 self.budget.record(cost);
+                self.check_transmitted(result, &path);
                 self.written.push(path);
                 self.reap();
-                self.check_transmitted(result);
                 Ok(png.len())
             }
             Err(err) => {
@@ -560,22 +560,38 @@ impl FramePublisher {
     /// already had, or could not read them — the two silent failures unique paths
     /// exist to prevent. If it ever happens the picture is frozen, so it is said
     /// out loud rather than inferred from a still screen.
-    fn check_transmitted(&mut self, result: String) {
+    /// A `placed` of zero is the case a `transmitted < placed` test cannot see,
+    /// because `0 < 0` is false. It is what agwinterm answers when it cannot open
+    /// the path at all: `HandleImageFrame` skips an image whose file it cannot find
+    /// *before* it counts it, so an unreachable frame directory reports `frame:0/0`
+    /// -- a success, on every frame, with the pane left blank because the clear
+    /// phase has already run. A redirected `TEMP`, a pane hosted by another user or
+    /// an antivirus quarantine all put the frame directory out of the host's reach,
+    /// so this is a state rather than a hypothetical.
+    fn check_transmitted(&mut self, result: String, path: &Path) {
         let Some((placed, transmitted)) = frame_counts(&result) else {
             return;
         };
-        if transmitted < placed && !self.warned_untransmitted {
-            self.warned_untransmitted = true;
-            crate::logging::warn(
-                "agwinterm",
-                format!(
-                    "agwinterm placed {placed} image(s) but read {transmitted} of them \
-                     ({result:?}): the pane is showing a stale frame. Every frame is \
-                     written to a path of its own, so this means the file could not be \
-                     read rather than that it looked unchanged"
-                ),
-            );
+        if (placed > 0 && transmitted >= placed) || self.warned_untransmitted {
+            return;
         }
+        self.warned_untransmitted = true;
+        let why = if placed == 0 {
+            format!(
+                "agwinterm placed none of the frame ({result:?}): it could not open \
+                 {}, so the pane has been left blank. Check that the process hosting \
+                 the pane can read the frame directory",
+                path.display(),
+            )
+        } else {
+            format!(
+                "agwinterm placed {placed} image(s) but read {transmitted} of them \
+                 ({result:?}): the pane is showing a stale frame. Every frame is \
+                 written to a path of its own, so this means the file could not be \
+                 read rather than that it looked unchanged"
+            )
+        };
+        crate::logging::warn("agwinterm", why);
     }
 }
 
@@ -1002,6 +1018,7 @@ mod tests {
         // `frame:1/0` is the silent-stale-image failure: the host placed an image
         // but never read our bytes. It cannot happen through a unique path unless
         // the read itself failed, so it is worth saying out loud.
+        let mark = log_mark();
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:1/0"}"#);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
@@ -1011,10 +1028,12 @@ mod tests {
                 .publish(&mut client, &canvas(16, 16), (1, 1))
                 .expect("a placed frame is still a delivered frame");
         }
-        assert!(
-            publisher.warned_untransmitted,
-            "nothing noticed the stale frame"
-        );
+        // Counted, not latched. `warned_untransmitted == true` shows "at least
+        // once", which is the half of the claim that was never in doubt; the half
+        // worth testing is that three stale frames do not produce three lines in a
+        // log the user is reading at 26 frames a second.
+        let said = warnings_since(mark, "but read");
+        assert_eq!(said.len(), 1, "said once, or not at all: {said:?}");
 
         assert_eq!(frame_counts("frame:1/1"), Some((1, 1)));
         assert_eq!(frame_counts("\"frame:2/0\""), Some((2, 0)));
@@ -1022,6 +1041,32 @@ mod tests {
             frame_counts("shown"),
             None,
             "another verb's reply is not counts"
+        );
+    }
+
+    #[test]
+    fn a_frame_the_host_could_not_open_at_all_is_complained_about_too() {
+        // `frame:0/0` is the *other* silent failure, and the one a
+        // `transmitted < placed` test steps straight over because `0 < 0` is false.
+        // agwinterm skips an image whose file it cannot open before it counts it, so
+        // a frame directory the host process cannot read answers success on every
+        // frame while the pane stays blank -- the clear phase has already run.
+        let mark = log_mark();
+        let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        for _ in 0..3 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("the host answered, so the write itself succeeded");
+        }
+        let said = warnings_since(mark, "placed none of the frame");
+        assert_eq!(said.len(), 1, "said once, or not at all: {said:?}");
+        assert!(
+            said[0].contains(".png"),
+            "the complaint must name the path the host could not open: {}",
+            said[0],
         );
     }
 

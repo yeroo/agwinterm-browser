@@ -19,8 +19,15 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { requireBuilt } from "../lib/built.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
+
+// These suites drive the *built* package rather than transpiled sources, so a
+// missing or stale `dist/` would either die with a module-not-found stack or, worse,
+// pass green against the previous build.
+requireBuilt(REPO, "store/dist/index.js", "store/src", "corepack pnpm --filter pixel-store build");
 
 const store = await import(
   new URL(`file:///${path.join(REPO, "store", "dist", "index.js").replaceAll("\\", "/")}`).href
@@ -130,7 +137,10 @@ describe("application-data locations", () => {
   });
 
   it("names the daemon a pipe on Windows and a socket file on unix", () => {
-    assert.equal(appPaths(windows).daemonEndpoint, `${PIPE_PREFIX}${APP}-daemon`);
+    const daemon = appPaths(windows).daemonEndpoint;
+    assert.ok(daemon.startsWith(PIPE_PREFIX), daemon);
+    // `u<8 hex>` is the user scope; see `userScope` in store/src/paths.ts.
+    assert.match(daemon.slice(PIPE_PREFIX.length), new RegExp(`^${APP}-u[0-9a-f]{8}-daemon$`));
     assert.equal(appPaths(linux).daemonEndpoint, `/run/user/1000/${APP}/daemon.sock`);
   });
 
@@ -158,11 +168,33 @@ describe("application-data locations", () => {
 });
 
 describe("per-browser endpoint resolution", () => {
-  it("is a pipe named from the install and the session key on Windows", () => {
-    const paths = appPaths(windows);
+  it("is a pipe named from the install, the user and the session key on Windows", () => {
+    const endpoint = instanceEndpointIn(appPaths(windows), windows, "4321-2");
+    assert.ok(endpoint.startsWith(PIPE_PREFIX), endpoint);
+    // `u<8 hex>` is the user scope; see `userScope` in store/src/paths.ts.
+    assert.match(
+      endpoint.slice(PIPE_PREFIX.length),
+      new RegExp(`^${APP}-u[0-9a-f]{8}-instance-4321-2$`),
+      endpoint,
+    );
+  });
+
+  it("gives two signed-in users different endpoints for the same install and key", () => {
+    // The Win32 pipe namespace is machine-global and has no owner, unlike the 0700
+    // XDG_RUNTIME_DIR the unix sockets live in. Without the user in the name two
+    // people signed in to one machine collide — the second browser's listen fails
+    // with EADDRINUSE — and any local process can take a name it can predict.
+    const other = { ...windows, home: "C:\\Users\\grace" };
+    assert.notEqual(
+      instanceEndpointIn(appPaths(windows), windows, "1-1"),
+      instanceEndpointIn(appPaths(other), other, "1-1"),
+    );
+  });
+
+  it("gives the same user the same endpoint every time, so the CLI can find it", () => {
     assert.equal(
-      instanceEndpointIn(paths, windows, "4321-2"),
-      `${PIPE_PREFIX}${APP}-instance-4321-2`,
+      instanceEndpointIn(appPaths(windows), windows, "1-1"),
+      instanceEndpointIn(appPaths(windows), windows, "1-1"),
     );
   });
 
@@ -259,11 +291,32 @@ describe("stale-endpoint cleanup, against a real pipe", () => {
     assert.equal(await reclaimEndpoint(pipeEndpoint(APP, "test", "free"), 500), true);
   });
 
-  it("reclaims a stale socket file, and leaves a live one to its owner", async () => {
+  it("reclaims a stale socket file", async () => {
     const stale = path.join(scratch, "stale.sock");
     fs.writeFileSync(stale, "");
     assert.equal(await reclaimEndpoint(stale, 500), true);
     assert.equal(fs.existsSync(stale), false);
+  });
+
+  it("leaves a live socket file to its owner, which is the change over upstream", async () => {
+    // Upstream unlinked before `listen` without probing. A socket file is not the
+    // server: unlinking a live one does not stop the process holding it, it just
+    // makes it unreachable by name — the browser goes on running and every `ls`,
+    // `new-tab` and `action` stops finding it. Probing first is the whole point of
+    // `reclaimEndpoint`, and only the *stale* half of it was covered.
+    //
+    // Windows has no unix socket to listen on, so this asserts the rule where it
+    // can be asserted and the platform decides whether it runs.
+    if (process.platform === "win32") return;
+    const live = path.join(scratch, "live.sock");
+    const server = await serve(live);
+    try {
+      assert.equal(await reclaimEndpoint(live, 500), false);
+      assert.equal(fs.existsSync(live), true, "a live socket file was unlinked");
+      assert.equal(await endpointAlive(live, 500), true, "its owner was detached from it");
+    } finally {
+      await close(server);
+    }
   });
 
   it("gives up rather than hanging when nothing answers", async () => {
