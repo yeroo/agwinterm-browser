@@ -20,6 +20,12 @@ import { setupCommand } from "./editors";
 import { commandHelp, helpTopics, rootHelp } from "./help";
 import { browsers, describe, recordKey } from "./instances";
 import type { Browser } from "./instances";
+import {
+  browserLaunchPlan,
+  electronBinaryPath,
+  missingLaunchArtifact,
+} from "./launch";
+import type { LaunchPlan } from "./launch";
 import { lsCommand } from "./ls";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
@@ -58,34 +64,24 @@ function takeBoolFlag(args: string[], name: string): boolean {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const ELECTRON_DIST_BIN =
-  process.platform === "darwin"
-    ? ["terminal-browser.app", "Contents", "MacOS", "terminal-browser"]
-    : ["electron"];
-const ELECTRON_DEV_BIN =
-  process.platform === "darwin"
-    ? ["Electron.app", "Contents", "MacOS", "Electron"]
-    : ["electron"];
-
 function browserDirectory(): string {
   return path.resolve(__dirname, "..", "..", "browser");
 }
 
 function electronBinary(): string {
-  return DIST_ROOT
-    ? path.join(DIST_ROOT, "electron", ...ELECTRON_DIST_BIN)
-    : path.join(browserDirectory(), "node_modules", "electron", "dist", ...ELECTRON_DEV_BIN);
+  return electronBinaryPath({
+    platform: process.platform,
+    browserDir: browserDirectory(),
+    distRoot: DIST_ROOT,
+  });
 }
 
-function browserLaunchCommand(argv: string[]): { command: string[]; cwd: string } {
+function browserLaunchCommand(argv: string[]): LaunchPlan {
   const browserDir = browserDirectory();
   const electron = electronBinary();
   const main = path.join(browserDir, "dist", "main.js");
-  for (const required of [electron, main]) {
-    if (!fs.existsSync(required)) {
-      fail(`missing ${required} — build the browser first (pnpm --filter terminal-browser build)`);
-    }
-  }
+  const missing = missingLaunchArtifact(electron, main, (candidate) => fs.existsSync(candidate));
+  if (missing) fail(missing);
   if (process.platform === "linux") {
     let sandboxError = linuxSandboxError(electron);
     if (sandboxError) {
@@ -94,19 +90,18 @@ function browserLaunchCommand(argv: string[]): { command: string[]; cwd: string 
     }
     if (sandboxError) fail(sandboxError);
   }
-  // headless ozone reports a 1x1 screen unless told otherwise:
-  // https://source.chromium.org/chromium/chromium/src/+/refs/tags/150.0.7871.212:ui/ozone/platform/headless/headless_screen.cc;l=37-46
-  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    argv = [...argv, "--ozone-platform=headless", "--screen-info={8192x8192}"];
-  }
   ensureDataDir();
   const logDir = LOGS_DIR;
   fs.mkdirSync(logDir, { recursive: true });
-  const quoted = [electron, main, ...argv]
-    .map((arg) => `'${arg.replaceAll("'", `'\\''`)}'`)
-    .join(" ");
-  const line = `exec ${quoted} 2>>'${logDir.replaceAll("'", `'\\''`)}/stderr.log'`;
-  return { command: ["/bin/sh", "-c", line], cwd: browserDir };
+  return browserLaunchPlan({
+    platform: process.platform,
+    env: process.env,
+    electron,
+    main,
+    argv,
+    browserDir,
+    logDir,
+  });
 }
 
 function clientLaunchCommand(argv: string[]): string[] {
@@ -151,9 +146,24 @@ function connectDaemon(): Promise<net.Socket> {
 }
 
 function spawnDaemon() {
-  const { command, cwd } = browserLaunchCommand(["--daemon"]);
-  const child = spawn(command[0], command.slice(1), { cwd, detached: true, stdio: "ignore" });
-  child.unref();
+  const plan = browserLaunchCommand(["--daemon"]);
+  // stands in for the shell's stderr-append redirection: the log is ours to
+  // open, and the child inherits it as fd 2. Closing our copy leaves the
+  // child's alive.
+  let stderr: number | "ignore" = "ignore";
+  try {
+    stderr = fs.openSync(plan.stderrLog, "a");
+  } catch {}
+  try {
+    const child = spawn(plan.file, plan.args, {
+      cwd: plan.cwd,
+      detached: true,
+      stdio: ["ignore", "ignore", stderr],
+    });
+    child.unref();
+  } finally {
+    if (typeof stderr === "number") fs.closeSync(stderr);
+  }
 }
 
 async function daemonSocket(): Promise<net.Socket> {

@@ -794,23 +794,68 @@ keep-unchanged modules. [triage: major]
 Moved ahead of the milestone: revision 1 put the launcher in Task 11, three tasks *after* the
 milestone that needs it. [triage: critical]
 
-- [ ] add a Windows branch to `offscreenPreferences` (`browser/src/page/offscreen.ts`) returning
+- [x] add a Windows branch to `offscreenPreferences` (`browser/src/page/offscreen.ts`) returning
       `{ useSharedTexture: false, deviceScaleFactor }`, and make `initOffscreenMode` report `bitmap`
       on Windows without throwing. **Check first whether the existing non-darwin branch already does
       this** — if so, say that in the plan and skip it rather than adding dead code [triage: minor]
-- [ ] confirm `presentPaint` falls through to `presentBitmap` and that `BitmapPresenter` throttles
-- [ ] **port the launch path out of `cli/src/main.ts`**: `:109` builds
+      — **checked, and skipped: the existing non-darwin branch already does it.** `SHM_FRAMES`
+      (`offscreen.ts:4`) is gated on `platform === "linux"`, so on Windows the fallthrough returns
+      `{ useSharedTexture: false, useSharedMemory: false, deviceScaleFactor }` — the shape the plan
+      asked for, plus a fork-only key explicitly turned off, which stock Electron ignores.
+      `initOffscreenMode`'s throw is inside `platform === "darwin"`, and its mode string already
+      resolves to `bitmap` off linux. **`browser/src/page/offscreen.ts` is unchanged by this task**;
+      the claim is pinned by tests instead, including that `TERMINAL_BROWSER_SHM=1` cannot turn
+      shared memory back on for Windows.
+- [x] confirm `presentPaint` falls through to `presentBitmap` and that `BitmapPresenter` throttles
+      — confirmed for both, but ➕ **`presentPaint` is not the Windows path.** `controller.ts:163-173`
+      (and `devtools.ts:90-100`) only call `presentPaint` when `event.texture || shmFrame`; with
+      neither — which is every frame on stock Electron — the frame goes to `this.bitmaps.push(…)`.
+      So the **throttled `BitmapPresenter` is what Windows runs**, and `presentBitmap` is the
+      fallback behind it. Both are now tested, because Task 10's frame budget is a property of the
+      presenter, not of `presentPaint`. The throttle is a `setImmediate` coalescer: a burst of five
+      paints drains as one `Surface.present` carrying the newest pixels and the **union** of the
+      damage rects, and a size change inside a burst promotes it to a whole-surface repaint.
+- [x] **port the launch path out of `cli/src/main.ts`**: `:109` builds
       `["/bin/sh", "-c", line]`, which does not exist on Windows; `:65-68` sets
       `ELECTRON_DEV_BIN = ["electron"]` for every non-darwin platform, but the Windows artifact is
       `electron.exe`, so the `fs.existsSync` guard at `:80-86` fails and reports
       `"missing … — build the browser first"` — the wrong diagnosis; `:105-108` applies POSIX
       single-quote escaping and `2>>` redirection
-- [ ] spawn without a shell, and resolve the binary with the `.exe` suffix
-- [ ] leave the registry, `ssh`, `sandbox` and `upgrade` surface to Task 13
-- [ ] write tests for `offscreenPreferences` per platform
-- [ ] write tests for `presentPaint` selecting the bitmap path, and rejecting a zero-area image
-- [ ] write tests for binary resolution and argument construction on Windows
-- [ ] run tests — must pass before Task 10
+      — all three now live in **`cli/src/launch.ts`** (new), which imports only `node:path`. That
+      import list is the point: `main.ts` pulls in `pixel-store` and `pixel-terminals`, neither of
+      which builds on Windows before Task 13, so nothing in `main.ts` can be loaded by a test yet.
+      The new module can be, and is.
+- [x] spawn without a shell, and resolve the binary with the `.exe` suffix
+      — `browserLaunchCommand` now returns a `LaunchPlan` — `{ file, args, cwd, stderrLog }` — and
+      `spawnDaemon` calls `spawn(plan.file, plan.args, …)`. **The shell is gone on every platform,
+      not just Windows**, since nothing was left that needed it: `exec` is what `spawn` does anyway,
+      quoting is unnecessary without a command line, and `2>>` is replaced by opening `stderrLog`
+      and handing the descriptor over as `stdio[2]` (our copy is closed; the child's stays open).
+      The linux headless-ozone flags moved to `platformChromiumArgs` and still append after the
+      caller's own argv, as the old shell line did.
+      ➕ **The wrong diagnosis was fixed at the message, not only at the path.** `missingLaunchArtifact`
+      now reports a missing `electron.exe` as an *install* problem and only a missing `dist/main.js`
+      as a build one. With the path corrected the guard passes here — the resolved
+      `browser/node_modules/electron/dist/electron.exe` exists — but "build the browser first" would
+      still have been the wrong advice for a broken install, which is the failure Task 1 warned about.
+- [x] leave the registry, `ssh`, `sandbox` and `upgrade` surface to Task 13
+      — untouched; `linuxSandboxError`/`apparmorSetup` still run inside the `platform === "linux"`
+      branch of `browserLaunchCommand`, and a test asserts the four imports are still there so the
+      scope line reads as deliberate rather than as an oversight.
+- [x] write tests for `offscreenPreferences` per platform
+- [x] write tests for `presentPaint` selecting the bitmap path, and rejecting a zero-area image
+- [x] write tests for binary resolution and argument construction on Windows
+- [x] run tests — must pass before Task 10
+      — **99 node tests** (62 before, +37: 19 in `tools/launcher/launch.test.mjs`, 18 in
+      `tools/offscreen/present.test.mjs`), all passing. Rust is untouched by this task and stays
+      where Task 8 left it: **323 + 56 tests**, **12 clippy warnings**, **172 fmt hunks**.
+      ➕ `tools/offscreen/present.test.mjs` **bundles** rather than transpiles, unlike
+      `tools/process-model`: `paint.ts` imports `./types` and `offscreen.ts` imports `appLog` from
+      `pixel-react`, whose build needs the native addon. An esbuild plugin stubs `pixel-react` (and
+      `electron`, whose imports are all type-only) so the presenter can be driven with a fake
+      `NativeImage` and a recording `Surface`. Per-platform coverage re-imports the bundle with a
+      cache-busting query after overriding `process.platform`, because `SHM_FRAMES` is read at
+      import time.
 
 ### Task 10: Milestone — a page on screen
 
