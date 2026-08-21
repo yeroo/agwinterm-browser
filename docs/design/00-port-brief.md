@@ -61,16 +61,56 @@ The host side is further along than the guest side, and this is what makes the p
 
 ## Architecture
 
-The port is **not** "make `pixel-core` compile on Windows". It is: delete `pixel-core`'s terminal
-half and let agwinterm be the compositor.
+An earlier draft of this brief proposed dropping `pixel-core` wholesale and letting agwinterm
+composite. Measurement says otherwise, and the cheaper design won.
+
+### The unix dependency is concentrated, not pervasive
+
+Counting `rustix::` / `std::os::unix` / `termios` / `libc::` / `/dev/tty` references per module
+across `pixel-core`'s 22 source files:
+
+| module | hits | disposition |
+|---|---|---|
+| `terminal.rs` | **64** | replace — this is the tty layer and the Kitty-to-stdout encoder |
+| `herdr.rs` | 2 | port — `UnixStream`/`UnixListener` → Windows named pipes (or gate off for v1) |
+| `ghostty.rs` | 2 | drop — ghostty-specific `SIGUSR2` signalling, no Windows analogue |
+| **all 19 others** | **0** | **keep unchanged** |
+
+`canvas.rs`, `paint.rs`, `text_input.rs`, `image_cache.rs`, `menu.rs`, `kitty.rs`, `shape.rs`,
+`wrap.rs`, `style.rs`, `scrollbar.rs` and the rest are already portable Rust — taffy, tiny-skia and
+fontdue are all cross-platform. **The compositor and UI toolkit port for free.** This matters
+because the browser chrome (tab strip, URL bar, menus, modals — `browser/src/ui/*.tsx`) renders
+through `pixel-react` into `pixel-core`. Dropping `pixel-core` would have meant rewriting the entire
+browser chrome; keeping it means the chrome is untouched.
+
+So the port is: **replace one module, port one, drop one, keep nineteen.**
+
+### No patched Electron needed
+
+Upstream's fast paths require an Electron fork they build themselves
+(`scripts/fetch-electron.sh` pulls from `zenbu-labs/electron-releases`, macOS and Linux only) —
+`useSharedTexture` on darwin, `useSharedMemory` on linux (`browser/src/page/offscreen.ts`).
+
+But `presentPaint` already falls through to `presentBitmap` (`browser/src/page/paint.ts:104`),
+which uses stock Electron's `paint` event: `image.toBitmap()` →
+`surface.present({ bgra, width, height, damage })`, coalesced by `BitmapPresenter`. That path
+runs on **stock Electron on Windows with no patch**, and `Surface.present` is the exact seam the
+Windows backend plugs into.
+
+Optimising past the bitmap copy is deliberately deferred. Stock Electron on Windows can expose a
+D3D11 shared-texture handle, and agwinterm renders with Direct2D, so a genuine zero-copy path
+exists later — it is not v1.
 
 | layer | upstream (macOS/Linux) | winterm-browser |
 |---|---|---|
-| Browser | Electron offscreen rendering | **unchanged** — Electron OSR is supported on Windows |
-| Frame pixels | IOSurface (mac) / shm (linux) zero-copy | Windows file-mapping shared BGRA ring |
-| Terminal output | Kitty APC → stdout | agwinterm control pipe, new shm frame command |
-| Text/layout compositing | `pixel-core` (taffy / tiny-skia / fontdue) | **dropped** — agwinterm renders |
-| Raw-mode input | termios + Swift helper | Windows console VT input; no helper |
+| Browser + chrome UI | Electron OSR + React via `pixel-react` | **unchanged** |
+| Compositor / layout / text | `pixel-core` (taffy / tiny-skia / fontdue) | **unchanged** — already portable |
+| Electron frame capture | patched Electron: IOSurface / shm | **stock Electron bitmap path** (already written) |
+| Frame pixels → terminal | Kitty APC → stdout | Windows file-mapping shared BGRA ring → control pipe |
+| tty layer (`terminal.rs`) | termios raw mode, `/dev/tty`, shm, kitty encoder | **rewritten** for Windows console + agwinterm |
+| Raw-mode input | termios + macOS Swift helper | Windows console VT input; helper dropped entirely |
+| `herdr.rs` IPC | `UnixStream` | Windows named pipes |
+| `ghostty.rs` | `SIGUSR2` to ghostty | dropped |
 | CLI / terminals / store | TypeScript | mostly portable; `ssh.ts` and `sandbox.ts` (apparmor) need Windows work |
 
 ### Chosen transport
