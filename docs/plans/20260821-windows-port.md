@@ -863,16 +863,102 @@ Everything this needs now exists: install (1), process model (2), engine (3–5)
 napi (8), launcher (9). It needs **no agwinterm change** — `image.frame` already ships every
 capability it uses, and a static page is precisely the workload it is in production for. [triage: critical, confirmed]
 
-- [ ] launch Electron OSR, composite through `pixel-core`, publish through the file-based path, into
+- [x] launch Electron OSR, composite through `pixel-core`, publish through the file-based path, into
       a Debug agwinterm pane
-- [ ] load a static page; confirm it is legibly on screen at the right size and position
-- [ ] confirm the pane still behaves as a terminal around the image (scroll, resize, switch away)
-- [ ] measure and record the frame budget in `docs/design/02-frame-budget.md`: PNG encode, file
+      — driven by `tools/milestone/run-milestone.cmd` (new), which is what a pane runs:
+      `agwintermctl --pipe agwinterm-dev session new --command <it> --wait`. It is *not* a product
+      entry point — `cli/src/main.ts` still only spawns the daemon, which is Task 13 — it is the
+      smallest thing that exercises Electron OSR → `pixel-core` → `frame_file` → `image.frame` end
+      to end. **737 ms from `session new` to the first published frame**, cold Electron start
+      included, which clears the plan's own "seconds to appear" tripwire by an order of magnitude.
+      ⚠️ **The Debug agwinterm had to be built first, and `Agwinterm.App` is not the app**: it fails
+      with 60 errors (`MainWindow` does not implement `ISessionHost`), which is a WIP project in the
+      agwinterm tree and not this port's business. `src/Agwinterm.Win32` is the real one and builds
+      clean; `--app-id` is how a Release build could be isolated the same way (`Program.cs:386`).
+- [x] load a static page; confirm it is legibly on screen at the right size and position
+      — `tools/milestone/static-page.html`, chosen to make each claim checkable rather than to look
+      like a page: a line of body text for legibility, four named swatches in a stated order for
+      colour and orientation, and corner markers so a frame placed at the wrong origin is obvious.
+      The whole browser chrome renders — tab strip, reload, title, `+` — which is the port brief's
+      claim that keeping `pixel-core` avoids rewriting the chrome, cashed. Screenshots in
+      [Post-Completion](#post-completion).
+- [x] confirm the pane still behaves as a terminal around the image (scroll, resize, switch away)
+      — switch away and the pane is a shell again with no image bleeding through; switch back and
+      the frame is still there, because agwinterm holds the placement and needs no repaint to
+      restore it. **Resize did not work, and fixing it is the finding two items below.**
+- [x] measure and record the frame budget in `docs/design/02-frame-budget.md`: PNG encode, file
       write, agwinterm's read, its async PNG decode. **This number is the case for Task 12** — and
       if a single static page takes seconds to appear, that is a finding, not a milestone
-- [ ] fix what this reveals before continuing; record surprises as ➕ or ⚠️
-- [ ] write tests for the startup failure modes: no agwinterm, pane too small, Electron fails to launch
-- [ ] run tests — must pass before Task 11
+      — [`docs/design/02-frame-budget.md`](../design/02-frame-budget.md), all five stages, nothing
+      estimated. At the largest pane measured (2096×1184, 9.93 MB PNG): encode **24.7 ms**, write
+      **2.9 ms**, `image.frame` round trip **10.4 ms**, agwinterm's read **2.7 ms**, its async decode
+      **14.4 ms** — a **26 fps** producer ceiling and 52 ms to pixels. The measurement is
+      reproducible rather than anecdotal: `TERMINAL_BROWSER_FRAME_BUDGET=<path>` (new, in
+      `frame_file.rs`) writes one line per frame, agwinterm's shipped `AGWINTERM_PERF` covers its
+      half, and three host-side scripts under `tools/milestone/` measure the stages the browser
+      cannot see — including the decode, run through `DecodePixels`'s own calls rather than a proxy
+      for them. The raw rows the doc's table is built from are committed as
+      `tools/milestone/measured-*.tsv`.
+      ➕ **The cell size is a frame-cost decision, not only a sharpness one.** Task 6 costed
+      `FALLBACK_CELL` as lost resolution. It is also **2.5× the frame**: same pane, same page,
+      `TERMINAL_BROWSER_CELL_PX=10x20` against the fallback `(16,32)` is 4.69 MB → 1.83 MB, encode
+      10.3 → 3.7 ms, host decode 5.6 → 2.7 ms. agwinterm's `session.metrics` is worth about a whole
+      stage, not a sharpening pass. ⚠️ And the host's cell size is a *float* (`Program.cs:1127`,
+      `_cellW = run.Metrics.Width / 10f`), so the integer override can only ever be close — the verb
+      can be exact.
+      ➕ **The round trip has a fixed cost `image.frameshm` will still pay.** A `ping` on the same
+      pipe is 0.26 ms and an `image.frame` naming a 1.83 MB file is 6.6 ms, of which the host's own
+      read is 0.5 ms and its placement lock 0.05 ms. ~5.5 ms is fixed inside the verb at every size
+      measured, which puts a **~150 fps floor** under Task 12 whatever it does about the pixels.
+- [x] fix what this reveals before continuing; record surprises as ➕ or ⚠️
+      — ⚠️ **the pane resized and the browser did not**, so agwinterm went on placing the old canvas
+      and clipped it at the pane's edge. Nothing in any log; the picture simply stopped being right.
+      The cause is that **both** of upstream's resize mechanisms are absent here: there is no
+      `SIGWINCH`, and `pixel-react`'s no-tty substitute — `process.stdout.on("resize", …)`
+      (`index.ts:583`) — never fires, because Electron's stdout on Windows is a pipe rather than a
+      `tty.WriteStream`. Task 5 had already built the analogue (`watch_resize`, with `poll_event`
+      capping its wait to re-read the screen buffer) and **nothing switched it on**:
+      `pixel-node/src/lib.rs` passed `watch_resize: false`, which is upstream's correct value for a
+      daemon that is not the tty's foreground process group. It is now `WATCH_RESIZE = cfg!(windows)`,
+      named rather than written inline so a test can assert it without an `Engine`, which needs a
+      real console. Verified live: 1264×928 → 790×580 on a window drag, with the page re-laid out
+      rather than cropped.
+      ➕ **`spawnDaemon` dropped its spawn errors.** `spawn` reports failures asynchronously and the
+      child is `unref`'d, so an ENOENT either threw out of the event loop or vanished — after which
+      `daemonSocket` spent 15 s failing to connect and blamed the socket. It now has an `error`
+      handler that names the binary. Not on the Windows path yet (Task 13 owns the CLI), but it is
+      the third of this task's startup failure modes and it was silent.
+      ➕ A user-facing message in `terminal_windows.rs` carried a **run of 18 spaces** mid-sentence —
+      a wrapped string literal with no `\` continuation. Fixed at the literal.
+      ➕ `draw` resolves the cell size *before* checking whether there is room, so a skipped frame
+      still latches `host_absent`. Left as is and written into the test instead: `cell_size` caches,
+      so it is a one-time resolution rather than a dial per frame.
+- [x] write tests for the startup failure modes: no agwinterm, pane too small, Electron fails to launch
+      — split by where each is actually decided. **No agwinterm** and **pane too small** are
+      `pixel-core`'s, because that is where the console and the pipe are: the first was already
+      covered at Task 7, and the second is new at the `draw` seam rather than at `cell_span` — a
+      canvas with no area (which is how "no room" arrives, since the engine sizes it `cols * cell`)
+      returns `Ok(0)` and leaves `frames` `None`, so the skip costs no directory and no sequence
+      number. **Electron fails to launch** is `tools/milestone/startup.test.mjs` (new): the
+      per-artifact diagnosis, the resolved `electron.exe` being a real `MZ` binary in the installed
+      tree — so a path that drifted fails here rather than at a milestone — and the spawn-error
+      handler above. Plus the shape the launcher starts in: `entryMode` picks foreground by the
+      *absence* of `--daemon`, a silent failure mode, so it is pinned along with the launcher not
+      containing the flag.
+      ➕ Also pinned: the budget instrumentation the design doc's numbers depend on — that
+      `frame_file.rs` and the doc name the same variable, that the header says out loud the host's
+      decode is *not* inside `publish_ms`, and that the three measurement scripts the doc cites
+      still exist. Four Rust tests cover the file itself: one line per delivered frame with the
+      right columns, no file when the variable is unset *or* empty, a refused frame not counted,
+      and an unopenable budget path costing zero frames.
+- [x] run tests — must pass before Task 11 — **385 Rust tests pass on Windows** (0 failed, 1
+      pre-existing ignored benchmark; `pixel-core` 323 → **328**, `pixel-node` 56 → **57**) plus the
+      probe crates' 15 and 14, and **109 node tests** (99 before, +10). `cargo clippy --workspace
+      --all-targets` is at Task 8's **12** warnings, the same twelve on the same vendored lines.
+      `cargo fmt --all --check`'s residual is **172 hunks, identical to Task 8's**, with every new
+      line fmt-clean. `cargo check --workspace` clean.
+      ⚠️ **`cargo nextest` is not installed on this machine**; `cargo test --workspace` was used
+      instead. Same tests, no filtering.
 
 ### Task 11: Interactive input
 
@@ -979,6 +1065,18 @@ so it needs no side channel; output cannot use the pty at all. Hold onto that as
 the backend — and note it is also why the daemon architecture breaks on input only (Task 2).
 
 ## Post-Completion
+
+**Task 10's milestone, on screen.** A real Electron 43.3.0 OSR browser, composited by `pixel-core`,
+published over `image.frame` into a Debug agwinterm pane (instance `agwinterm-dev`). The window is
+captured from the desktop, not from the PNG the browser produced — the claim is about what agwinterm
+drew.
+
+| | |
+|---|---|
+| ![a page on screen](../design/img/10-milestone-page-on-screen.png) | The page and the whole browser chrome — tab strip, reload, title, `+` — filling the pane at its origin. The pane is 131×37 cells. |
+| ![switched away](../design/img/10-milestone-switched-away.png) | Switched to the neighbouring session: an ordinary shell, with nothing of the image left behind. Switching back restores the frame with no repaint, because agwinterm holds the placement. |
+| ![resize, clipped](../design/img/10-milestone-resize-clipped.png) | ⚠️ The defect this milestone found. The window was made smaller and the browser never learned; agwinterm went on placing the old canvas and clipped it. Note the header running off the right edge and the footer gone off the bottom. |
+| ![resize, reflowed](../design/img/10-milestone-resize-reflowed.png) | The same drag after `WATCH_RESIZE`. The canvas follows the pane and the page re-lays out — the body text rewraps to three lines, the footer is back at the bottom. |
 
 **Manual verification**: real browsing (heavy page, video, text input, devtools); long-running memory
 and handle counts; hidden-pane behaviour; multiple instances at once. Pay attention to whether

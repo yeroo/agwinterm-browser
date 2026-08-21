@@ -160,6 +160,13 @@ function spawnDaemon() {
       detached: true,
       stdio: ["ignore", "ignore", stderr],
     });
+    // spawn reports its failures asynchronously, and this child is unref'd, so
+    // without a listener an ENOENT here either throws out of the event loop or —
+    // if the process exits first — vanishes, leaving `daemonSocket` to spend 15
+    // seconds failing to connect and then blame the socket. Say what happened.
+    child.on("error", (error) => {
+      process.stderr.write(`could not start ${plan.file}: ${error.message}\n`);
+    });
     child.unref();
   } finally {
     if (typeof stderr === "number") fs.closeSync(stderr);

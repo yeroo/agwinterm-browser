@@ -107,6 +107,20 @@ fails loudly rather than at the Task 10 milestone.
    screen that cleared all 43 cannot see this class of problem. Task 14's
    unchanged-check should expect this list to grow.
 
+5. **`engine/crates/pixel-node/src/lib.rs` — `watch_resize` is on under Windows**
+   (Task 10). Upstream passes `watch_resize: false` unconditionally, which is right
+   for it: its engine lives in a daemon that is not the tty's foreground process
+   group, so `SIGWINCH` would not arrive anyway, and in the no-tty shape
+   `pixel-react` nudges the engine from `process.stdout.on("resize", …)` instead.
+
+   Neither route exists on Windows — there is no `SIGWINCH`, and Electron's stdout
+   is a pipe rather than a `tty.WriteStream`, so that event never fires. Without
+   this the pane resizes and the browser goes on drawing the old size; agwinterm
+   then places a canvas it has to clip, silently. It is one line —
+   `WATCH_RESIZE = cfg!(windows)` — and off Windows it is byte-for-byte upstream's
+   behaviour, but a re-vendor that drops it fails as a picture that stops being
+   right rather than as a build error, so it is listed here and pinned by a test.
+
 ## Re-vendoring checklist
 
 1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update this file.

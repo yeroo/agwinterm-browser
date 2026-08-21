@@ -53,7 +53,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::agwinterm::{ControlClient, Reply, push_quoted};
 use crate::canvas::Canvas;
@@ -81,6 +81,15 @@ const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// Shared by every publisher's directory, so [`sweep_stale`] can recognise one.
 const DIR_PREFIX: &str = "terminal-browser-frames-";
+
+/// Names a file to append one line per frame to, breaking the cost down by stage.
+///
+/// Off unless set, and it names a path rather than being a boolean because the
+/// consumer is a person reading a file afterwards, not the running browser. This
+/// is what [`docs/design/02-frame-budget.md`] was measured with, and what Task 12
+/// diffs `image.frameshm` against — a fast path with no baseline to beat is a
+/// claim, not a measurement.
+pub(crate) const BUDGET_ENV: &str = "TERMINAL_BROWSER_FRAME_BUDGET";
 
 // ---------------------------------------------------------------------------
 // Geometry
@@ -243,6 +252,89 @@ fn sweep_stale(root: &Path, older_than: Duration) {
 }
 
 // ---------------------------------------------------------------------------
+// The frame budget
+// ---------------------------------------------------------------------------
+
+/// What one frame cost, split by the stage that spent it.
+///
+/// The three stages are the three the browser can see. `publish` is the whole
+/// `image.frame` round trip — agwinterm's `File.ReadAllBytes` plus its brief
+/// placement lock plus the pipe — and the host's own PNG decode is *not* in it,
+/// because that happens later on another thread (`Program.Render.cs:196`). Anyone
+/// reading these numbers needs to know that, so [`FrameCost::line`] says it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct FrameCost {
+    pub(crate) seq: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) cols: u32,
+    pub(crate) rows: u32,
+    pub(crate) bytes: usize,
+    pub(crate) encode: Duration,
+    pub(crate) write: Duration,
+    pub(crate) publish: Duration,
+}
+
+impl FrameCost {
+    /// One tab-separated line. Not JSON: the file is read by a person and by
+    /// whatever one-liner they reach for, and every field is a number.
+    fn line(&self) -> String {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        format!(
+            "{}\t{}x{}\t{}x{}\t{}\t{:.2}\t{:.2}\t{:.2}\n",
+            self.seq,
+            self.width,
+            self.height,
+            self.cols,
+            self.rows,
+            self.bytes,
+            ms(self.encode),
+            ms(self.write),
+            ms(self.publish),
+        )
+    }
+
+    /// The header, so the file explains itself without this source file.
+    fn header() -> &'static str {
+        "# seq\tcanvas\tspan\tbytes\tencode_ms\twrite_ms\tpublish_ms\n\
+         # publish_ms is the image.frame round trip: agwinterm's read + its brief\n\
+         # placement lock + the pipe. Its PNG decode is async and is not in here.\n"
+    }
+}
+
+/// Appends [`FrameCost`]s to the file [`BUDGET_ENV`] named, if it named one.
+///
+/// A logging failure is dropped rather than reported: a measurement that could
+/// break the thing being measured is worse than no measurement.
+struct BudgetLog {
+    file: Option<fs::File>,
+}
+
+impl BudgetLog {
+    fn open(env: &crate::terminal::SessionEnv) -> Self {
+        let Some(path) = env.var(BUDGET_ENV).filter(|path| !path.is_empty()) else {
+            return Self { file: None };
+        };
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+        let mut log = Self { file };
+        if let Some(file) = log.file.as_mut() {
+            let _ = file.write_all(FrameCost::header().as_bytes());
+        }
+        log
+    }
+
+    fn record(&mut self, cost: &FrameCost) {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.write_all(cost.line().as_bytes());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The publisher
 // ---------------------------------------------------------------------------
 
@@ -264,16 +356,19 @@ pub(crate) struct FramePublisher {
     /// Latched after the first frame the host declined to read, so a host that
     /// keeps declining is complained about once.
     warned_untransmitted: bool,
+    /// Where the per-frame cost breakdown goes, when [`BUDGET_ENV`] asked for one.
+    budget: BudgetLog,
 }
 
 impl FramePublisher {
-    pub(crate) fn new() -> io::Result<Self> {
+    pub(crate) fn new(env: &crate::terminal::SessionEnv) -> io::Result<Self> {
         Ok(Self {
             dir: FrameDir::create()?,
             seq: 0,
             scratch: Vec::new(),
             written: Vec::new(),
             warned_untransmitted: false,
+            budget: BudgetLog::open(env),
         })
     }
 
@@ -313,8 +408,17 @@ impl FramePublisher {
         span: (u32, u32),
     ) -> io::Result<usize> {
         let mut scratch = std::mem::take(&mut self.scratch);
+        let started = Instant::now();
         let encoded = crate::profiler::span("frame.png", || encode_png(canvas, &mut scratch));
-        let result = encoded.and_then(|()| self.publish_encoded(client, &scratch, span));
+        let mut cost = FrameCost {
+            width: canvas.width,
+            height: canvas.height,
+            cols: span.0,
+            rows: span.1,
+            encode: started.elapsed(),
+            ..FrameCost::default()
+        };
+        let result = encoded.and_then(|()| self.publish_encoded(client, &scratch, span, &mut cost));
         self.scratch = scratch;
         result
     }
@@ -324,9 +428,15 @@ impl FramePublisher {
         client: &mut ControlClient,
         png: &[u8],
         span: (u32, u32),
+        cost: &mut FrameCost,
     ) -> io::Result<usize> {
         let path = self.next_path();
+        cost.seq = self.seq - 1;
+        cost.bytes = png.len();
+        let started = Instant::now();
         crate::profiler::span("frame.write", || self.write_frame(&path, png))?;
+        cost.write = started.elapsed();
+        let started = Instant::now();
         // Only now does the host learn the path, and by now the bytes are all
         // there and the handle is closed.
         // A refusal counts as a failed frame exactly as a dead pipe does: in both
@@ -338,6 +448,8 @@ impl FramePublisher {
             .and_then(Reply::result)
         {
             Ok(result) => {
+                cost.publish = started.elapsed();
+                self.budget.record(cost);
                 self.written.push(path);
                 self.reap();
                 self.check_transmitted(result);
@@ -460,6 +572,23 @@ mod tests {
     use super::*;
     use crate::agwinterm::fixture::{PipeServer, Turn};
 
+    /// An empty environment, which is deliberately not `of_process()`: the suite
+    /// may itself be running in an agwinterm pane whose `TERMINAL_BROWSER_*` is
+    /// set, and a test that appended to the developer's budget file would be
+    /// measuring itself.
+    fn no_budget() -> crate::terminal::SessionEnv {
+        crate::terminal::SessionEnv::of_session(Default::default())
+    }
+
+    /// The same, plus a budget file at `path`.
+    fn budget_to(path: &Path) -> crate::terminal::SessionEnv {
+        crate::terminal::SessionEnv::of_session(
+            [(BUDGET_ENV.to_string(), path.display().to_string())]
+                .into_iter()
+                .collect(),
+        )
+    }
+
     fn canvas(width: u32, height: u32) -> Canvas {
         let mut canvas = Canvas::new(width, height);
         // Not a flat colour: a PNG of a constant image compresses to the same
@@ -580,7 +709,7 @@ mod tests {
         const FRAMES: usize = 12;
         let server = PipeServer::answering(&ok_frame(), FRAMES);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         let mut seen = std::collections::HashSet::new();
@@ -621,7 +750,7 @@ mod tests {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
         let publisher = {
-            let mut publisher = FramePublisher::new().expect("a temp directory");
+            let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
             publisher
                 .publish(&mut client, &canvas(16, 16), (1, 1))
                 .expect("one frame");
@@ -665,7 +794,7 @@ mod tests {
     #[test]
     fn a_new_publisher_sweeps_before_it_writes() {
         // The sweep is on the construction path, which is the only place it runs.
-        let publisher = FramePublisher::new().expect("a temp directory");
+        let publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
         assert!(
             publisher.dir().starts_with(std::env::temp_dir()),
             "frames go somewhere other than the temp dir, where the sweep looks",
@@ -683,7 +812,7 @@ mod tests {
     fn a_frame_the_directory_cannot_hold_is_reported_and_the_next_one_still_goes() {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         // The temp dir gets swept by the OS, by cleaners, and by another browser's
@@ -714,7 +843,7 @@ mod tests {
     fn a_frame_reaches_the_host_as_one_addressed_image_frame_request() {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
 
         let written = publisher
             .publish(&mut client, &canvas(80 * 9, 24 * 19), (80, 24))
@@ -770,7 +899,7 @@ mod tests {
     fn a_refused_frame_is_an_error_and_leaves_no_file_behind() {
         let server = PipeServer::always(r#"{"ok":false,"error":"sixel file not found"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
 
         let err = publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -789,7 +918,7 @@ mod tests {
         // path — which is why the retention window is more than one frame deep.
         let server = PipeServer::scripted(vec![Turn::Hangup, Turn::Reply(ok_frame())]);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -813,7 +942,7 @@ mod tests {
         // the read itself failed, so it is worth saying out loud.
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:1/0"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new().expect("a temp directory");
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
 
         for _ in 0..3 {
             publisher
@@ -847,5 +976,153 @@ mod tests {
         // Quoted, because `result` hands back the raw JSON — which is how
         // `check_transmitted` knows to trim the quotes off before parsing.
         assert_eq!(raw, "\"frame:1/1\"");
+    }
+
+    // -- the frame budget -------------------------------------------------
+    //
+    // Task 10 had to measure this path before Task 12 could argue against it, and
+    // `docs/design/02-frame-budget.md` is what it measured. These pin the
+    // instrumentation that produced those numbers, because a budget file that
+    // silently stopped being written would read as "nothing to see here".
+
+    #[test]
+    fn a_budget_file_gets_one_line_per_frame_that_reached_the_host() {
+        const FRAMES: usize = 4;
+        let scratch = scratch_dir("budget-lines");
+        let path = scratch.join("frames.tsv");
+        let server = PipeServer::answering(&ok_frame(), FRAMES);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&budget_to(&path)).expect("a temp directory");
+
+        for _ in 0..FRAMES {
+            publisher
+                .publish(&mut client, &canvas(24, 8), (2, 1))
+                .expect("the fixture accepts every frame");
+        }
+        drop(publisher);
+
+        let text = fs::read_to_string(&path).expect("the budget file was written");
+        let rows: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .collect();
+        assert_eq!(rows.len(), FRAMES, "one line per frame:\n{text}");
+        assert!(
+            text.starts_with("# seq"),
+            "the file has to explain itself:\n{text}"
+        );
+        assert!(
+            text.contains("is not in here"),
+            "the header has to say the host's decode is *not* counted, or every \
+             reader will assume publish_ms is the whole cost:\n{text}"
+        );
+
+        // The columns, on the first row: seq, canvas, span, bytes, and three times.
+        let first: Vec<&str> = rows[0].split('\t').collect();
+        assert_eq!(first.len(), 7, "{:?}", rows[0]);
+        assert_eq!(first[0], "0", "the sequence starts where the paths do");
+        assert_eq!(first[1], "24x8", "the canvas, in pixels");
+        assert_eq!(first[2], "2x1", "the span, in cells");
+        assert!(
+            first[3].parse::<usize>().expect("bytes is a number") > 0,
+            "a PNG of nothing is not a frame: {:?}",
+            rows[0]
+        );
+        for column in first[4..].iter() {
+            assert!(
+                column.parse::<f64>().expect("a duration in ms") >= 0.0,
+                "{column:?} is not a duration",
+            );
+        }
+        // The sequence is the publisher's own, so a reader can line a budget row
+        // up with the file that produced it.
+        let seqs: Vec<&str> = rows
+            .iter()
+            .map(|row| row.split('\t').next().unwrap())
+            .collect();
+        assert_eq!(seqs, ["0", "1", "2", "3"]);
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn no_variable_means_no_file_and_no_cost() {
+        // The default has to be genuinely off: this runs in every browser, and a
+        // measurement that is always on is a write per frame nobody asked for.
+        let scratch = scratch_dir("budget-off");
+        let path = scratch.join("frames.tsv");
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+
+        // Empty, and also explicitly empty-valued — `FOO=` is how a shell unsets a
+        // variable it cannot remove, and it must not name a file called "".
+        for env in [
+            crate::terminal::SessionEnv::of_session(Default::default()),
+            crate::terminal::SessionEnv::of_session(
+                [(BUDGET_ENV.to_string(), String::new())]
+                    .into_iter()
+                    .collect(),
+            ),
+        ] {
+            let mut publisher = FramePublisher::new(&env).expect("a temp directory");
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("one frame");
+        }
+        assert!(
+            !path.exists(),
+            "a budget file appeared with nothing asking for one"
+        );
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn a_frame_the_host_refused_is_not_in_the_budget() {
+        // It never reached the pane, so counting it would make the file report a
+        // frame rate the user did not get.
+        let scratch = scratch_dir("budget-refused");
+        let path = scratch.join("frames.tsv");
+        let server = PipeServer::always(r#"{"ok":false,"error":"no such pane"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&budget_to(&path)).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect_err("a refusal is a failed frame");
+        drop(publisher);
+
+        let text = fs::read_to_string(&path).expect("the header is written on open");
+        assert!(
+            text.lines()
+                .all(|line| line.starts_with('#') || line.is_empty()),
+            "a refused frame was counted:\n{text}"
+        );
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn a_budget_file_that_cannot_be_opened_costs_no_frames() {
+        // The measurement must never be the thing that breaks the run. A directory
+        // is not a file, so this is a real open failure rather than a simulated one.
+        let scratch = scratch_dir("budget-unopenable");
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&budget_to(&scratch)).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the frame goes out regardless of the budget file");
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A directory of this test's own, under the temp dir.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("winterm-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("a scratch directory");
+        dir
     }
 }

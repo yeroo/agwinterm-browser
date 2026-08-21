@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>winterm-browser milestone</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; font-family: Georgia, serif; }
+      body { background: #10233f; color: #f4f7ff; display: flex; flex-direction: column; }
+      header { background: #f2b705; color: #10233f; padding: 12px 24px; font-size: 28px; font-weight: bold; }
+      main { flex: 1; padding: 24px; display: flex; gap: 24px; }
+      .col { flex: 1; }
+      h2 { color: #7fd3ff; font-size: 22px; margin: 0 0 8px; }
+      p { font-size: 15px; line-height: 1.5; }
+      .swatches { display: flex; }
+      .swatches div { width: 48px; height: 48px; }
+      code { background: #0a1730; padding: 2px 6px; border-radius: 3px; font-family: Consolas, monospace; }
+      footer { background: #0a1730; padding: 8px 24px; font-size: 13px; color: #9fb3d1; }
+    </style>
+  </head>
+  <body>
+    <header>winterm-browser — a page on screen</header>
+    <main>
+      <div class="col">
+        <h2>Legibility check</h2>
+        <p>The quick brown fox jumps over the lazy dog. 0123456789 — if this line is readable,
+        the cell metrics and the PNG scale agree.</p>
+        <p>Frame path: <code>image.frame</code> over the agwinterm control pipe.</p>
+      </div>
+      <div class="col">
+        <h2>Colour and position</h2>
+        <div class="swatches">
+          <div style="background:#e2453c"></div>
+          <div style="background:#3cba54"></div>
+          <div style="background:#4885ed"></div>
+          <div style="background:#f4c20d"></div>
+        </div>
+        <p>Four swatches, left to right: red, green, blue, yellow.</p>
+      </div>
+    </main>
+    <footer>bottom-left corner marker &bull; top-right corner marker is the yellow header edge</footer>
+  </body>
+</html>

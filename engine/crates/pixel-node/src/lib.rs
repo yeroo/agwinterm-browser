@@ -280,6 +280,13 @@ const SYSTEM_UI_FONTS: &[&str] = &[
 ];
 const SYSTEM_MONO_FONTS: &[&str] = &["/System/Library/Fonts/SFNSMono.ttf"];
 
+/// Whether the engine polls the terminal for its size, rather than being told.
+///
+/// Windows only: see the comment at the `EngineConfig` that reads it. Named
+/// rather than written inline so a test can assert the per-platform value
+/// without constructing an `Engine`, which needs a real console.
+pub(crate) const WATCH_RESIZE: bool = cfg!(windows);
+
 fn load_font(candidates: &[&str], fallback: &'static [u8]) -> fontdue::Font {
     let parse = |bytes: &[u8]| fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default());
     if cfg!(target_os = "macos") {
@@ -344,7 +351,16 @@ impl PixelEngine {
         let mut engine = Engine::new(EngineConfig {
             fonts,
             cell_metrics_font: 1,
-            watch_resize: false,
+            // Windows has no SIGWINCH, and the one thing that stood in for it here does
+            // not fire: `pixel-react` nudges the engine from `process.stdout.on("resize")`
+            // (index.ts:583) in the no-tty shape, but Electron's stdout on Windows is a
+            // pipe, not a `tty.WriteStream`, so that event never arrives. Without this
+            // the pane resizes and the browser goes on drawing the old size — found at
+            // the Task 10 milestone, where the frame was simply clipped by the pane.
+            // `watch_resize` is the Windows backend's own analogue: `poll_event` caps its
+            // wait at `RESIZE_POLL` and re-reads the screen buffer. It stays `false` off
+            // Windows, where upstream's signal handler is the better mechanism.
+            watch_resize: WATCH_RESIZE,
             tty,
             wrapper: pixel_core::wrapper::Wrapper::named(wrapper.as_deref()),
             session_env,
@@ -848,6 +864,24 @@ mod tests {
         assert!(
             error.contains("surface dimensions do not match its pixels"),
             "got {error:?}",
+        );
+    }
+
+    #[test]
+    fn windows_asks_the_terminal_for_its_size_because_nothing_will_tell_it() {
+        // Found at the Task 10 milestone: resize the pane and the browser went on
+        // drawing the old size, so agwinterm placed a frame it then clipped.
+        //
+        // Upstream never needed this. On unix `watch_resize` installs a SIGWINCH
+        // handler, and in the no-tty shape `pixel-react` also nudges the engine
+        // from `process.stdout.on("resize")` (index.ts:583). Neither exists here:
+        // Windows has no SIGWINCH, and Electron's stdout is a pipe rather than a
+        // `tty.WriteStream`, so that event never fires. `poll_event` polling the
+        // screen buffer is the only route left.
+        assert_eq!(
+            super::WATCH_RESIZE,
+            cfg!(windows),
+            "on Windows this must be on -- it is the only resize mechanism there              is; off Windows it must stay off, because upstream's signal handler              is better than polling",
         );
     }
 }

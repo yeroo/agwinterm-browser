@@ -860,13 +860,14 @@ impl Terminal {
         // client — which also lives in `self` — at the same time.
         let mut frames = match self.frames.take() {
             Some(frames) => frames,
-            None => frame_file::FramePublisher::new()?,
+            None => frame_file::FramePublisher::new(&self.env)?,
         };
         let published = match self.host() {
             Some(client) => frames.publish(client, canvas, span),
             None => Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "there is no agwinterm pane to draw into; see the earlier log line                  for which variable is missing",
+                "there is no agwinterm pane to draw into; see the earlier log line \
+                 for which variable is missing",
             )),
         };
         self.frames = Some(frames);
@@ -1896,6 +1897,37 @@ mod tests {
         assert!(
             err.to_string().contains("agwinterm"),
             "the message does not name what is missing: {err}",
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_room_in_it_skips_the_frame_instead_of_failing() {
+        // The third of Task 10's startup failure modes, at the seam rather than at
+        // `cell_span`: a pane dragged to nothing is a state, not an error. The
+        // engine sizes the canvas as `cols * cell`, so "no room" arrives here as a
+        // canvas with no area.
+        //
+        // The stronger half of the assertion is `frames`: it stays `None`, which is
+        // only possible if `draw` returned before it reached the publisher. A skip
+        // that still created a frame directory — or worse, still burned a sequence
+        // number — would be a skip with a cost.
+        //
+        // ➕ It does not stay *entirely* free: `draw` resolves the cell size first,
+        // and that legitimately asks the host, so `host_absent` latches on the
+        // first skip. That is a one-time resolution, not a per-frame dial, which is
+        // why `cell_size` caches.
+        let mut term = Terminal::detached(Inbox::new(), None);
+        for canvas in [Canvas::new(0, 16), Canvas::new(16, 0), Canvas::new(0, 0)] {
+            assert_eq!(
+                term.draw(&canvas)
+                    .expect("a pane with no room is not a failure"),
+                0,
+                "a skipped frame reports no bytes",
+            );
+        }
+        assert!(
+            term.frames.is_none(),
+            "a skipped frame reached the publisher, so it cost a directory",
         );
     }
 
