@@ -1,10 +1,16 @@
+#[cfg(unix)]
 use std::io;
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use rustix::termios::{self, OptionalActions, Termios};
 
+#[cfg(unix)]
 use crate::canvas::Canvas;
+#[cfg(unix)]
 use crate::wrapper::Wrapper;
+#[cfg(unix)]
 use crate::kitty::Placement;
 
 // The type vocabulary lives in `terminal_types` so the tty backend below can be
@@ -16,10 +22,21 @@ pub use crate::terminal_types::{
     TerminalColors, Waker, WindowSize,
 };
 
+// On Windows the tty backend below is gated out entirely, so `Terminal` comes
+// from `terminal_windows` instead. It is re-exported under the same name here
+// rather than from `lib.rs`, so that the crate root's `pub use terminal::Terminal`
+// and every `crate::terminal::Terminal` in the engine resolve on both platforms.
+#[cfg(windows)]
+pub use crate::terminal_windows::Terminal;
+
+#[cfg(unix)]
 const COLOR_SLOT_COUNT: usize = 18;
+#[cfg(unix)]
 const COLOR_QUERY_TIMEOUT: Duration = Duration::from_millis(1200);
+#[cfg(unix)]
 const COLOR_QUERY_IDLE: Duration = Duration::from_millis(250);
 
+#[cfg(unix)]
 struct ColorQuery {
     colors: TerminalColors,
     received: usize,
@@ -27,6 +44,7 @@ struct ColorQuery {
     last_reply: Option<Instant>,
 }
 
+#[cfg(unix)]
 impl ColorQuery {
     fn new() -> Self {
         Self {
@@ -45,6 +63,7 @@ impl ColorQuery {
     }
 }
 
+#[cfg(unix)]
 fn retry_intr<T>(mut call: impl FnMut() -> rustix::io::Result<T>) -> rustix::io::Result<T> {
     loop {
         match call() {
@@ -54,6 +73,7 @@ fn retry_intr<T>(mut call: impl FnMut() -> rustix::io::Result<T>) -> rustix::io:
     }
 }
 
+#[cfg(unix)]
 enum TtyHandle {
     Stdio {
         stdin: io::Stdin,
@@ -62,6 +82,7 @@ enum TtyHandle {
     File(std::fs::File),
 }
 
+#[cfg(unix)]
 impl TtyHandle {
     fn read_fd(&self) -> rustix::fd::BorrowedFd<'_> {
         use rustix::fd::AsFd as _;
@@ -79,6 +100,7 @@ impl TtyHandle {
     }
 }
 
+#[cfg(unix)]
 pub struct Terminal {
     io: TtyHandle,
     saved: Termios,
@@ -111,6 +133,9 @@ pub struct Terminal {
     kitty_keyboard: bool,
 }
 
+// Not gated with the tty code above it: `ClipRead` is clipboard-read accumulation
+// state with no platform dependency, and the decoder's own chunk-concatenation
+// test builds one. Task 5's Windows clipboard reads accumulate into it too.
 #[derive(Default)]
 struct ClipRead {
     items: Vec<(String, Vec<u8>)>,
@@ -118,14 +143,19 @@ struct ClipRead {
     overflow: bool,
 }
 
+#[cfg(unix)]
 const CLIP_READ_MAX_BYTES: usize = 64 * 1024 * 1024;
 
+#[cfg(unix)]
 const LONE_ESCAPE_WAIT: Duration = Duration::from_millis(50);
 
+#[cfg(unix)]
 const RESIZE_WAKE_SLOTS: usize = 64;
+#[cfg(unix)]
 static RESIZE_WAKE_FDS: [std::sync::atomic::AtomicI32; RESIZE_WAKE_SLOTS] =
     [const { std::sync::atomic::AtomicI32::new(-1) }; RESIZE_WAKE_SLOTS];
 
+#[cfg(unix)]
 fn claim_resize_slot(fd: i32) -> Option<usize> {
     for (i, slot) in RESIZE_WAKE_FDS.iter().enumerate() {
         if slot
@@ -143,6 +173,7 @@ fn claim_resize_slot(fd: i32) -> Option<usize> {
     None
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 extern "C" fn sigwinch_handler(_: libc::c_int) {
     for slot in &RESIZE_WAKE_FDS {
@@ -155,6 +186,7 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
     }
 }
 
+#[cfg(unix)]
 impl Terminal {
     pub fn new(wrapper: Wrapper, env: SessionEnv) -> io::Result<Self> {
         Self::with_handle(
@@ -927,15 +959,22 @@ impl Terminal {
     }
 }
 
+#[cfg(unix)]
 const SHM_PROBE_ID: u32 = 299;
+#[cfg(unix)]
 const FILE_PROBE_ID: u32 = 300;
+#[cfg(unix)]
 const FRAME_PROBE_TIMEOUT_MS: u64 = 300;
 
+#[cfg(unix)]
 const FRAME_SLOTS: u64 = 8;
 
+#[cfg(unix)]
 const HERDR_RETRY_MIN: Duration = Duration::from_secs(1);
+#[cfg(unix)]
 const HERDR_RETRY_MAX: Duration = Duration::from_secs(10);
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameTransport {
     File,
@@ -943,8 +982,10 @@ enum FrameTransport {
     Inline,
 }
 
+#[cfg(unix)]
 static NEXT_TERMINAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[cfg(unix)]
 /**
  * need to think about this case harder 
  */
@@ -958,6 +999,7 @@ fn frame_image_id(relayed: bool) -> u32 {
     }
 }
 
+#[cfg(unix)]
 fn parse_probe_reply(buf: &[u8], needle: &[u8]) -> Option<bool> {
     let pos = buf.windows(needle.len()).position(|w| w == needle)?;
     let rest = &buf[pos + needle.len()..];
@@ -967,6 +1009,7 @@ fn parse_probe_reply(buf: &[u8], needle: &[u8]) -> Option<bool> {
     Some(rest.starts_with(b"OK"))
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) struct FrameFile {
     path: std::path::PathBuf,
@@ -974,6 +1017,7 @@ pub(crate) struct FrameFile {
     len: usize,
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 impl FrameFile {
     pub(crate) fn create(path: std::path::PathBuf, len: usize) -> io::Result<Self> {
@@ -1015,6 +1059,7 @@ impl FrameFile {
     }
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code, clippy::undocumented_unsafe_blocks)]
 impl Drop for FrameFile {
     fn drop(&mut self) {
@@ -1025,6 +1070,7 @@ impl Drop for FrameFile {
     }
 }
 
+#[cfg(unix)]
 #[allow(unsafe_code)]
 pub(crate) fn write_shm(name: &str, data: &[u8]) -> io::Result<()> {
     let fd = rustix::shm::open(
@@ -1048,6 +1094,7 @@ pub(crate) fn write_shm(name: &str, data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 impl Drop for Terminal {
     fn drop(&mut self) {
         if let Some(slot) = self.resize_slot.take() {
@@ -1733,6 +1780,7 @@ fn parse_cell_size_report(buf: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn parses_probe_replies() {
         let parse = |buf: &[u8]| parse_probe_reply(buf, b"Gi=299;");
@@ -1750,6 +1798,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_frame_file_is_rewritten_in_place_and_removed_on_drop() {
         let path = std::env::temp_dir().join(format!("tb-frametest-{}.rgba", std::process::id()));
@@ -1768,6 +1817,7 @@ mod tests {
         assert!(!path.exists(), "the frame file outlived the terminal");
     }
 
+    #[cfg(unix)]
     #[test]
     #[allow(unsafe_code)]
     fn shm_roundtrip() {
@@ -2299,7 +2349,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tty_tests {
     use super::*;
 

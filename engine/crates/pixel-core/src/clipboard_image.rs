@@ -85,11 +85,11 @@ pub fn image_path_from_paste(text: &str) -> Option<PastedImage> {
         Some(rest) => percent_decode(rest),
         None => unescape(unquoted),
     };
-    if !path.starts_with('/') && !path.starts_with('~') {
+    if !looks_absolute(&path) {
         return None;
     }
     let path = match path.strip_prefix("~/") {
-        Some(rest) => Path::new(&std::env::var("HOME").ok()?).join(rest),
+        Some(rest) => Path::new(&home_dir()?).join(rest),
         None => PathBuf::from(path),
     };
     if !path.is_file() {
@@ -98,16 +98,55 @@ pub fn image_path_from_paste(text: &str) -> Option<PastedImage> {
     from_file(&path, PasteSource::File)
 }
 
+/// Whether a pasted string is claiming to be an absolute path at all. A paste that
+/// is merely prose must not be probed against the filesystem, so this is the gate.
+///
+/// Unix spells absolute one way and Windows spells it three: a leading `/` or `~`,
+/// a drive-qualified path (`C:\pics\a.png`, `C:/pics/a.png`), or a UNC share
+/// (`\\host\share\a.png`). Without the last two, every Windows paste reads as prose.
+fn looks_absolute(path: &str) -> bool {
+    if path.starts_with('/') || path.starts_with('~') {
+        return true;
+    }
+    if !cfg!(windows) {
+        return false;
+    }
+    let bytes = path.as_bytes();
+    let drive_qualified = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    drive_qualified || path.starts_with(r"\\")
+}
+
+/// Windows has no `HOME`; the same thing is spelled `USERPROFILE` there.
+fn home_dir() -> Option<String> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(key).ok()
+}
+
+/// Shell-style escaping, where a backslash quotes the character after it. That is
+/// how a dragged path arrives with its spaces escaped.
+///
+/// On Windows the backslash is also the path separator, so unescaping it wholesale
+/// would turn `C:\Users\me\a.png` into `C:Usersmea.png`. There, only an escaped
+/// space or tab counts as an escape — which is the case this function exists for —
+/// and every other backslash is left standing as a separator.
 fn unescape(s: &str) -> String {
+    let separator_is_backslash = cfg!(windows);
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-        } else {
+        if c != '\\' {
             out.push(c);
+            continue;
+        }
+        if separator_is_backslash && !matches!(chars.peek(), Some(' ' | '\t')) {
+            out.push(c);
+            continue;
+        }
+        if let Some(next) = chars.next() {
+            out.push(next);
         }
     }
     out

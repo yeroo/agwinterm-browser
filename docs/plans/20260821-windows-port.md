@@ -299,28 +299,109 @@ keep-unchanged modules. [triage: major]
 
 ### Task 4: The backend seam — gate the tty code, keep the decoder
 
-- [ ] define `TerminalBackend` covering the **24 public methods** of `impl Terminal`
+- [x] define `TerminalBackend` covering the **24 public methods** of `impl Terminal`
       (`terminal.rs:336-1061`): `new`, `open`, `reports_color_scheme`, `relayed`, `kitty_keyboard`,
       `set_key_event_types`, `draw`, `read_event`, `poll_event`, `waker`, `watch_resize`, `size`,
       `reports_pixel_mouse`, `frames_are_inline`, `forget_cell_size`, `cell_size`, `query_colors`,
       `request_colors`, `set_pointer_shape`, `set_clipboard`, `request_clipboard`,
       `clipboard_data_supported`, `request_clipboard_types`, `request_clipboard_data`
-- [ ] the five clipboard methods are **not optional** — `engine/clipboard.rs` takes `&mut Terminal`
+      — `pixel-core/src/terminal_backend.rs`, all 24, each with the signature it already had.
+      The trait is `Sized`, not object-safe: `new`/`open` are constructors and the engine holds
+      one backend chosen at compile time. Its doc comment records the four contract properties
+      the signatures cannot state — raw mode tied to the value's lifetime, one event per
+      `poll_event`, clipboard reads as request/response, capability getters cheap and infallible.
+- [x] the five clipboard methods are **not optional** — `engine/clipboard.rs` takes `&mut Terminal`
       at `:96,:121,:157,:181,:220`. They are OSC-52-shaped and return `io::Result`, so they trait
       cleanly, but they must be on the trait [triage: major, revision 1 omitted clipboard entirely]
-- [ ] derive the trait from existing callers, not from a fresh design
-- [ ] **`#[cfg(unix)]` covers the tty and frame-transport code only (lines 4, 193–1250).
+      — all five are on the trait. ➕ **The plan's description of the reply path was wrong**: there
+      is no `Event::ClipboardTypes`. `request_clipboard_types`' answer arrives as an
+      `Event::ClipboardData` whose `"."`-mime item holds the space-separated type list, which is
+      how `engine/clipboard.rs`'s `OscPasteStage::Types` reads it. The fake backend replays that
+      exact sequence rather than the one the plan imagined.
+- [x] derive the trait from existing callers, not from a fresh design
+      — enumerated mechanically: 21 of the 24 are called as `term.<method>(` from `engine/` and
+      `pixel-node/`; `new`/`open` are the pair `engine/mod.rs:339-340` picks between; `read_event`
+      is exported but not called in-tree. No method was invented, and none was left off.
+- [x] **`#[cfg(unix)]` covers the tty and frame-transport code only (lines 4, 193–1250).
       Lines 1251–1909 — the VT decoder — and its `#[cfg(test)] mod tests` at 1911 stay
       unconditional.** Gating the module wholesale strands 659 lines of portable code and 27 tests
       that Task 5 needs. [triage: major]
-- [ ] add a `#[cfg(windows)]` stub returning "unimplemented" for every method
-- [ ] `#[cfg(unix)]`-gate `ghostty.rs`; record `herdr.rs` as deferred to Task 13
-- [ ] verify `cargo check --workspace` is clean on Windows — the task's real deliverable
-- [ ] verify the ~197 inherited tests in keep-unchanged modules now **run and pass on Windows**;
+      — 41 `#[cfg(unix)]` attributes on the top-level items of the tty region, plus 3 on the
+      tty-bound tests inside `mod tests` (`parses_probe_replies`, the `FrameFile` round-trip, the
+      shm round-trip) and one on `mod tty_tests`. `git diff` on `terminal.rs` is **41 pure
+      insertions and no rewritten line** — the gate is an attribute, never an edit to the code
+      under it. ➕ **One item moved out of the gated set: `ClipRead`.** It sits inside the tty
+      region by position only — three plain fields, no platform dependency — and the decoder's own
+      `clip_data_chunks_of_one_mime_concatenate` test constructs one. Gating it would have cost a
+      28th decoder test for nothing.
+- [x] add a `#[cfg(windows)]` stub returning "unimplemented" for every method
+      — `pixel-core/src/terminal_windows.rs`, re-exported as `crate::terminal::Terminal` from
+      `terminal.rs`, so `lib.rs`'s crate-root `pub use terminal::Terminal` and all 11 importers
+      resolve on both platforms with no edit. Every operation returns `ErrorKind::Unsupported`
+      with a message naming the task that will implement it (5/6/7/11), and every capability
+      getter returns `false`.
+      ⚠️ **Construction is the deliberate exception: `new`/`open` succeed.** They make no OS call —
+      they only record the wrapper and session env Task 5 and Task 6 need — and letting them
+      succeed is what makes `engine/mod.rs` reachable on Windows now. The cost is that the trait's
+      raw-mode contract is satisfied only vacuously here; Task 5 puts a real `SetConsoleMode` pair
+      behind it, including on the panicking path.
+- [x] `#[cfg(unix)]`-gate `ghostty.rs`; record `herdr.rs` as deferred to Task 13
+      — both gated at their `lib.rs` declaration rather than inside the files, so neither vendored
+      file changed a byte. `herdr.rs` is referenced only from the gated tty region (its `FrameFile`
+      import and its `Herdr` fields), so nothing else had to move; Task 13 owns replacing its
+      `UnixStream`/`UnixListener` with named pipes. `inventory.test.mjs` now asserts both gates.
+- [x] verify `cargo check --workspace` is clean on Windows — the task's real deliverable
+      — **`cargo check -p pixel-core` is clean**: 41 errors → 0, and `--all-targets` is clean too,
+      so every `#[cfg(test)]` target builds. Warnings match the unix build exactly (2, both
+      pre-existing in `throttle.rs`).
+      ⚠️ **The workspace is not clean, and cannot be at this task.** With `pixel-core` compiling,
+      `pixel-node`'s own Windows errors surface for the first time — 2 of them,
+      `capture.rs:4` (`std::os::unix`) and `capture.rs:439` (`File::read_exact_at`).
+      `docs/design/01-baseline-errors.md` predicted exactly this ("`pixel-node`'s real Windows
+      disposition is unknown until Task 4 unblocks it, and Task 8 is where it gets measured"), so
+      this is the measurement, handed to Task 8, not a regression.
+      ➕ Keeping the warning set at parity took three scoped `#[cfg_attr(windows, allow(dead_code))]`
+      on `mod kitty`, `mod terminal` and `mod terminal_types` in `lib.rs`. Without them the gate
+      produces 47 dead-code warnings, because the decoder is kept but has no caller until Task 5
+      and `kitty.rs`'s emitters lost theirs. Scoped to three modules and to Windows rather than
+      crate-wide, and the unix build still reports dead code in those files normally.
+- [x] verify the ~197 inherited tests in keep-unchanged modules now **run and pass on Windows**;
       record the count, since it is the regression net for every task after this
-- [ ] write tests for the trait contract against a fake backend: event ordering, size reporting,
+      — **203, all green** (the plan's estimate was 197). Full Windows run: **247 passed, 0
+      failed** = 203 inherited + 25 decoder tests in `terminal.rs` + 19 port-added
+      (`terminal_backend` 9, `terminal_windows` 5, `terminal_types` 5).
+      ➕ **Three of the 203 failed on the first run, and the cause matters more than the fix.**
+      `clipboard_image.rs` is one of the 43 files the port calls portable, and it is — it uses no
+      unix *API*, which is exactly what `inventory.test.mjs` screens for. It assumed unix *paths*:
+      it gated pastes on a leading `/` or `~` (rejecting every `C:\…` as prose), expanded `~`
+      through `HOME` (Windows spells it `USERPROFILE`), and unescaped every backslash (turning
+      `C:\Users\me\a.png` into `C:Usersmea.png`). Fixed with three `cfg!(windows)` branches, unix
+      behaviour byte-for-byte unchanged, recorded as divergence 4 in
+      [`UPSTREAM.md`](../design/UPSTREAM.md) and pinned by three new vendor-check assertions.
+      ⚠️ **"No unix API" is not "portable", and the screen that cleared all 43 cannot see this
+      class of problem.** Task 14's unchanged-check should expect that list to grow.
+- [x] write tests for the trait contract against a fake backend: event ordering, size reporting,
       raw-mode enter/leave pairing, clipboard request/response
-- [ ] run tests — must pass before Task 5
+      — 9 tests in `terminal_backend.rs`'s `mod tests`, against a `FakeBackend` that logs what it
+      did into a handle outliving it (so the `Drop` that restores raw mode is observable). Covers
+      all four named properties: one event per `poll_event` in arrival order and `read_event`'s
+      `UnexpectedEof` at the end; size in cells and pixels plus `cell_size` caching and what
+      `forget_cell_size` is for; enter-on-construction / leave-exactly-once-on-drop **and** that a
+      *failed* construction logs no enter it will never pair with a leave; the full clipboard
+      request/response sequence — text, then types, then typed data — with a write proving it
+      produces no event. Plus capability getters touching nothing, and `draw` reporting its bytes.
+- [x] run tests — must pass before Task 5 — **247 Rust tests pass on Windows** (0 failed) and
+      **37 node tests** (34 before, +3 for divergence 4; the seam suite added 4 more inside the
+      existing count). Cross-checked against `x86_64-unknown-linux-gnu`: `cargo check --all-targets`
+      clean, so the gated tty code and `tty_tests` still compile. `cargo clippy --all-targets` on
+      that target is **identical to HEAD's, file for file** (15, all pre-existing upstream); on
+      Windows it is 5, all pre-existing. `cargo fmt --check`'s residual diff set is **identical to
+      HEAD's, file for file** — the two port-added files are fmt-clean, and placing
+      `pub use terminal_backend::TerminalBackend;` in sorted position kept `lib.rs` at its prior
+      count. ➕ New vendor-check suite "the backend seam" pins the split: no `#[cfg(unix)]` inside
+      the decoder region, `impl Terminal` gated, the Windows re-export present, the trait declaring
+      exactly the 24 names, and both backends carrying every one of them. Verified to have teeth by
+      adding a 25th method and watching it fail.
 
 ### Task 5: Windows console input
 

@@ -54,9 +54,14 @@ in this plan run from `engine/`, not the repo root.
 
 ## Intentional divergences from upstream
 
-These are the only edits to vendored files so far. Each is asserted by a test in
-`tools/vendor-check/install.test.mjs`, so a re-vendor that drops one fails loudly
-rather than at the Task 10 milestone.
+Edits to vendored files that are *not* the port's own subject matter. The three
+unix-bound modules (`terminal.rs`, `ghostty.rs`, `herdr.rs`) and `pixel-core`'s
+`lib.rs` are excluded — replacing those is what the port *is*, and the plan tracks
+them task by task. What is listed here is everything else, so the claim "the other
+43 files are untouched" stays checkable.
+
+Each is asserted by a test in `tools/vendor-check/`, so a re-vendor that drops one
+fails loudly rather than at the Task 10 milestone.
 
 1. **`browser/package.json` — `postinstall` replaced.** Upstream runs
    `bash ../scripts/fetch-electron.sh`. That is forbidden twice over: it needs a
@@ -77,6 +82,30 @@ rather than at the Task 10 milestone.
 
 3. **`package.json` — a root `test` script added**, running the vendor-check suite.
    Upstream has no root test entry point.
+
+4. **`engine/crates/pixel-core/src/clipboard_image.rs` — POSIX path assumptions
+   widened** (Task 4). This is the first edit to one of the 43 supposedly-portable
+   files, and it was found by running their tests rather than by reading them: the
+   file uses no unix *API*, which is what `inventory.test.mjs` screens for, but it
+   assumed unix *paths* in three places, and three of its five tests failed on
+   Windows.
+
+   - `image_path_from_paste` gated on a leading `/` or `~`, so every Windows path
+     (`C:\…`, `\\host\share\…`) was rejected as prose. Now `looks_absolute`.
+   - `~/` expanded through `HOME`, which Windows spells `USERPROFILE`. Now `home_dir`.
+   - `unescape` treated every backslash as a quote character, turning
+     `C:\Users\me\a.png` into `C:Usersmea.png`. On Windows it now unescapes only an
+     escaped space or tab — the case the function exists for — and leaves every other
+     backslash standing as a separator.
+
+   All three are `cfg!(windows)` branches, so unix behaviour is byte-for-byte what it
+   was. Upstream would probably take this patch; it is a portability fix, not a
+   divergence in intent.
+
+   ⚠️ **The lesson generalises: "no unix API" is not "portable".** Two other files
+   handle paths (`image_cache.rs`, `native.rs`) and their tests pass today, but the
+   screen that cleared all 43 cannot see this class of problem. Task 14's
+   unchanged-check should expect this list to grow.
 
 ## Re-vendoring checklist
 

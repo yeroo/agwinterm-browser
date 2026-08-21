@@ -37,8 +37,17 @@ const UNIX_BOUND_MODULES = ["ghostty.rs", "herdr.rs", "terminal.rs"];
  * lifted out so the tty code below it can be platform-gated without taking the
  * vocabulary (and the crate root's `pub use`) with it. `terminal.rs` re-exports
  * every name, so no importer changed.
+ *
+ * `terminal_backend.rs` and `terminal_windows.rs` are Task 4: the trait the two
+ * backends have to agree on, and the Windows backend itself. `terminal.rs`
+ * re-exports `Terminal` from the latter on Windows, so — again — no importer
+ * changed and `lib.rs`'s crate-root `pub use terminal::Terminal` still resolves.
  */
-const PORT_ADDED_FILES = ["terminal_types.rs"];
+const PORT_ADDED_FILES = [
+  "terminal_backend.rs",
+  "terminal_types.rs",
+  "terminal_windows.rs",
+];
 
 /**
  * Direct use of a unix-only API. Deliberately narrower than "mentions a platform":
@@ -235,8 +244,10 @@ describe("the extracted type vocabulary", () => {
     // "modernised" onto the new path is the quiet edit Task 14 is meant to catch.
     // `lib.rs` is exempt for one line only: it has to declare the module.
     const SPEAKS_OF_THE_NEW_PATH = ["terminal.rs", "terminal_types.rs", "lib.rs"];
+    // The path, not the word: a comment naming the module is not an import of it.
     const offenders = actualFiles.filter(
-      (rel) => !SPEAKS_OF_THE_NEW_PATH.includes(rel) && /terminal_types/.test(read(rel)),
+      (rel) =>
+        !SPEAKS_OF_THE_NEW_PATH.includes(rel) && /crate::terminal_types/.test(read(rel)),
     );
     assert.deepEqual(
       offenders,
@@ -274,5 +285,148 @@ describe("the extracted type vocabulary", () => {
         `unix API outside Waker in terminal_types.rs: ${line.trim()}`,
       );
     }
+  });
+});
+
+describe("the backend seam", () => {
+  // Task 4. The plan's claim is that `terminal.rs` splits rather than gates: the tty
+  // code goes behind `#[cfg(unix)]` and the VT decoder below it does not. These are
+  // assertions about that split holding, and about the two backends staying the same
+  // shape — a drift the Rust build would otherwise only catch on the other platform.
+  const terminal = read("terminal.rs");
+  const lines = terminal.split(/\r?\n/);
+
+  /**
+   * The 24 public methods of the unix `impl Terminal`, which is what the trait was
+   * derived from. Listed here rather than counted, so a re-vendor that adds a 25th
+   * names it in the failure instead of just moving a number.
+   */
+  const SEAM = [
+    "new",
+    "open",
+    "reports_color_scheme",
+    "relayed",
+    "kitty_keyboard",
+    "set_key_event_types",
+    "draw",
+    "read_event",
+    "poll_event",
+    "waker",
+    "watch_resize",
+    "size",
+    "reports_pixel_mouse",
+    "frames_are_inline",
+    "forget_cell_size",
+    "cell_size",
+    "query_colors",
+    "request_colors",
+    "set_pointer_shape",
+    "set_clipboard",
+    "request_clipboard",
+    "clipboard_data_supported",
+    "request_clipboard_types",
+    "request_clipboard_data",
+  ];
+
+  it("gates the tty code and leaves the decoder unconditional", () => {
+    const first = lines.findIndex((line) => /^enum RawEvent/.test(line));
+    const last = lines.findIndex((line, i) => i > first && /^mod tests \{/.test(line));
+    const gated = lines
+      .slice(first, last - 1)
+      .map((line, i) => [first + 1 + i, line])
+      .filter(([, line]) => /#\[cfg\(unix\)\]/.test(line));
+    assert.deepEqual(
+      gated,
+      [],
+      "a `#[cfg(unix)]` appeared inside the decoder region; Task 5's Windows backend " +
+        "feeds that decoder, so gating any of it strands the thing the split existed for",
+    );
+
+    // The mirror: the tty code above it really is gated, not merely deleted.
+    assert.ok(
+      /#\[cfg\(unix\)\]\r?\nimpl Terminal \{/.test(terminal),
+      "`impl Terminal` in terminal.rs is no longer `#[cfg(unix)]`-gated",
+    );
+    assert.ok(
+      /#\[cfg\(windows\)\]\r?\npub use crate::terminal_windows::Terminal;/.test(terminal),
+      "terminal.rs no longer re-exports the Windows `Terminal`, so `crate::terminal::" +
+        "Terminal` and lib.rs's crate-root `pub use` cannot resolve on Windows",
+    );
+  });
+
+  it("exposes exactly the 24 methods the trait was derived from", () => {
+    // Only the trait's own declarations — the forwarding `impl` further down the file
+    // repeats every name, so matching the whole file would count each one twice and a
+    // 25th method could hide in the overflow.
+    const source = read("terminal_backend.rs");
+    const opens = source.indexOf("pub trait TerminalBackend: Sized {");
+    assert.ok(opens > 0, "terminal_backend.rs no longer declares the trait");
+    const body = source.slice(opens, source.indexOf("\n}", opens));
+    const declared = [...body.matchAll(/^    fn (\w+)\(/gm)].map((m) => m[1]);
+
+    assert.deepEqual(
+      [...declared].sort(),
+      [...SEAM].sort(),
+      "TerminalBackend no longer declares exactly the seam's 24 methods",
+    );
+  });
+
+  it("keeps the unix backend and the Windows backend the same shape", () => {
+    const windows = read("terminal_windows.rs");
+    for (const method of SEAM) {
+      const signature = new RegExp(`^    pub fn ${method}\\b`, "m");
+      assert.ok(signature.test(terminal), `${method} is gone from the unix backend`);
+      assert.ok(signature.test(windows), `${method} is missing from the Windows backend`);
+    }
+  });
+
+  it("gates the two modules with no Windows analogue at the crate root", () => {
+    // `ghostty` signals ghostty over SIGUSR2; `herdr` speaks a Unix socket and is
+    // deferred to Task 13. Both are declared conditionally so they do not have to be
+    // ported to make the crate build.
+    const lib = read("lib.rs").split(/\r?\n/);
+    for (const decl of ["pub mod ghostty;", "mod herdr;"]) {
+      const at = lib.indexOf(decl);
+      assert.ok(at > 0, `lib.rs no longer declares \`${decl}\``);
+      assert.equal(
+        lib[at - 1],
+        "#[cfg(unix)]",
+        `lib.rs no longer gates \`${decl}\` on unix`,
+      );
+    }
+  });
+});
+
+describe("the Windows path fixes in clipboard_image.rs", () => {
+  // Divergence 4 in docs/design/UPSTREAM.md, and the first edit to one of the 43
+  // files the plan calls portable. A re-vendor overwrites it silently — the file
+  // would still compile, still pass the unix-API screen, and only three of its own
+  // tests would go red on Windows. So it is pinned here too.
+  const source = read("clipboard_image.rs");
+
+  it("accepts absolute Windows paths, not just POSIX ones", () => {
+    assert.match(
+      source,
+      /fn looks_absolute\(path: &str\) -> bool/,
+      "clipboard_image.rs is back to gating pastes on a leading `/` or `~`, which " +
+        "rejects every Windows path as prose",
+    );
+  });
+
+  it("expands `~` through USERPROFILE on Windows", () => {
+    assert.match(
+      source,
+      /fn home_dir\(\) -> Option<String>/,
+      "clipboard_image.rs is back to reading HOME, which Windows does not set",
+    );
+  });
+
+  it("does not unescape the Windows path separator", () => {
+    assert.match(
+      source,
+      /let separator_is_backslash = cfg!\(windows\);/,
+      "clipboard_image.rs is back to unescaping every backslash, which turns " +
+        String.raw`C:\Users\me\a.png into C:Usersmea.png`,
+    );
   });
 });
