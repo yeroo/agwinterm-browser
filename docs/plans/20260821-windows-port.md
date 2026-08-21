@@ -114,30 +114,71 @@ agwinterm source: `C:\Users\boris\source\agwinterm`.
 
 ### Task 1: Vendor, make `pnpm install` actually work, and take a full-tree baseline
 
-- [ ] copy upstream `engine/`, `browser/`, `cli/`, `terminals/`, `store/` into the repo root,
+- [x] copy upstream `engine/`, `browser/`, `cli/`, `terminals/`, `store/` into the repo root,
       preserving `LICENSE`, and record the upstream commit in `docs/design/UPSTREAM.md`
-- [ ] do **not** copy `install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh`
-- [ ] **remove the `postinstall` hook from `browser/package.json:7`** — it runs `bash` on the
+      — ⚠️ **there is no commit to record**: the reference checkout carries no VCS metadata, so
+      `UPSTREAM.md` records content digests instead. Also vendored `assets/` (root, distinct from
+      `engine/assets/` — `session.tsx:89` resolves it at runtime) and `package.json` /
+      `pnpm-workspace.yaml` / `pnpm-lock.yaml`. The Rust workspace root stays at `engine/`, so
+      cargo commands run from there, not the repo root.
+- [x] do **not** copy `install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh` — `scripts/`
+      was not copied at all; also skipped `herdr-plugin/`, `release-worker/`, `skill/`
+- [x] **remove the `postinstall` hook from `browser/package.json:7`** — it runs `bash` on the
       patched-Electron fetch script the Constraints forbid, and with `scripts/` uncopied it fails on
       a missing file regardless. Record it as the first intentional divergence from upstream.
-- [ ] **add `electron` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`** (or fetch the stock
+- [x] **add `electron` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`** (or fetch the stock
       binary explicitly) — pnpm 10 blocks the electron package's own binary download, which is *why*
       upstream substituted the fork fetch. Removing the hook alone yields an install that succeeds
       and still has no Electron binary. [triage: critical]
-- [ ] run `pnpm install` and confirm `node_modules/electron/dist/electron.exe` exists — this is the
+      — ➕ **the premise no longer holds for Electron 43.3.0: it has no `postinstall` at all.**
+      It dropped one and downloads lazily on first `require("electron")`, so listing it in
+      `onlyBuiltDependencies` is currently inert. Both halves were done anyway: the entry is kept
+      for a version that reinstates a build script, and the hook was **replaced** rather than
+      removed, with `node node_modules/electron/install.js` — cross-platform, stock binary,
+      idempotent. That is the plan's "or fetch the stock binary explicitly" branch.
+- [x] run `pnpm install` and confirm `node_modules/electron/dist/electron.exe` exists — this is the
       pass/fail, not "the command exited 0"
-- [ ] run `cargo check --workspace`; commit the error list to `docs/design/01-baseline-errors.md`
-- [ ] **run the same unix-API disposition pass over `browser/`, `cli/`, `store/`, `terminals/` and
+      — verified at `browser/node_modules/electron/dist/electron.exe`, 348 MB, stock 43.3.0 win32-x64,
+      produced by `pnpm install` alone from a deleted `dist/`. Note `pnpm` is not on PATH on this
+      machine; it runs via `corepack pnpm` (10.13.1, matching `packageManager`).
+- [x] run `cargo check --workspace`; commit the error list to `docs/design/01-baseline-errors.md`
+      — **41 errors, in exactly 3 files** (`terminal.rs` 37, `ghostty.rs` 3, `herdr.rs` 1); the other
+      43 `pixel-core` files produce zero. Not one error falls in `terminal.rs:1251–1909`. The brief's
+      numbers are confirmed. `openh264-sys2` builds clean under MSVC, closing a Task 8 risk early.
+      ⚠️ `cargo fmt --all --check` reports 172 diffs across 30 vendored files, most of them
+      keep-unchanged — see the disposition in the baseline doc; the check is scoped to code this
+      port writes, since reformatting them is the silent edit the Constraints forbid.
+- [x] **run the same unix-API disposition pass over `browser/`, `cli/`, `store/`, `terminals/` and
       the JS build scripts**, recording it beside the `pixel-core` table — the Rust measurement
       covered the least risky layer, and every blocker found so far was outside it [triage: major]
-- [ ] **probe ConPTY input fidelity**: from a child under a Debug agwinterm with
+      — 27 files, ranked by disposition in the baseline doc. Also recorded: the vendored
+      `pixel-terminals` suite is 28/29 on Windows, and the one failure is pre-existing upstream
+      breakage (`herdr.ts:45` has no fallback), not a porting problem.
+- [x] **probe ConPTY input fidelity**: from a child under a Debug agwinterm with
       `ENABLE_VIRTUAL_TERMINAL_INPUT` set, record the exact bytes received for an SGR mouse report
       and a kitty-keyboard CSI-u report. These are synthesized host-side and pass through conhost's
       `INPUT_RECORD` round-trip; CSI-u forms are exotic and Task 11 is the first thing that would
       notice a loss. Record next to the `cargo check` baseline. [triage: minor, cheap, de-risks two tasks]
-- [ ] write a test asserting the vendored `pixel-core` file inventory (46 files) matches expectation,
+      — done against a **real ConPTY created by the probe itself** (`tools/conpty-probe`) rather than
+      a Debug agwinterm: no agwinterm build exists on this machine, only the live instance the
+      Constraints forbid touching, and the risk being measured is conhost's, not agwinterm's.
+      **Result: every sequence survives verbatim** — SGR press/release/drag, three-digit coordinates,
+      CSI-u plain and modified, modified arrows, and a four-sequence burst. Task 11's "if CSI-u did
+      not survive" branch can be closed.
+      — ➕ **a ConPTY child's std handles can be `NUL` while it is attached to the pty**:
+      `GetFileType` says `FILE_TYPE_CHAR`, every console API returns `ERROR_INVALID_HANDLE`, and the
+      process looks console-less. Task 5 must open `CONIN$`/`CONOUT$` by name — the analogue of
+      upstream opening `/dev/tty` rather than using fd 0. This was the cause of a first probe run
+      that reported *everything* dropped, control case included.
+- [x] write a test asserting the vendored `pixel-core` file inventory (46 files) matches expectation,
       so a re-vendor cannot silently add a unix-bound module
-- [ ] run tests — must pass before Task 2
+      — `tools/vendor-check/inventory.test.mjs`: 46 files, exact set match, unix APIs confined to the
+      3 replaceable modules, 43 files unix-free, and the decoder region still unix-free. A companion
+      `install.test.mjs` pins the two install fixes so a re-vendor cannot silently undo them.
+      Note `throttle.rs` carries `#[cfg(target_os = "macos")]` code and compiles on Windows
+      untouched, so the scan matches unix *APIs*, not any platform mention.
+- [x] run tests — must pass before Task 2 — 14 node tests + 15 Rust tests green; `cargo fmt --check`
+      and `cargo clippy -- -D warnings` clean on `tools/conpty-probe`
 
 ### Task 2: Decide where the engine process lives on Windows
 

@@ -23,3 +23,12 @@ out/
 
 *.log
 .revmux/tasks/*/*/stages/
+
+# vendored upstream build state
+engine/packages/pixel-react/native/
+*.snap.new
+*.pending-snap
+*.profraw
+*.profdata
+.env
+.env.*
