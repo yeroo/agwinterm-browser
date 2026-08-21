@@ -129,7 +129,14 @@ export async function endpointStatus(
     return "alive";
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ECONNREFUSED" ? "absent" : "unknown";
+    // `ENOTSOCK` joins the other two because it answers the same question: the name
+    // is there but it is not an endpoint — a leftover file where a unix socket used
+    // to be, which on Windows is what a socket path from another machine's row
+    // looks like. Nobody can be listening on it, so it is `absent`, and the stale
+    // remnant is safe to remove. Everything else is `unknown` — see the type.
+    return code === "ENOENT" || code === "ECONNREFUSED" || code === "ENOTSOCK"
+      ? "absent"
+      : "unknown";
   }
 }
 
@@ -157,7 +164,12 @@ export async function endpointAlive(endpoint: string, timeoutMs = 1_000): Promis
  * is the correct outcome, because the owner is alive.
  */
 export async function reclaimEndpoint(endpoint: string, timeoutMs = 1_000): Promise<boolean> {
-  if (await endpointAlive(endpoint, timeoutMs)) return false;
+  // `absent`, not `!alive`: this is a caller that *destroys* state, and a probe
+  // that ran out of its budget says nothing about the owner — see `endpointStatus`.
+  // Unlinking on a timeout is exactly the mistake the three-state answer exists to
+  // prevent: the server holding the socket keeps running, now unreachable, while
+  // this process binds a second one on its name.
+  if ((await endpointStatus(endpoint, timeoutMs)) !== "absent") return false;
   removeEndpoint(endpoint);
   return true;
 }

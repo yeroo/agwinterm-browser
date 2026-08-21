@@ -251,6 +251,18 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
   back/forward are **Alt+Left/Alt+Right** — the spellings an Esc prefix and `CSI 1;3D`
   deliver intact, and the ones a Windows browser binds anyway. Alt is accepted for those
   two and nowhere else, so it stays a page modifier: alt+t is still not "new tab".
+- **The console's input code page is switched to UTF-8 and put back.**
+  `ReadFile` on `CONIN$` is `ReadConsoleA`, so conhost encodes every character that is
+  not part of a VT sequence with the console's *input* code page — OEM 437, 850, 932 on
+  a default install — while the decoder those bytes are handed to (`terminal.rs`'s
+  `parse_plain_bytes`) reads UTF-8 and nothing else. Without the switch, `é` arrives as
+  a lone `0xE9` under CP1252: a two-byte lead with no continuation, which the decoder
+  cannot finish and which then sits at the head of `pending` and glues itself to the
+  next keystroke. Characters the code page cannot represent at all never reach the
+  backend — conhost substitutes `?`. `SetConsoleCP` is process-wide, so the previous
+  value is recorded once and restored by `ModeGuard::drop` and by the panic hook, the
+  same two paths that restore the console modes. The *output* code page is left alone:
+  everything this backend writes to `CONOUT$` is ASCII escape bytes.
 - **Ctrl+Shift is not a chord this host has**, which is the same encoding fact one step
   further on: the C0 bytes carry ctrl and nothing else, so `ctrl+shift+f` and `ctrl+f`
   arrive identically and a `ctrl+shift+*` binding can never match. Upstream's non-darwin

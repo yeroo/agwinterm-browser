@@ -45,7 +45,7 @@
 //! the pointer, which is why this returns a value rather than an `Option`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::time::Duration;
 
 use crate::terminal::SessionEnv;
@@ -103,6 +103,21 @@ const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
 const OPEN_ATTEMPTS: u32 = 20;
 const BUSY_WAIT: Duration = Duration::from_millis(25);
 
+/// The most one reply line may grow to before it is refused. Matches
+/// `cli/src/control.ts`'s `MAX_REPLY_BYTES`, which caps the other client of the
+/// same protocol.
+const MAX_REPLY_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The largest cell either dimension may claim to be, in pixels.
+///
+/// A sanity bound, not a font limit: the numbers arrive over the pipe and are
+/// multiplied by the pane's columns and rows to size the canvas
+/// (`engine/mod.rs`), and that product is a `u32` multiply which wraps rather than
+/// panics in release. 1024 is roughly sixteen times the largest cell a readable
+/// terminal font produces, and leaves the product of a full-screen pane far inside
+/// the range.
+const MAX_CELL_PX: u32 = 1024;
+
 // ---------------------------------------------------------------------------
 // Where to send, and whether there is anywhere to send to
 // ---------------------------------------------------------------------------
@@ -135,8 +150,15 @@ impl HostTarget {
                  front rather than this one"
             )));
         }
+        let pipe = nonempty(env, PIPE_VAR).unwrap_or_else(|| DEFAULT_PIPE.to_owned());
+        if !valid_pipe_name(&pipe) {
+            return Err(not_hosted(&format!(
+                "{PIPE_VAR}={pipe:?} is not a pipe name — it may contain only \
+                 letters, digits, `.`, `_` and `-`"
+            )));
+        }
         Ok(Self {
-            pipe: nonempty(env, PIPE_VAR).unwrap_or_else(|| DEFAULT_PIPE.to_owned()),
+            pipe,
             session,
             window: nonempty(env, WINDOW_VAR),
         })
@@ -151,6 +173,25 @@ impl HostTarget {
     pub(crate) fn session(&self) -> &str {
         &self.session
     }
+}
+
+/// The characters a pipe name may carry, which is `store/src/endpoint.ts`'s
+/// `pipeSegment` set — the same guard, on the other side of the same wire.
+///
+/// Not cosmetic, and not about the object manager's nesting rule alone. `\\.\` is a
+/// *device* path, and unlike `\\?\` it is normalised on the way in: `..\` walks out
+/// of the pipe namespace into the filesystem. An `AGWINTERM_PIPE` of
+/// `..\C:\Users\me\.ssh\config` therefore turns [`Connection::open`] — which asks
+/// for read *and* write — into an open of that file, and [`Connection::exchange`]
+/// into a write of the request line over its first bytes. The value comes from the
+/// environment, and the environment is not always one this process inherited: the
+/// daemon shape takes it from whoever asked for the session
+/// (`browser/src/daemon.ts`). So it is checked here rather than trusted.
+fn valid_pipe_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Whether this process is inside an agwinterm pane at all.
@@ -228,10 +269,26 @@ impl Connection {
         pipe.flush()?;
 
         let mut line = String::new();
-        if self.reader.read_line(&mut line)? == 0 {
+        // Capped, because this read is on the render thread and the reply is one
+        // line from a peer that only has to be listening on the name to be talking
+        // to us. `cli/src/control.ts` caps its half of the identical protocol for
+        // the same reason. A truncated read leaves the connection unusable, which
+        // is what returning an error out of `attempt` handles — it drops it.
+        let read = (&mut self.reader)
+            .take(MAX_REPLY_BYTES)
+            .read_line(&mut line)?;
+        if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "agwinterm closed the control pipe before answering",
+            ));
+        }
+        // Only the reply that *filled* the cap is refused. One that simply ends at
+        // EOF without its newline is still a reply, and was accepted before.
+        if read as u64 >= MAX_REPLY_BYTES && !line.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("agwinterm's reply passed {MAX_REPLY_BYTES} bytes with no newline"),
             ));
         }
         Ok(line)
@@ -547,12 +604,14 @@ pub(crate) struct PaneMetrics {
 }
 
 impl PaneMetrics {
-    /// `None` when the cell size is missing or zero — the only two fields anything
-    /// downstream cannot do without. `cols`/`rows` default to zero rather than
-    /// failing the whole reply, since the console screen buffer supplies those too.
+    /// `None` when the cell size is missing, zero, or past [`MAX_CELL_PX`] — the
+    /// only two fields anything downstream cannot do without, and the two it
+    /// cannot do without being *plausible*. `cols`/`rows` default to zero rather
+    /// than failing the whole reply, since the console screen buffer supplies those
+    /// too.
     fn parse(raw: &str) -> Option<Self> {
-        let cell_width = field_u32(raw, "cellWidth").filter(|width| *width > 0)?;
-        let cell_height = field_u32(raw, "cellHeight").filter(|height| *height > 0)?;
+        let cell_width = field_u32(raw, "cellWidth").filter(|width| plausible_cell(*width))?;
+        let cell_height = field_u32(raw, "cellHeight").filter(|height| plausible_cell(*height))?;
         Some(Self {
             cols: field_u32(raw, "cols").unwrap_or(0),
             rows: field_u32(raw, "rows").unwrap_or(0),
@@ -645,7 +704,13 @@ fn parse_cell_px(raw: &str) -> Option<(u32, u32)> {
         width.trim().parse::<u32>().ok()?,
         height.trim().parse::<u32>().ok()?,
     );
-    (cell.0 > 0 && cell.1 > 0).then_some(cell)
+    (plausible_cell(cell.0) && plausible_cell(cell.1)).then_some(cell)
+}
+
+/// A cell dimension that could describe a real character cell. See [`MAX_CELL_PX`]
+/// for why the upper bound exists at all.
+fn plausible_cell(px: u32) -> bool {
+    px > 0 && px <= MAX_CELL_PX
 }
 
 #[cfg(test)]
@@ -917,6 +982,58 @@ mod tests {
         let target = HostTarget::from_env(&env_of(&[(ENABLED_VAR, "1"), (SESSION_VAR, "s3")]))
             .expect("the pipe name is optional");
         assert_eq!(target.path(), format!(r"\\.\pipe\{DEFAULT_PIPE}"));
+    }
+
+    #[test]
+    fn a_pipe_name_that_could_leave_the_pipe_namespace_is_refused() {
+        // `\\.\pipe\<name>` is a device path, and unlike `\\?\` it is normalised
+        // before the object manager sees it — so a `..\` in the name walks out into
+        // the filesystem, and `Connection::open`, which asks for read *and* write,
+        // becomes an open of whatever it lands on, with the request line written
+        // over its first bytes. The value comes from the environment, and in the
+        // daemon shape the environment is handed over a control channel rather than
+        // inherited, so it is checked rather than trusted. The allowed set is
+        // `store/src/endpoint.ts`'s `pipeSegment`, which guards the names this
+        // project creates.
+        for hostile in [
+            r"..\..\Users\me\.ssh\config",
+            r"..\C:\Windows\System32\drivers\etc\hosts",
+            "a/b",
+            r"sub\name",
+            "name with spaces",
+        ] {
+            let err = HostTarget::from_env(&env_of(&[
+                (ENABLED_VAR, "1"),
+                (SESSION_VAR, "s3"),
+                (PIPE_VAR, hostile),
+            ]))
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::NotFound);
+            assert!(
+                err.to_string().contains(PIPE_VAR),
+                "the refusal has to name the variable to fix: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn the_pipe_names_agwinterm_actually_uses_still_pass() {
+        // A guard that refuses the host is worse than no guard. These are the shapes
+        // agwinterm and `agwintermctl` produce.
+        for allowed in [
+            DEFAULT_PIPE,
+            "agwinterm-dev",
+            "agwinterm.boris",
+            "agw_1_2-3",
+        ] {
+            let target = HostTarget::from_env(&env_of(&[
+                (ENABLED_VAR, "1"),
+                (SESSION_VAR, "s3"),
+                (PIPE_VAR, allowed),
+            ]))
+            .unwrap_or_else(|err| panic!("{allowed:?} is a pipe name: {err}"));
+            assert_eq!(target.path(), format!(r"\\.\pipe\{allowed}"));
+        }
     }
 
     #[test]

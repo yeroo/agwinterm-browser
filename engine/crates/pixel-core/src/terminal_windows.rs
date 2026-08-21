@@ -76,7 +76,7 @@
 //! read at entry, and both are idempotent.
 
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -90,7 +90,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Console::{
     ATTACH_PARENT_PROCESS, AttachConsole, CONSOLE_SCREEN_BUFFER_INFO, DISABLE_NEWLINE_AUTO_RETURN,
     ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_VIRTUAL_TERMINAL_INPUT,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleScreenBufferInfo, SetConsoleMode,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleCP, GetConsoleMode, GetConsoleScreenBufferInfo,
+    SetConsoleCP, SetConsoleMode,
 };
 use windows_sys::Win32::System::IO::CancelIoEx;
 
@@ -468,19 +469,34 @@ fn registry() -> MutexGuard<'static, Vec<Restore>> {
 /// already cleaned up) finds its tokens gone and does nothing — which is what keeps
 /// the farewell from being written a second time, with VT output already off, where
 /// it would be printed as literal escape bytes rather than obeyed.
+///
+/// The whole pass runs under the registry lock, and that is load-bearing rather
+/// than tidy. The entries hold a bare `HANDLE`, while the `Arc<ConsoleHandle>` that
+/// closes it lives in the guard; a `ModeGuard::drop` racing this on another thread
+/// would find its token already drained, return, and drop the last reference —
+/// closing the handle underneath the calls below, which Windows is free to have
+/// recycled by then. Holding the lock makes that drop wait until there is nothing
+/// left to use the handle for.
 #[allow(unsafe_code)]
 pub(crate) fn restore_registered_modes() {
-    let entries = std::mem::take(&mut *registry());
-    for entry in entries.iter() {
+    let mut guard = registry();
+    let entries = std::mem::take(&mut *guard);
+    // In reverse, for the reason `ModeGuard::drop` documents: the registry is in
+    // insertion order, so two guards overlapping on one handle have to unwind
+    // innermost first or the console is left in the inner guard's mode — raw.
+    for entry in entries.iter().rev() {
         if let Some(bytes) = entry.farewell {
             write_raw(entry.handle, bytes);
         }
     }
-    for entry in entries.iter() {
-        // SAFETY: the handle was live when registered and is only closed after the
-        // guard that owns it has deregistered; the mode is a plain bitfield.
+    for entry in entries.iter().rev() {
+        // SAFETY: the handle was live when registered, and the `Arc` that closes it
+        // cannot be dropped while this function holds the registry lock — see the
+        // doc comment. The mode is a plain bitfield.
         unsafe { SetConsoleMode(entry.handle, entry.mode) };
     }
+    drop(guard);
+    restore_input_code_page();
 }
 
 /// Best-effort `WriteFile` to a raw handle, for the restore paths that have a
@@ -508,6 +524,80 @@ fn write_raw(handle: HANDLE, mut bytes: &[u8]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The console input code page
+// ---------------------------------------------------------------------------
+
+/// UTF-8, as the console numbers code pages.
+const CP_UTF8: u32 = 65001;
+
+/// The console's input code page before this process changed it, or `0` — which is
+/// not a code page — for "unchanged, nothing to put back".
+///
+/// A plain atomic rather than a [`REGISTRY`] entry because `SetConsoleCP` is
+/// process-wide: a process has one console, and the code page belongs to it rather
+/// than to a handle. The `0` sentinel doubles as the take-once flag, so overlapping
+/// terminals cannot each record a "previous" value and restore the wrong one.
+static PREVIOUS_INPUT_CP: AtomicU32 = AtomicU32::new(0);
+
+/// Puts the console's input code page into UTF-8, and reports whether this call is
+/// the one that has to put it back.
+///
+/// `ReadFile` on `CONIN$` is `ReadConsoleA`, so conhost encodes every character
+/// that is not part of a VT sequence with the *input* code page — OEM 437, 850,
+/// 932… on a default install, never UTF-8 — while the decoder those bytes are fed
+/// to (`terminal.rs`'s `parse_plain_bytes`) reads UTF-8 and nothing else. So `é`
+/// arrives as a single `0xE9` under CP1252, which is a two-byte lead with no
+/// continuation: the decoder returns `None` and the byte stays at the head of
+/// `pending`, where it glues itself to the next keystroke. Characters the code page
+/// cannot represent at all are converted to `?` before this backend ever sees them.
+/// One call fixes both, and it is the only way to fix the second.
+///
+/// The *output* code page is deliberately left alone: everything this backend
+/// writes to `CONOUT$` is ASCII escape bytes, identical under every code page, and
+/// the console it would change is shared with whatever else prints into the pane.
+#[allow(unsafe_code)]
+fn adopt_utf8_input_code_page() -> io::Result<bool> {
+    // SAFETY: no arguments, no state; `0` is the documented failure return, which
+    // here means the process has no console — `Terminal::new` has already attached
+    // to one, so that is a real error rather than a state to work around.
+    let previous = unsafe { GetConsoleCP() };
+    if previous == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if previous == CP_UTF8 {
+        return Ok(false);
+    }
+    // Whoever wins this owns the restore; a second terminal in the same process
+    // finds the slot taken and leaves the value the first one recorded.
+    if PREVIOUS_INPUT_CP
+        .compare_exchange(0, previous, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    // SAFETY: a code page id is a plain integer; `0` is the documented failure.
+    if unsafe { SetConsoleCP(CP_UTF8) } == 0 {
+        let err = io::Error::last_os_error();
+        PREVIOUS_INPUT_CP.store(0, Ordering::Release);
+        return Err(err);
+    }
+    Ok(true)
+}
+
+/// Puts the input code page back, if this process changed it. Idempotent: the
+/// sentinel is swapped out, so the guard's `Drop` and the panic hook can both run.
+#[allow(unsafe_code)]
+fn restore_input_code_page() {
+    let previous = PREVIOUS_INPUT_CP.swap(0, Ordering::AcqRel);
+    if previous == 0 {
+        return;
+    }
+    // SAFETY: as above. A failure here means the console has gone, which is not
+    // something a restore can act on.
+    unsafe { SetConsoleCP(previous) };
+}
+
 /// Installs the panic hook, once per process. It runs before the previous hook, so
 /// the console is already back to normal by the time the panic message is printed.
 fn install_panic_hook() {
@@ -527,6 +617,9 @@ fn install_panic_hook() {
 /// hook does not touch a handle that has gone.
 struct ModeGuard {
     entries: Vec<(Arc<ConsoleHandle>, u64)>,
+    /// Whether this guard is the one that changed the console's input code page,
+    /// and so the one that has to change it back.
+    code_page: bool,
 }
 
 impl ModeGuard {
@@ -534,7 +627,16 @@ impl ModeGuard {
         install_panic_hook();
         Self {
             entries: Vec::new(),
+            code_page: false,
         }
+    }
+
+    /// Reads keys as UTF-8 for as long as this guard lives. See
+    /// [`adopt_utf8_input_code_page`] for why the decoder cannot be fed anything
+    /// else, and why the console does not do this by default.
+    fn use_utf8_input(&mut self) -> io::Result<()> {
+        self.code_page = adopt_utf8_input_code_page()?;
+        Ok(())
     }
 
     /// Reads `handle`'s current mode, applies `next` to it, and remembers the old
@@ -577,6 +679,11 @@ impl Drop for ModeGuard {
     /// insertion order would leave the console in the *inner* guard's mode, which
     /// on this backend is raw.
     fn drop(&mut self) {
+        // First, because it was taken last, and because the farewell bytes below
+        // are ASCII under every code page either way.
+        if std::mem::take(&mut self.code_page) {
+            restore_input_code_page();
+        }
         let mut registry = registry();
         for (handle, token) in self.entries.drain(..).rev() {
             if let Some(at) = registry.iter().position(|entry| entry.token == token) {
@@ -876,6 +983,20 @@ impl Terminal {
 
         let mut modes = ModeGuard::new();
         modes.apply(&conin, raw_input_mode)?;
+        // Before the reader thread starts, so that no keystroke is ever read under
+        // the code page this is replacing. Logged rather than fatal, unlike the
+        // modes above: ASCII reads the same under every code page, so a console
+        // that refuses the switch costs accented and non-Latin keys, not the
+        // browser.
+        if let Err(err) = modes.use_utf8_input() {
+            crate::logging::warn(
+                "console",
+                format!(
+                    "could not put the console's input code page into UTF-8 ({err}); \
+                     keys outside ASCII will arrive mangled"
+                ),
+            );
+        }
         // The mirror of `ENABLE_REPORTING` rides with the output mode rather than
         // being written by `Terminal::drop`, so that the one place that puts the
         // console back is also the only place that can — including from the panic
@@ -1052,6 +1173,15 @@ impl Terminal {
             }
             if let Some((raw, used)) = parse_event_kitty(&self.pending, self.kitty_keyboard()) {
                 self.pending.drain(..used);
+                // Upstream's `terminal.rs` clears this on the same line as the
+                // drain, and it has to: the tail left behind may itself be a lone
+                // `0x1b`, and `lone_escape_deadline` only ever *keeps* the
+                // timestamp in that case. Without the reset that fresh escape
+                // inherits the deadline of an older one and is flushed as
+                // `Key::Escape` before its second byte arrives — which is what a
+                // held arrow key looks like when the reader thread splits the
+                // sequence.
+                self.lone_escape_since = None;
                 match self.lift(raw) {
                     Some(event) => return Ok(Some(event)),
                     None => continue,
@@ -2010,6 +2140,69 @@ mod tests {
     }
 
     #[test]
+    fn the_panic_hooks_restore_unwinds_overlapping_guards_in_order_too() {
+        // The rule the test above asserts for `Drop`, on the path that exists
+        // *because* no `Drop` will run. The registry is one process-wide vector in
+        // insertion order, so walking it forwards restores the outer guard's mode
+        // first and the inner guard's second -- leaving the console in the inner
+        // one's mode, which on the real terminal is raw.
+        let _serial = one_at_a_time();
+        let buffer = private_screen_buffer();
+        let before = buffer.mode().expect("a real console mode");
+
+        let mut outer = ModeGuard::new();
+        outer.apply(&buffer, vt_output_mode).expect("outer");
+        let mut inner = ModeGuard::new();
+        inner
+            .apply(&buffer, |mode| mode | DISABLE_NEWLINE_AUTO_RETURN)
+            .expect("inner");
+
+        restore_registered_modes();
+        assert_eq!(
+            buffer.mode().unwrap(),
+            before,
+            "the hook left the console in the inner guard's mode",
+        );
+        drop(inner);
+        drop(outer);
+    }
+
+    #[test]
+    #[allow(unsafe_code)]
+    fn keys_are_read_as_utf8_while_a_guard_holds_the_console() {
+        // `ReadFile` on `CONIN$` is `ReadConsoleA`, so conhost encodes every
+        // ordinary character with the console's *input* code page -- OEM 437, 850,
+        // 932 on a default install -- while the decoder those bytes are handed to
+        // reads UTF-8 and nothing else. A single accented key would arrive as one
+        // byte that is not valid UTF-8 and stall at the head of `pending`; a key
+        // the code page cannot represent would arrive as `?`.
+        let _serial = one_at_a_time();
+        // SAFETY: no arguments and no state. `0` means this process has no console,
+        // which is a suite running without one rather than a failure to assert on.
+        let before = unsafe { GetConsoleCP() };
+        if before == 0 {
+            return;
+        }
+        let mut guard = ModeGuard::new();
+        guard
+            .use_utf8_input()
+            .expect("a console's input code page is settable");
+        // SAFETY: as above.
+        let held = unsafe { GetConsoleCP() };
+        assert_eq!(
+            held, CP_UTF8,
+            "keys would be decoded in an encoding they were not written in",
+        );
+        drop(guard);
+        // SAFETY: as above.
+        let after = unsafe { GetConsoleCP() };
+        assert_eq!(
+            after, before,
+            "the console was left on a code page it did not start on",
+        );
+    }
+
+    #[test]
     fn the_reporting_sequences_are_registered_rather_than_written_by_drop() {
         // `Terminal::drop` used to write `DISABLE_REPORTING` itself, which meant the
         // panic hook -- the one path that exists *because* no Drop will run --
@@ -2552,6 +2745,51 @@ mod tests {
             term.poll_event(Some(Duration::from_millis(50)))
                 .expect("the next key"),
             Some(Event::Key(KeyEvent::plain(Key::Char('a')))),
+        );
+    }
+
+    #[test]
+    fn a_completed_sequence_clears_the_deadline_its_escape_set() {
+        // The tail left behind by a decoded event can itself be a lone `0x1b`, and
+        // `lone_escape_deadline` only ever *keeps* the timestamp in that case — so
+        // the reset has to happen on the drain, where upstream's `terminal.rs` does
+        // it. Without it the new escape inherits the expired deadline of the old
+        // one and is flushed as `Key::Escape` before its second byte can arrive,
+        // which is what a held arrow key looks like when the reader thread splits
+        // the sequence: the palette closes and a stray `[B` lands on the page.
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+
+        // An escape arrives on its own and starts the clock, but is not given up on.
+        inbox.push(b"\x1b");
+        assert_eq!(
+            term.poll_event(Some(LONE_ESCAPE_WAIT / 5))
+                .expect("an escape still inside its deadline is not an error"),
+            None,
+        );
+        // Long enough that the *first* escape's deadline is now in the past.
+        std::thread::sleep(LONE_ESCAPE_WAIT * 2);
+
+        // Its sequence completes, with the first byte of the next one behind it.
+        inbox.push(b"[A\x1b");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(200)))
+                .expect("the completed sequence"),
+            Some(Event::Key(KeyEvent::plain(Key::Up))),
+        );
+
+        // That trailing escape is new. It gets its own wait, not the expired one.
+        assert_eq!(
+            term.poll_event(Some(LONE_ESCAPE_WAIT / 5))
+                .expect("the fresh escape is not an error"),
+            None,
+            "the escape left behind was flushed on the previous escape's deadline",
+        );
+        inbox.push(b"[B");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(200)))
+                .expect("the second sequence"),
+            Some(Event::Key(KeyEvent::plain(Key::Down))),
         );
     }
 

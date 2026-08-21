@@ -348,18 +348,35 @@ async function kill(pid: number, why: string): Promise<number> {
  *
  * Never throws: the browser being gone already is the outcome this wants, and a
  * failure here must not become the exit code the pane reports.
+ *
+ * @see taskkillPath, for why the killer is spelled out in full.
  */
 async function terminateTree(child: ChildProcess): Promise<void> {
   const pid = child.pid;
   if (pid === undefined) return;
   const dead = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   try {
-    if (WINDOWS) execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-    else child.kill("SIGKILL");
+    if (WINDOWS) {
+      execFileSync(taskkillPath(), ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } else child.kill("SIGKILL");
   } catch {
     return;
   }
   await Promise.race([dead, new Promise<void>((resolve) => setTimeout(resolve, 1_000).unref())]);
+}
+
+/**
+ * `taskkill.exe` by absolute path, never by name.
+ *
+ * `CreateProcess` — and therefore libuv's `search_path`, and therefore
+ * `execFileSync` with no shell — looks in the *current directory* before it looks
+ * at `PATH`. This runs in whatever directory the user launched the CLI from, so a
+ * bare `"taskkill"` would run a `taskkill.exe` sitting in an unpacked download
+ * folder in preference to the system one, with this user's privileges, on the
+ * ordinary path where a browser outlived its Ctrl+C.
+ */
+function taskkillPath(): string {
+  return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 }
 
 /**

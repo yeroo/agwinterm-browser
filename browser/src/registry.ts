@@ -36,6 +36,13 @@ export interface ControlHost {
   viewport(): { width: number; height: number } | null;
 }
 
+/**
+ * The most one request line may grow to before the connection is dropped. The
+ * mirror of `cli/src/control.ts`'s `MAX_REPLY_BYTES`, which caps the same protocol
+ * from the other end.
+ */
+const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
 interface ControlRequest {
   cmd: string;
   url?: string;
@@ -183,10 +190,22 @@ export class Registry {
     connection.on("error", () => {});
     connection.on("data", (chunk: string) => {
       buffer += chunk;
+      // A request is one line. `cli/src/control.ts` caps its side of this protocol
+      // for the reason that applies with more force here: on Windows the endpoint
+      // is a name any local process can dial, and this is the *server* — a peer
+      // that streams without ever sending a newline would otherwise grow this
+      // string inside the browser until the process ran out of memory.
+      if (buffer.length > MAX_REQUEST_BYTES) {
+        connection.destroy();
+        return;
+      }
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       const line = buffer.slice(0, newline);
-      buffer = "";
+      // Keep whatever followed the newline. Only one request is answered per
+      // connection (`handle` ends it), so this is about not discarding bytes that
+      // would have to be re-read, not about pipelining.
+      buffer = buffer.slice(newline + 1);
       void this.handle(line)
         .then((data) => {
           connection.end(`${JSON.stringify({ ok: true, data })}\n`);

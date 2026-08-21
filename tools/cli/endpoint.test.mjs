@@ -394,6 +394,24 @@ describe("why a probe failed, which is not the same question as whether it did",
     }
   });
 
+  it("refuses to reclaim an endpoint whose probe was inconclusive", async () => {
+    // The rule the three-state answer exists for, at the one call site that acts on
+    // it destructively. A server too busy to accept inside the budget still owns its
+    // name; reclaiming it would unlink a live socket on unix and, on either
+    // platform, tell the caller to go ahead and bind a second server on top of a
+    // browser that is running perfectly well.
+    if (process.platform !== "win32") return;
+    const endpoint = pipeEndpoint(APP, "test", "busy-reclaim");
+    const { child, held } = await busyServer(endpoint);
+    try {
+      assert.equal(await endpointStatus(endpoint, 400), "unknown");
+      assert.equal(await reclaimEndpoint(endpoint, 400), false);
+    } finally {
+      for (const socket of held) socket.destroy();
+      child.kill();
+    }
+  });
+
   it("keeps `endpointAlive` a strict yes, for the callers that only decline to act", async () => {
     // `reclaimEndpoint` must not unlink on an inconclusive probe either, so the
     // boolean stays "a connect completed" and nothing else.

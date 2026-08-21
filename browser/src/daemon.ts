@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { app } from "electron";
 
-import { DAEMON_ENDPOINT, endpointAlive, isPipeEndpoint, removeEndpoint } from "pixel-store";
+import { DAEMON_ENDPOINT, endpointStatus, isPipeEndpoint, removeEndpoint } from "pixel-store";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
 
@@ -30,7 +30,13 @@ export function buildStamp(): string {
 }
 
 export async function runDaemon(cdpPort: number | null): Promise<void> {
-  if (await endpointAlive(DAEMON_ENDPOINT)) {
+  // One probe, three answers. Upstream's `socketAlive()` had no deadline, so it
+  // could only say alive or gone; the probe that replaced it can also run out of
+  // time, and a daemon busy enough not to accept within the budget is *not* a
+  // daemon whose socket may be unlinked — that would leave it running, unreachable,
+  // with a second daemon bound on top of its name. See store/src/endpoint.ts.
+  const status = await endpointStatus(DAEMON_ENDPOINT);
+  if (status === "alive") {
     process.stderr.write("terminal-browser daemon already running\n");
     app.exit(3);
     return;
@@ -41,7 +47,7 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
   if (!isPipeEndpoint(DAEMON_ENDPOINT)) {
     fs.mkdirSync(path.dirname(DAEMON_ENDPOINT), { recursive: true });
   }
-  removeEndpoint(DAEMON_ENDPOINT);
+  if (status === "absent") removeEndpoint(DAEMON_ENDPOINT);
 
   const build = buildStamp();
   const sessions = new Map<string, SessionHandle>();
