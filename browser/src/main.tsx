@@ -5,6 +5,8 @@ import path from "node:path";
 import { app, screen } from "electron";
 
 import { runDaemon } from "./daemon";
+import { entryMode, sessionArgv } from "./entry";
+import { runForeground } from "./foreground";
 import { LOGS_DIR, ensureDataDir } from "pixel-store";
 import { appLog } from "pixel-react";
 import { claimProfile } from "./profile";
@@ -52,7 +54,9 @@ void (async () => {
       .map((d) => `${d.size.width}x${d.size.height}@${d.scaleFactor}x`)
       .join(", ")}`,
   );
-  await runDaemon(cdpPort);
+  const argv = process.argv.slice(2);
+  if (entryMode(argv) === "daemon") await runDaemon(cdpPort);
+  else await runForeground(cdpPort, sessionArgv(argv));
 })().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   app.exit(1);

@@ -186,21 +186,62 @@ agwinterm source: `C:\Users\boris\source\agwinterm`.
 path; Windows has no path that names another process's ConPTY, and the daemon is spawned detached
 with no console at all. [triage: critical]
 
-- [ ] write `docs/design/03-process-model.md` choosing between: (a) host the engine in the foreground
+- [x] write `docs/design/03-process-model.md` choosing between: (a) host the engine in the foreground
       process, or (b) keep the daemon and forward stdin from the CLI client over IPC
-- [ ] cost each against what it actually touches. For (a): `browser/src/main.tsx:55` calls
+      — **(a).** One browser process per pane, attached to that pane's console. The daemon stays in
+      the tree, still entered by `--daemon`, and is not what the Windows CLI launches.
+- [x] cost each against what it actually touches. For (a): `browser/src/main.tsx:55` calls
       `runDaemon(cdpPort)` unconditionally and does not inspect the `--daemon` argument, so there is
       no foreground mode to switch to — this is a restructure of the browser process's top level, not
       a flag. For (b): input latency, and a second stdin protocol to own.
-- [ ] note that `createRoot({tty: null})` is already a supported shape
+      — costed in the doc. (a)'s real price is one Chromium per pane and per-pane profiles;
+      `claimProfile()` already hands 32 concurrent processes their own `userData` dir, and the
+      instance registry is already keyed per session, so neither needed new code.
+      ➕ **(b) is much larger than "a second stdin protocol"**: `query_colors` (`terminal.rs:892`)
+      and `cell_size` (`:869`) write a query and read the reply off the same descriptor under a
+      300 ms deadline, and 5 clipboard calls (`:1035-1057`) are reached through `&mut Terminal` from
+      `engine/clipboard.rs`. (b) is a bidirectional RPC over the whole 24-method seam, plus loading
+      the native addon into the Node CLI to touch `CONIN$` at all. Latency was never the issue.
+- [x] note that `createRoot({tty: null})` is already a supported shape
       (`pixel-react/src/index.ts:262-264` falls back to a stdio bridge; `session.tsx:313` has a
       `!this.ctx.tty` branch) — this is the seam either option builds on
-- [ ] confirm the output side is unaffected either way: frames leave via the control pipe addressed
+      — confirmed, and `SessionContext.tty` is optional (`session.tsx:49`), so `foreground.ts`
+      simply does not set it. (a) adds no new engine code path.
+- [x] confirm the output side is unaffected either way: frames leave via the control pipe addressed
       by `AGWINTERM_SESSION_ID` and never need a tty
-- [ ] record the decision, the rejected option and why, so Task 5 has a brief to work from
-- [ ] write tests for whichever process-boundary shape is chosen, at the level the decision permits
+      — confirmed, including for the daemon shape, which looks like it should break the addressing
+      and does not: the client already sends `env: process.env` (`cli/src/main.ts:206`), the daemon
+      forwards it (`daemon.ts:109`), and it reaches the engine as `sessionEnv` (`session.tsx:318`),
+      where `SessionEnv::of_session` (`terminal.rs:320`) exists for exactly this. The decision rests
+      on input alone.
+- [x] record the decision, the rejected option and why, so Task 5 has a brief to work from
+      — "What Task 5 must do, that upstream did not", four numbered items, plus a third shape
+      (per-pane console proxy to a shared daemon) considered and rejected as strictly worse than (b).
+- [x] write tests for whichever process-boundary shape is chosen, at the level the decision permits
       (an IPC round-trip test for (b); a foreground-entry smoke test for (a))
-- [ ] run tests — must pass before Task 3
+      — two layers. `tools/console-inherit-probe` (new crate) measures the Win32 fact the decision
+      rests on with real processes: a real ConPTY, a console-subsystem middle standing in for the CLI,
+      and a grandchild standing in for `electron.exe`, both grandchildren running the identical body
+      so the PE subsystem is the only variable. `tools/process-model/entry.test.mjs` is the
+      foreground-entry smoke test; it compiles the import-free `browser/src/entry.ts` with the repo's
+      esbuild (`browser/` cannot be typechecked until `pixel-react` builds in Task 8) and asserts the
+      wiring in `main.tsx`/`foreground.ts` by reading them.
+      ➕ **the measurement overturned the assumption behind (a)**: a GUI-subsystem child is *not*
+      given the pane's console even on an ordinary spawn — `CONIN$` fails with `ERROR_INVALID_HANDLE`
+      — while the console-subsystem control gets it for free. Electron is `SUBSYSTEM_WINDOWS_GUI`
+      (pinned by a test against the installed 43.3.0 binary). It can *take* the console with
+      `AttachConsole`, by parent or by named pid, and then reads the pane's SGR mouse report
+      verbatim. **Task 5's `open` therefore needs an attach step upstream never had.**
+      ➕ `AttachConsole` on an already-attached process returns `ERROR_ACCESS_DENIED` — one console
+      per process, measured. That, not `DETACHED_PROCESS`, is what rules the daemon out; a detached
+      child re-attaches to its parent's console fine, so "drop `detached: true`" is not a fix.
+      ➕ scope: the decision was made executable rather than left on paper — `browser/src/entry.ts`,
+      `browser/src/foreground.ts`, and a three-line switch in `main.tsx`. Off Windows nothing changes,
+      because the CLI still passes `--daemon` and that still selects the daemon.
+- [x] run tests — must pass before Task 3 — 14 Rust tests in `console-inherit-probe` (7 unit,
+      7 driving real pseudoconsoles) plus 24 node tests across `tools/`; `cargo fmt --check` and
+      `cargo clippy --all-targets -- -D warnings` clean on the new crate; `conpty-probe`'s 15 still
+      green; `engine`'s `cargo check --workspace` still exactly the 41 baseline errors.
 
 ### Task 3: Extract `terminal.rs`'s portable type vocabulary
 

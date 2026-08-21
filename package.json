@@ -2,7 +2,7 @@
   "name": "terminal-graphics-engine",
   "private": true,
   "scripts": {
-    "test": "node --test \"tools/vendor-check/*.test.mjs\"",
+    "test": "node --test \"tools/*/*.test.mjs\"",
     "build": "pnpm -r build",
     "browser": "pnpm --filter terminal-browser start",
     "build:dist": "scripts/release.sh \"local-$(git rev-parse --short HEAD)\"",
