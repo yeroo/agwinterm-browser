@@ -87,7 +87,46 @@ stages 1, 2, 4 and 5 but keeps stage 3, so **the fixed cost is the floor** — r
 **150 fps**, whatever the frame contains. The measurement is recorded rather than
 explained; finding out where the 5.5 ms goes is agwinterm's question.
 
-## The case for Task 12
+## Task 12: the comparison that could not be made
+
+⚠️ **`image.frameshm` was not built, so there is no second column to put beside the
+numbers above.** The reason is a missing contract, not a missing effort.
+
+Task 12 opens with a precondition — `agwinterm/docs/specs/image-frameshm.md` must
+exist *and* state the literal `Local\` mapping-name prefix and the producer
+slot-reuse invariant. That file does not exist. agwinterm has a plan for the verb
+(`docs/plans/20260821-image-frameshm-command.md`) whose Task 1 — the one that defines
+the header layout and publishes the spec — is entirely unchecked, and
+`ControlServer.cs:249` still dispatches `image.frame` and nothing else.
+
+A producer written against that gap would be inventing a header layout and calling it
+a contract. The failure mode when the real consumer disagrees is a torn or silently
+rejected frame, which is precisely the class of bug the file path's unique-path design
+exists to eliminate — so guessing here would trade a measured 26 fps for an unmeasured
+picture. The gate was honoured.
+
+**What shipped instead** is the half of Task 12 that does not depend on the layout,
+in `pixel-core/src/frame_shm.rs`:
+
+- `TERMINAL_BROWSER_FRAME_TRANSPORT` (`auto` | `file` | `shm`) — the file path stays
+  *explicitly* selectable rather than becoming whatever the newest code prefers. This
+  is what re-measures the baseline below once the fast path lands, on the same host in
+  the same session.
+- The `unknown command` probe: the literal refusal `ControlServer.cs:250` gives for a
+  verb it does not have, read the same way by every capability question in the crate.
+  `session.metrics` had this open-coded and now shares it. It is the fallback trigger
+  the fast path will hang on, and it is tested against the real reply string today.
+- `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` publishes over `image.frame` and says so,
+  once per run, naming the missing spec. Silence would be worse than the gap: a
+  working browser under `=shm` reads as "the fast path is on", which would make every
+  number measured afterwards wrong.
+
+**What remains** when the spec lands: the named mapping (never a raw `HANDLE`), the
+BGRA write into the inactive slot, the `ready` bump, the two-slot alternation with the
+producer invariant that request/response makes sufficient, release on shutdown, and
+then this comparison.
+
+## The case for it, unchanged
 
 At the largest pane measured the producer spends **38 ms** per frame, of which
 **27.6 ms** (encode + write) is work `image.frameshm` deletes outright, and a further
@@ -96,7 +135,9 @@ BGRA copy into shared memory. So the expected shape is **38 ms → under 10 ms**
 the honest ceiling is the fixed round-trip cost above.
 
 It is worth doing, and the ordering in the plan is right: PNG at 26 fps is enough for
-a static page and enough for the milestone, and not enough for scrolling.
+a static page and enough for the milestone, and not enough for scrolling. That case is
+made by the numbers above and is not weakened by the blocker — what is missing is the
+host's half of the contract, not a reason.
 
 ## How to re-measure
 

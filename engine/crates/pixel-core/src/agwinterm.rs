@@ -9,7 +9,11 @@
 //! This module is that client. It is deliberately narrow — a target resolved from
 //! the environment, a connection that can be re-dialled, and an envelope parser —
 //! because the verbs on top of it belong to their own tasks: Task 7 sends
-//! `image.frame`, Task 12 sends `image.frameshm`.
+//! `image.frame`, and Task 12 was to send `image.frameshm` — which it does not,
+//! because that verb's mapping layout is still unpublished. See
+//! [`crate::frame_shm`], which holds what survives that blocker: the transport
+//! selection, and the one reading of `unknown command` every capability probe here
+//! shares.
 //!
 //! ## Addressing: the pane, never "active"
 //!
@@ -488,7 +492,10 @@ impl ControlClient {
                     Ok(None)
                 }
             },
-            Reply::Err(message) if message.starts_with("unknown command") => {
+            // Shared with the frame transports' probe rather than open-coded:
+            // there is one reading of `unknown command`, and every capability
+            // question in this crate asks it the same way.
+            Reply::Err(message) if crate::frame_shm::is_unknown_command(&message, METRICS_CMD) => {
                 self.metrics_unsupported = true;
                 crate::logging::info(
                     "agwinterm",

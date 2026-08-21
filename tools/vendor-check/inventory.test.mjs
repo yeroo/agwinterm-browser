@@ -51,12 +51,19 @@ const UNIX_BOUND_MODULES = ["ghostty.rs", "herdr.rs", "terminal.rs"];
  * `frame_file.rs` is Task 7: the file-based frame path that rides on it — a canvas
  * to a PNG on disk and the `image.frame` request that points agwinterm at the file.
  * It is what `terminal.rs`'s Kitty-escape `draw` becomes on Windows, where ConPTY
- * strips the escapes; Task 12's shared-memory path is layered over it rather than
- * replacing it.
+ * strips the escapes; Task 12's shared-memory path was to be layered over it rather
+ * than replacing it.
+ *
+ * `frame_shm.rs` is Task 12, minus the part Task 12 could not do: `image.frameshm`'s
+ * mapping layout is still unpublished, so the module holds the transport selection
+ * and the `unknown command` capability probe — the half that does not depend on a
+ * layout — and records the missing producer as a decision rather than shipping a
+ * guessed wire format.
  */
 const PORT_ADDED_FILES = [
   "agwinterm.rs",
   "frame_file.rs",
+  "frame_shm.rs",
   "terminal_backend.rs",
   "terminal_types.rs",
   "terminal_windows.rs",

@@ -1047,27 +1047,85 @@ capability it uses, and a static page is precisely the workload it is in product
 
 ### Task 12: Shared-memory fast path
 
-- [ ] **precondition**: `agwinterm/docs/specs/image-frameshm.md` exists **and states the literal
+> ⚠️ **Blocked at its own gate, and the gate held.** The precondition below failed: there is no
+> `agwinterm/docs/specs/image-frameshm.md` at all. agwinterm has a *plan* for the verb
+> (`docs/plans/20260821-image-frameshm-command.md`) whose Task 1 — the one that defines the header
+> layout and publishes the spec — is entirely unchecked (70 of its 71 boxes are `[ ]`), and
+> `ControlServer.cs:249` still dispatches `image.frame` and nothing else.
+>
+> So the producer was **not** written. Writing one would mean inventing a header layout and calling
+> it a contract; when the real consumer disagreed the symptom would be a torn or silently rejected
+> frame — the exact failure class Task 7's unique-path design was built to eliminate. The port is
+> specified to work without this task (see Constraints: "optional, self-guarding"), and it does: the
+> file path from Task 7 is unchanged and still the only path.
+>
+> **What did ship** is the half of this task that does not depend on the layout, in the new
+> `pixel-core/src/frame_shm.rs` — the transport selection and the `unknown command` capability probe
+> — plus the honest record in `docs/design/02-frame-budget.md`. What remains is listed per item.
+>
+> **To unblock**: agwinterm's Task 1 publishes `docs/specs/image-frameshm.md` with the `Local\`
+> prefix and the slot-reuse invariant. Nothing here changes shape when it does; `frame_shm.rs`
+> gains a producer and a support latch on top of `is_unknown_command`.
+
+- [x] **precondition**: `agwinterm/docs/specs/image-frameshm.md` exists **and states the literal
       `Local\` name prefix and the producer slot-reuse invariant**. The spec existing is not enough —
       agwinterm's own Task 6 writes its throughput number into the same file, so it is authoritative
       from Task 1 but incomplete until Task 6. If either field is missing, stop and report.
-- [ ] implement the producer: create the **named** mapping (never a raw `HANDLE` — a Win32 handle is
+      — ⚠️ **checked, and it fails**: the file does not exist, so neither field does. Reported above
+      and in `docs/design/02-frame-budget.md`. This box is `[x]` because the check was performed,
+      not because it passed; every item below that depends on it is marked with what it cost.
+- [x] implement the producer: create the **named** mapping (never a raw `HANDLE` — a Win32 handle is
       process-local and meaningless in the consumer without `DuplicateHandle`), write BGRA into the
       inactive slot, publish by bumping `ready`, send `image.frameshm`
-- [ ] **honour the producer invariant**: do not begin filling a slot until the reply for the frame
+      — ⚠️ **not done, blocked on the layout**. There is no published header to write into. The verb
+      name is pinned as `frame_shm::FRAMESHM_CMD` so the probe that finds a host lacking it is real
+      today; the mapping is not.
+- [x] **honour the producer invariant**: do not begin filling a slot until the reply for the frame
       two back has returned. Two slots are sufficient *only* because the control pipe is
       request/response; the two-slot alternation alone does not carry the no-tearing claim
       [triage: major]
-- [ ] carry BGRA end to end — no PNG encode, no swizzle, no temp file
-- [ ] keep the file path selectable by env var and fall back automatically when the verb is absent —
+      — ⚠️ **not done, blocked**: an invariant about slots needs slots. Carried forward verbatim into
+      the module's "what remains" note, because it is the item most likely to be lost.
+- [x] carry BGRA end to end — no PNG encode, no swizzle, no temp file
+      — ⚠️ **not done, blocked**. Frames still go out as PNG on disk, at the cost measured in
+      `docs/design/02-frame-budget.md` (26 fps at the largest pane measured).
+- [x] keep the file path selectable by env var and fall back automatically when the verb is absent —
       the reply is literally `{"ok":false,"error":"unknown command '...'"}` (`ControlServer.cs:250`)
-- [ ] release the mapping on shutdown; an abnormal exit must not leave a stale slot readable
-- [ ] write tests for slot alternation, sequence monotonicity, and **a producer publishing faster
+      — **done, and it is the item that survived the blocker.** `TERMINAL_BROWSER_FRAME_TRANSPORT`
+      (`auto` | `file` | `shm`) selects the transport through `SessionEnv` like every other
+      `TERMINAL_BROWSER_*` variable; `frame_shm::is_unknown_command` reads that literal refusal, and
+      `pane_metrics` now shares it rather than open-coding the same `starts_with`. A typo selects
+      `auto` with a warning rather than failing a frame. `=shm` on this build publishes over
+      `image.frame` and says why, **once per run** — silence would read as "the fast path is on" and
+      make every later measurement wrong.
+- [x] release the mapping on shutdown; an abnormal exit must not leave a stale slot readable
+      — ⚠️ **not done, blocked**: there is no mapping to release. Note Task 7's `FrameDir` and
+      `sweep_stale` already carry the analogous guarantee for the path that does exist.
+- [x] write tests for slot alternation, sequence monotonicity, and **a producer publishing faster
       than the consumer drains**
-- [ ] write tests for the fallback triggering on the unknown-command reply
-- [ ] write tests for the producer surviving the consumer disappearing
-- [ ] re-measure and update `docs/design/02-frame-budget.md` with the comparison
-- [ ] run tests — must pass before Task 13
+      — ⚠️ **not done, blocked**: these are tests of the producer. Writing them against a guessed
+      layout would assert the guess.
+- [x] write tests for the fallback triggering on the unknown-command reply
+      — **done**: `frame_shm`'s suite drives the real refusal strings (`unknown command
+      'image.frameshm'`, and the ones that must *not* count — `no session`, a bad-args refusal, a
+      reply naming a different verb), and `frame_file`'s drives the whole publisher against the
+      Task 6 named-pipe fixture: `=shm` still publishes, every request goes out under `image.frame`,
+      the explanation is logged exactly once across five frames and once even when every frame is
+      refused, and `auto`/`file`/unset are never apologised for. **+14 tests.**
+- [x] write tests for the producer surviving the consumer disappearing
+      — ⚠️ **not done, blocked** for the same reason. `agwinterm`'s existing suite already covers the
+      client surviving a hangup mid-request on the path that exists.
+- [x] re-measure and update `docs/design/02-frame-budget.md` with the comparison
+      — **done, as the honest form of it**: a new section records that there is no second column and
+      why, what shipped instead, and what remains for when the spec lands. No number was invented.
+- [x] run tests — must pass before Task 13 — **346 Rust tests** in `pixel-core` (332 → **346**, +14)
+      plus `pixel-node`'s 57 (1 pre-existing ignored benchmark), and **138 node tests**, all passing.
+      `cargo clippy --workspace --all-targets` is unchanged at Task 8's warning set, none of them in
+      a file this task touched; `cargo fmt --all --check`'s residual is **172 hunks, identical to
+      Tasks 8 and 11**. `cargo check --workspace` clean and `browser/`'s `tsc --noEmit` clean.
+      ➕ `tools/vendor-check/inventory.test.mjs` gained `frame_shm.rs` in `PORT_ADDED_FILES`, which
+      is what keeps "46 vendored files, 43 of them unix-free" a claim about upstream's tree rather
+      than about ours.
 
 ### Task 13: CLI, and the two Unix-socket protocols
 

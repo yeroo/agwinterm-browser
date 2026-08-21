@@ -8,11 +8,17 @@
 //! pane's origin and spanning the whole pane.
 //!
 //! It is deliberately the plain path: PNG on disk, one round trip, no shared
-//! memory. Task 12 adds `image.frameshm` on top, and **this path stays** — as the
-//! fallback for a host that lacks the verb, and as the baseline the fast path is
+//! memory. Task 12 was to add `image.frameshm` on top, and **this path stays** — as
+//! the fallback for a host that lacks the verb, and as the baseline the fast path is
 //! diffed against. So the two must produce the same picture from the same canvas;
 //! everything picture-shaped lives in [`cell_span`] and [`encode_png`], which the
 //! shm path reuses rather than reimplements.
+//!
+//! ⚠️ As of Task 12 that fast path does not exist: its mapping layout is still
+//! unpublished, so there is nothing to write BGRA into. See [`crate::frame_shm`],
+//! which holds the transport selection and the capability probe that survive the
+//! blocker. This module is therefore not the fallback but the only path, and
+//! [`FramePublisher::explain_transport`] is what stops that being a silent fact.
 //!
 //! ## Why every frame gets its own path
 //!
@@ -57,6 +63,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::agwinterm::{ControlClient, Reply, push_quoted};
 use crate::canvas::Canvas;
+use crate::frame_shm::Transport;
 
 /// The verb. Shipped agwinterm, no host change required — which is what makes this
 /// the bring-up path rather than something that waits on the agwinterm plan.
@@ -356,6 +363,12 @@ pub(crate) struct FramePublisher {
     /// Latched after the first frame the host declined to read, so a host that
     /// keeps declining is complained about once.
     warned_untransmitted: bool,
+    /// Which transport was asked for. This publisher only implements one of them;
+    /// the field is here so that asking for the other is answered out loud instead
+    /// of being silently ignored. See [`crate::frame_shm`].
+    transport: Transport,
+    /// Latched after the first frame that could not honour [`Self::transport`].
+    warned_transport: bool,
     /// Where the per-frame cost breakdown goes, when [`BUDGET_ENV`] asked for one.
     budget: BudgetLog,
 }
@@ -368,6 +381,8 @@ impl FramePublisher {
             scratch: Vec::new(),
             written: Vec::new(),
             warned_untransmitted: false,
+            transport: Transport::from_env(env),
+            warned_transport: false,
             budget: BudgetLog::open(env),
         })
     }
@@ -407,6 +422,7 @@ impl FramePublisher {
         canvas: &Canvas,
         span: (u32, u32),
     ) -> io::Result<usize> {
+        self.explain_transport();
         let mut scratch = std::mem::take(&mut self.scratch);
         let started = Instant::now();
         let encoded = crate::profiler::span("frame.png", || encode_png(canvas, &mut scratch));
@@ -421,6 +437,23 @@ impl FramePublisher {
         let result = encoded.and_then(|()| self.publish_encoded(client, &scratch, span, &mut cost));
         self.scratch = scratch;
         result
+    }
+
+    /// Says once, and only to a caller that asked for a transport this build does
+    /// not have, why its frames are going out the other way.
+    ///
+    /// Silence would be the worse answer: `TERMINAL_BROWSER_FRAME_TRANSPORT=shm`
+    /// followed by a working browser reads as "the fast path is on", which would
+    /// make every subsequent measurement wrong. Once per publisher, not per frame —
+    /// a frame loop that logs is a frame loop that is measuring itself.
+    fn explain_transport(&mut self) {
+        if self.warned_transport {
+            return;
+        }
+        self.warned_transport = true;
+        if let Some(reason) = self.transport.unavailable_reason() {
+            crate::logging::warn("agwinterm", reason);
+        }
     }
 
     fn publish_encoded(
@@ -1116,6 +1149,131 @@ mod tests {
             .expect("the frame goes out regardless of the budget file");
 
         fs::remove_dir_all(&scratch).ok();
+    }
+
+    // -- the transport that is not there yet -------------------------------
+
+    /// An empty environment plus a forced transport.
+    fn transport_of(value: &str) -> crate::terminal::SessionEnv {
+        crate::terminal::SessionEnv::of_session(
+            [(
+                crate::frame_shm::TRANSPORT_VAR.to_string(),
+                value.to_string(),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// The log store is one per process and `cargo test` runs these in threads, so
+    /// two transport tests reading it at once would each count the other's line.
+    /// Held for the whole of each such test — the window being guarded is
+    /// "publish, then read the log", not either half.
+    static TRANSPORT_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn alone_with_the_log() -> std::sync::MutexGuard<'static, ()> {
+        TRANSPORT_LOG.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// The next log sequence, so a test reads only its own lines.
+    fn log_mark() -> u64 {
+        crate::logging::entries_after(0)
+            .last()
+            .map_or(0, |entry| entry.seq + 1)
+    }
+
+    fn warnings_since(mark: u64, needle: &str) -> Vec<String> {
+        crate::logging::entries_after(mark)
+            .into_iter()
+            .filter(|entry| entry.message.contains(needle))
+            .map(|entry| entry.message)
+            .collect()
+    }
+
+    #[test]
+    fn asking_for_the_fast_path_still_publishes_over_the_file_one() {
+        // The fallback the plan asks for, in the only form available while
+        // `image.frameshm`'s layout is unpublished: the frame goes out, and it goes
+        // out as an `image.frame`. A request for a transport this build lacks must
+        // never cost a frame.
+        let server = PipeServer::answering(&ok_frame(), 3);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
+
+        for _ in 0..3 {
+            publisher
+                .publish(&mut client, &canvas(24, 8), (2, 1))
+                .expect("the frame goes out on the path that exists");
+        }
+        assert!(
+            server
+                .requests()
+                .iter()
+                .all(|request| request.contains(FRAME_CMD)),
+            "a request went out under a verb this build cannot send: {:?}",
+            server.requests(),
+        );
+    }
+
+    #[test]
+    fn the_unavailable_fast_path_is_said_once_and_not_per_frame() {
+        // A frame loop that logs every frame is a frame loop measuring itself, and
+        // the budget file would be measuring the logging.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = PipeServer::answering(&ok_frame(), 5);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
+
+        for _ in 0..5 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("every frame");
+        }
+
+        let said = warnings_since(mark, crate::frame_shm::FRAMESHM_CMD);
+        assert_eq!(said.len(), 1, "said {} times: {said:?}", said.len());
+    }
+
+    #[test]
+    fn the_path_that_exists_is_never_apologised_for() {
+        // `auto` and `file` both get what they asked for, so neither may log.
+        let _alone = alone_with_the_log();
+        for value in ["file", "auto", ""] {
+            let mark = log_mark();
+            let server = PipeServer::answering(&ok_frame(), 2);
+            let mut client = server.client();
+            let mut publisher =
+                FramePublisher::new(&transport_of(value)).expect("a temp directory");
+            for _ in 0..2 {
+                publisher
+                    .publish(&mut client, &canvas(16, 16), (1, 1))
+                    .expect("every frame");
+            }
+            let said = warnings_since(mark, crate::frame_shm::FRAMESHM_CMD);
+            assert!(said.is_empty(), "{value:?} was warned about: {said:?}");
+        }
+    }
+
+    #[test]
+    fn a_frame_that_fails_does_not_swallow_the_transport_explanation() {
+        // The explanation is owed to the run, not to the first *successful* frame:
+        // a host that refuses every frame is exactly when knowing which transport
+        // is in play matters most.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect_err("the host refuses");
+
+        assert_eq!(
+            warnings_since(mark, crate::frame_shm::FRAMESHM_CMD).len(),
+            1
+        );
     }
 
     /// A directory of this test's own, under the temp dir.

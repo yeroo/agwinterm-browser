@@ -13,6 +13,12 @@ mod engine;
 // the Kitty escapes.
 #[cfg(windows)]
 mod frame_file;
+// Which transport carries a frame, and how a host without the fast one announces
+// itself. Windows-only alongside `frame_file`, for the same reason. The fast path's
+// producer is not here: its mapping layout is not published yet, and the module's
+// own docs record that as a decision.
+#[cfg(windows)]
+mod frame_shm;
 #[cfg(unix)]
 pub mod ghostty;
 #[cfg(unix)]
