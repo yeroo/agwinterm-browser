@@ -88,6 +88,10 @@ the terminal. **Zoom is Alt+`=` / Alt+`-` / Alt+`0`, and back and forward are Al
 Alt+Right**: a Windows console encodes Ctrl only with a letter, so Ctrl+`=` reaches the browser as a
 bare `=` and Ctrl+`[` as Escape. Alt is accepted for those two and nowhere else.
 
+The same encoding carries no Shift with a Ctrl chord — `ctrl+shift+f` and `ctrl+f` arrive as the
+same byte — so the Ctrl+Shift defaults are spelled differently here: **find is Ctrl+F, devtools is
+F12, record is Alt+R, and Alt+Enter finishes a recording**.
+
 ### Getting a sharp picture
 
 agwinterm does not publish its cell size yet, so the engine falls back to 16×32 px per cell and

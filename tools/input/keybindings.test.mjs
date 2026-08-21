@@ -135,16 +135,76 @@ describe("Windows: Ctrl is the accelerator", () => {
     ]);
   });
 
-  it("ships Ctrl defaults, and a Ctrl+Shift record key", () => {
+  it("ships defaults a console can actually deliver", () => {
+    // The C0 encoding carries no shift — `byte_key_event` sets `ctrl` and nothing
+    // else — so `ctrl+shift+f` and `ctrl+f` arrive as the same `0x06`, and
+    // `matchesMods` compares shift exactly. Every Ctrl+Shift default was therefore
+    // unpressable. Ctrl+`i` is worse: `0x09` is Tab.
     assert.deepEqual(win32.defaultKeys, {
+      palette: "ctrl+k alt+k",
+      find: "ctrl+f",
+      devtools: "f12",
+      console: "ctrl+alt+j",
+    });
+    const find = win32.parseKeyBindings(win32.defaultKeys.find);
+    assert.equal(win32.matchesBinding(press("f", "ctrl"), find), true);
+    // What the user pressing Ctrl+Shift+F actually sends, which now still finds.
+    assert.equal(win32.matchesBinding(press("f", "ctrl", "shift"), find), false);
+    const devtools = win32.parseKeyBindings(win32.defaultKeys.devtools);
+    assert.equal(win32.matchesBinding(press("f12"), devtools), true);
+    // Ctrl+Alt+J survives as an Esc-prefixed C0 byte, so the console key stands.
+    const consoleKey = win32.parseKeyBindings(win32.defaultKeys.console);
+    assert.equal(win32.matchesBinding(press("j", "ctrl", "alt"), consoleKey), true);
+    // None of the three moved off Windows.
+    assert.deepEqual(linux.defaultKeys, {
       palette: "ctrl+k alt+k",
       find: "ctrl+shift+f",
       devtools: "ctrl+shift+i",
       console: "ctrl+alt+j",
     });
-    assert.equal(win32.recordKeyLabel, "ctrl+shift+r");
-    assert.equal(win32.isRecordKey(press("r", "ctrl", "shift")), true);
+    assert.equal(darwin.defaultKeys.find, "super+shift+f");
+  });
+
+  it("records on Alt+R, and leaves Ctrl+R as Reload", () => {
+    // `ctrl+shift+r` reached `handleKey` as a plain `ctrl+r`, which `isRecordKey`
+    // rejected and `accelHeld(event) && "r"` then took: the documented record chord
+    // reloaded the page. Binding record to the bare Ctrl+R instead would have taken
+    // Reload away, because `session.tsx` tests the record key first. Alt+`r` is an
+    // Esc-prefixed byte, decodes intact, and collides with nothing.
+    assert.equal(win32.recordKeyLabel, "alt+r");
+    assert.equal(win32.isRecordKey(press("r", "alt")), true);
     assert.equal(win32.isRecordKey(press("r", "ctrl")), false);
+    assert.equal(win32.isRecordKey(press("r", "ctrl", "shift")), false);
+    assert.equal(win32.isRecordKey(press("r", "alt", "ctrl")), false);
+    assert.equal(win32.isRecordKey(press("r", "alt", "shift")), false);
+    // Reload is still reachable, which is the whole reason record moved.
+    assert.equal(win32.accelHeld(press("r", "ctrl"), NO_SUPER), true);
+    // Off Windows, exactly as before.
+    assert.equal(linux.recordKeyLabel, "ctrl+shift+r");
+    assert.equal(linux.isRecordKey(press("r", "ctrl", "shift")), true);
+    assert.equal(linux.isRecordKey(press("r", "alt")), false);
+    assert.equal(darwin.recordKeyLabel, "ctrl+r");
+    assert.equal(darwin.isRecordKey(press("r", "ctrl")), true);
+    assert.equal(darwin.isRecordKey(press("r", "alt")), false);
+  });
+
+  it("finishes a recording on Alt+Enter, because Ctrl+Enter is not Enter", () => {
+    // conhost sends Ctrl+Enter as `0x0a`, which decodes as Ctrl+J — so the review's
+    // `complete()` was unreachable and Enter fell through to one more snapshot.
+    assert.equal(win32.completeKeyLabel, "alt+enter");
+    assert.equal(win32.isCompleteKey(press("enter", "alt")), true);
+    assert.equal(win32.isCompleteKey(press("enter", "ctrl")), true);
+    assert.equal(win32.isCompleteKey(press("enter")), false);
+    assert.equal(win32.isCompleteKey(press("r", "alt")), false);
+    // Alt is not a completion modifier where Ctrl+Enter arrives intact: plain Enter
+    // still snapshots and Alt+Enter is left to the page.
+    for (const platform of [darwin, linux]) {
+      assert.equal(platform.completeKeyLabel, "ctrl+enter");
+      assert.equal(platform.isCompleteKey(press("enter", "ctrl")), true);
+      assert.equal(platform.isCompleteKey(press("enter", "super")), true);
+      assert.equal(platform.isCompleteKey(press("enter", "alt")), false);
+      assert.equal(platform.isCompleteKey(press("enter")), false);
+    }
   });
 });
 

@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 
 import { store } from "./client";
-import { endpointAlive, isPipeEndpoint, removeEndpoint } from "./endpoint";
+import { endpointStatus, isPipeEndpoint, removeEndpoint } from "./endpoint";
+import type { EndpointStatus } from "./endpoint";
 import { instances } from "./schema";
 import type { InstanceRow, NewInstanceRow } from "./schema";
 
@@ -48,11 +49,19 @@ export async function listInstances(): Promise<InstanceRow[]> {
   const verdicts = await Promise.all(rows.map((row) => stillThere(row)));
   const live: InstanceRow[] = [];
   for (const [at, row] of rows.entries()) {
-    if (verdicts[at]) {
+    // Only a *definite* "nobody is there" deletes anything. `unknown` — a probe
+    // that ran out of budget rather than one that was refused — keeps the row and
+    // reports the browser, because the two mistakes are not the same size: a row
+    // kept in error costs one failed request, and a row deleted in error costs the
+    // browser (see `ENDPOINT_PROBE_MS`).
+    if (verdicts[at] !== "absent") {
       live.push(row);
       continue;
     }
-    await removeInstance(row.key);
+    // Cleanup is opportunistic, and a listing is not. A locked database here used
+    // to reject `listInstances` outright, so `ls`, `new-tab` and `action` failed
+    // instead of reporting the live browsers they had already identified.
+    await removeInstance(row.key).catch(() => {});
     removeEndpoint(row.endpoint);
   }
   return live.sort((a, b) => a.startedAt - b.startedAt);
@@ -70,29 +79,37 @@ export async function listInstances(): Promise<InstanceRow[]> {
  * a recycled pid cannot pass: the pipe name went with the process that owned it.
  *
  * The probe is skipped where it would be misleading rather than merely slow. A
- * socket *file* outlives its server, so `endpointAlive` answering `false` for one
- * does not mean the browser is gone -- `removeEndpoint` returning `true` is what
- * says "this endpoint is a file", and those rows are trusted to the pid alone,
- * which is exactly upstream's rule.
+ * socket *file* outlives its server, so a failed connect to one does not mean the
+ * browser is gone -- `removeEndpoint` returning `true` is what says "this endpoint
+ * is a file", and those rows are trusted to the pid alone, which is exactly
+ * upstream's rule.
+ *
+ * Three answers, not two, because the caller deletes on one of them: `absent` is a
+ * connect the operating system *refused*, `unknown` is one that did not finish in
+ * time, and only the first is evidence of anything (`endpoint.ts`).
  */
-async function stillThere(row: InstanceRow): Promise<boolean> {
-  if (!alive(row.pid)) return false;
-  if (!isPipeEndpoint(row.endpoint)) return true;
-  return endpointAlive(row.endpoint, ENDPOINT_PROBE_MS);
+async function stillThere(row: InstanceRow): Promise<EndpointStatus> {
+  if (!alive(row.pid)) return "absent";
+  if (!isPipeEndpoint(row.endpoint)) return "alive";
+  return endpointStatus(row.endpoint, ENDPOINT_PROBE_MS);
 }
 
 /**
- * How long a row's endpoint gets to answer before it is treated as gone.
+ * How long a row's endpoint gets to answer before the probe gives up.
  *
  * A live browser answers a local pipe connect immediately, so the *typical* cost of
  * this is nothing at all and the number only decides how long a phantom stalls
  * `ls`. Since `listInstances` overlaps its probes, that stall is paid once rather
- * than once per row, which is what makes a budget this generous affordable — and
- * generous is the side to err on, because the two outcomes are not symmetric.
- * Waiting too long makes `ls` slow; giving up too early **deletes the row of a
- * running browser**, and the row is the only thing that tells `ls`, `new-tab` and
- * `action` there is anything to talk to. It does not come back on its own either:
- * `Registry.write` only runs on a state change, so an idle browser evicted this way
- * stays invisible indefinitely.
+ * than once per row, which is what makes a budget this generous affordable.
+ *
+ * Running out of it is no longer a verdict, which is the point: a busy browser's
+ * connect can sit queued — a Win32 pipe server hands out one instance per accept
+ * and only makes the next one when its loop comes round — and treating that as
+ * "gone" **deleted the row of a running browser**. The row is the only thing that
+ * tells `ls`, `new-tab` and `action` there is anything to talk to, and it does not
+ * come back on its own: `Registry.write` only runs on a state change, so an idle
+ * browser evicted that way stayed invisible indefinitely. A timeout now reads as
+ * `unknown` and the row is kept; the budget is only how long `ls` waits before
+ * saying so.
  */
 const ENDPOINT_PROBE_MS = 2_000;

@@ -18,12 +18,14 @@ export {
   connectEndpoint,
   endpointAlive,
   endpointKind,
+  endpointStatus,
   isPipeEndpoint,
   pipeEndpoint,
   pipeSegment,
   reclaimEndpoint,
   removeEndpoint,
 } from "./endpoint";
+export type { EndpointStatus } from "./endpoint";
 export { openStore, store } from "./client";
 export type { Store } from "./client";
 export { appState, instances, settings } from "./schema";

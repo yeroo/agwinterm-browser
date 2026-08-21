@@ -251,3 +251,14 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
   back/forward are **Alt+Left/Alt+Right** — the spellings an Esc prefix and `CSI 1;3D`
   deliver intact, and the ones a Windows browser binds anyway. Alt is accepted for those
   two and nowhere else, so it stays a page modifier: alt+t is still not "new tab".
+- **Ctrl+Shift is not a chord this host has**, which is the same encoding fact one step
+  further on: the C0 bytes carry ctrl and nothing else, so `ctrl+shift+f` and `ctrl+f`
+  arrive identically and a `ctrl+shift+*` binding can never match. Upstream's non-darwin
+  defaults are all Ctrl+Shift, so find, devtools and record were unpressable — and
+  Ctrl+Shift+R, arriving as a plain Ctrl+R, was taken by Reload instead. Windows gets its
+  own defaults: **find is Ctrl+F**, **devtools is F12**, **record is Alt+R** and
+  **Alt+Enter** finishes a recording. Record is Alt rather than a bare Ctrl+R because the
+  record key is tested before the accelerators, so binding it to Ctrl+R would have taken
+  Reload; Alt+Enter because conhost sends Ctrl+Enter as `0x0a`, which is Ctrl+J, so
+  `complete()` was unreachable and Enter took one more snapshot instead. macOS and Linux
+  keep every binding they had.

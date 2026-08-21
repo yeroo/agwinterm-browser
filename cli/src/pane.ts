@@ -16,6 +16,11 @@
 // outlives the browser by construction, whatever killed it. Sending `image.clear`
 // twice is harmless (the second finds nothing placed); never sending it is not.
 //
+// The picture is only half of what the browser leaves behind, and `restorePaneConsole`
+// below is the other half: the same `Drop` that clears the frame also takes the
+// console off the alternate screen and out of raw mode, and it is skipped by exactly
+// the same exits.
+//
 // Kept apart from `main.ts` and importing only `node:net`, so the addressing rules
 // can be tested without a pane, a pipe or an Electron.
 
@@ -23,6 +28,24 @@ import net from "node:net";
 
 /** agwinterm's control-pipe verb for "take the placement off this pane". */
 export const CLEAR_CMD = "image.clear";
+
+/**
+ * The other half of giving the pane back: the engine's reporting modes, turned off.
+ *
+ * A byte-for-byte copy of `DISABLE_REPORTING`
+ * (`engine/crates/pixel-core/src/terminal_windows.rs`), which the engine writes to
+ * `CONOUT$` from `ModeGuard::drop` — and which therefore does not run for any of the
+ * exits this module exists for. `Terminal::new` puts the console the *CLI* is
+ * attached to on the alternate screen, hides the cursor and turns on any-motion SGR
+ * mouse reporting; a `taskkill /F` leaves all of it on. Clearing the picture and
+ * leaving that is half a fix: the shell comes back on the alternate buffer with no
+ * cursor, and every mouse move over the pane types escape bytes into it.
+ *
+ * `tools/cli/pane-clear.test.mjs` reads the Rust constant and asserts the two are
+ * the same string, so they cannot drift.
+ */
+export const DISABLE_REPORTING =
+  "\x1b[?2048l\x1b[?2004l\x1b[?1004l\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 
 /** The prefix every local named pipe address carries. */
 const PIPE_PREFIX = "\\\\.\\pipe\\";
@@ -118,4 +141,58 @@ export function clearPaneFrame(env: PaneEnv, timeoutMs = 1_000): Promise<boolean
     socket.once("error", () => finish(false));
     socket.once("close", () => finish(false));
   });
+}
+
+/** Just enough of `process.stdout` to write the escape string, so tests need no tty. */
+export interface PaneOutput {
+  write(chunk: string): unknown;
+}
+
+/** Just enough of `process.stdin` to put the console back into cooked mode. */
+export interface PaneInput {
+  isTTY?: boolean;
+  setRawMode?(raw: boolean): unknown;
+  pause?(): unknown;
+}
+
+/**
+ * Puts the console back the way the engine found it, and never throws.
+ *
+ * The companion to `clearPaneFrame`, and it runs for the same reason and on the same
+ * path: the picture and the console modes are both state the engine set on *this*
+ * pane, both are normally undone by `ModeGuard::drop`, and neither is undone at all
+ * when the browser exits without running a destructor. `openInForeground` is the
+ * only survivor of that, so it does both.
+ *
+ * Safe to run after an ordinary quit as well, which is why the call site does not
+ * try to tell the two apart: mode resets are idempotent, and asking a console that
+ * is already on the primary buffer with a visible cursor to go there again is a
+ * no-op. Sending nothing when the engine *did* die badly is not.
+ *
+ * Two halves, because the escape string cannot reach the second one. `?1049l` and
+ * friends are answered by the terminal; echo, line input and
+ * `ENABLE_VIRTUAL_TERMINAL_INPUT` are console *modes*, which `SetConsoleMode`
+ * changed and only `SetConsoleMode` restores. Node's raw-mode setter is this
+ * process's handle on that call: `uv_tty_set_mode(NORMAL)` rewrites the input mode
+ * outright rather than clearing a bit, which is exactly the restore that was missed.
+ */
+export function restorePaneConsole(
+  out: PaneOutput = process.stdout,
+  input: PaneInput = process.stdin,
+): boolean {
+  let written = false;
+  try {
+    out.write(DISABLE_REPORTING);
+    written = true;
+  } catch {}
+  try {
+    if (input.isTTY && typeof input.setRawMode === "function") {
+      input.setRawMode(false);
+      // Reading was never started, but `pause` is what tells Node to `readStop` a
+      // tty handle it has now constructed — without it a stdin touched this late
+      // can hold the event loop open past the return.
+      input.pause?.();
+    }
+  } catch {}
+  return written;
 }

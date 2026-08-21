@@ -38,7 +38,7 @@ import type {
   PopupView,
 } from "../ui/types";
 import { normalizeUrl, searchOrUrl } from "../url";
-import { accelHeld, bindingLabel, clipboardHeld, cmdHeld, cmdModifier, defaultKeys, isRecordKey, listStep, matchesBinding, navigationArrow, parseKeyBindings, recordKeyLabel, zoomHeld } from "./keybindings";
+import { accelHeld, bindingLabel, clipboardHeld, cmdHeld, cmdModifier, completeKeyLabel, defaultKeys, isRecordKey, listStep, matchesBinding, navigationArrow, parseKeyBindings, recordKeyLabel, zoomHeld } from "./keybindings";
 import type { KeyBinding } from "./keybindings";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
 import type { DevtoolsPlacement } from "./layout";
@@ -1404,7 +1404,7 @@ class Session {
             ? "complete recording"
             : "stop recording"
           : "record page",
-        shortcut: this.activeRecord()?.reviewing ? "ctrl+enter" : recordKeyLabel,
+        shortcut: this.activeRecord()?.reviewing ? completeKeyLabel : recordKeyLabel,
         run: () => {
           const record = this.activeRecord();
           if (!record) void this.startRecording();

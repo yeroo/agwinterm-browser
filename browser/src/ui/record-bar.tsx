@@ -3,7 +3,7 @@ import { Box, Text } from "pixel-react";
 import type { Rgba } from "pixel-react";
 import { measureText } from "../record/model";
 import type { InteractionKind, RecordView } from "../record/types";
-import { recordKeyLabel } from "../session/keybindings";
+import { completeKeyLabel, recordKeyLabel } from "../session/keybindings";
 import { displayUrl } from "../url";
 import { Icon } from "./icons";
 import type { IconName } from "./icons";
@@ -906,7 +906,7 @@ export function RecordToolbarPill({
           selectable: false,
         }}
       >
-        {stopped ? "ctrl+enter" : recordKeyLabel}
+        {stopped ? completeKeyLabel : recordKeyLabel}
       </Text>
     </Box>
   );

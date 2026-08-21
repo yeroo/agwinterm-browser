@@ -12,6 +12,7 @@
 // this machine has — and probed before and after it closes.
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -38,6 +39,7 @@ const {
   appPaths,
   endpointAlive,
   endpointKind,
+  endpointStatus,
   instanceEndpointIn,
   isPipeEndpoint,
   pipeEndpoint,
@@ -323,5 +325,78 @@ describe("stale-endpoint cleanup, against a real pipe", () => {
     const started = Date.now();
     assert.equal(await endpointAlive(pipeEndpoint(APP, "test", "silent"), 300), false);
     assert.ok(Date.now() - started < 5_000, "the probe did not return promptly");
+  });
+});
+
+/**
+ * Starts `busy-pipe-server.mjs` on `endpoint` and takes up every instance it queued,
+ * so the next connect has nothing to land on until its loop runs again — which it
+ * will not, for as long as the child is holding it.
+ */
+async function busyServer(endpoint) {
+  const child = spawn(process.execPath, [path.join(HERE, "busy-pipe-server.mjs"), endpoint], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  await new Promise((resolve, reject) => {
+    child.stdout.once("data", resolve);
+    child.once("exit", () => reject(new Error("the busy server never listened")));
+  });
+  const held = [];
+  for (let at = 0; at < 6; at += 1) {
+    const socket = net.connect(endpoint);
+    socket.on("error", () => {});
+    held.push(socket);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return { child, held };
+}
+
+describe("why a probe failed, which is not the same question as whether it did", () => {
+  it("calls a name nobody has created `absent`", async () => {
+    // The operating system refused the connect outright — `ENOENT` for a pipe name
+    // that is not in the object manager, and for a socket path that is not there.
+    // That is the only failure that is evidence about the owner.
+    assert.equal(await endpointStatus(pipeEndpoint(APP, "test", "never-existed"), 500), "absent");
+    assert.equal(await endpointStatus(path.join(scratch, "no-such.sock"), 500), "absent");
+  });
+
+  it("calls a listening endpoint `alive`", async () => {
+    const endpoint = pipeEndpoint(APP, "test", "status-alive");
+    const server = await serve(endpoint);
+    try {
+      assert.equal(await endpointStatus(endpoint, 500), "alive");
+    } finally {
+      await close(server);
+    }
+  });
+
+  it("calls a live endpoint that ran out of budget `unknown`, not `absent`", async () => {
+    // The distinction the whole type exists for, against a real browser-shaped
+    // failure: a server that is *there* and not accepting. libuv arms a fixed number
+    // of pipe instances with overlapped `ConnectNamedPipe`, so the kernel completes
+    // the first few connects on its own; once those are spoken for, the next one
+    // waits on a loop that is busy painting a frame. Collapsed into `false`, that
+    // read as "gone" and `listInstances` deleted a running browser's row.
+    //
+    // Another process, because it cannot be staged in this one: the kernel would
+    // accept for us however long our own loop is held (measured).
+    if (process.platform !== "win32") return;
+    const endpoint = pipeEndpoint(APP, "test", "busy");
+    const { child, held } = await busyServer(endpoint);
+    try {
+      assert.equal(await endpointStatus(endpoint, 400), "unknown");
+      // The boolean cannot tell this apart from a name nobody holds, which is why
+      // the caller that deletes rows no longer uses it.
+      assert.equal(await endpointAlive(endpoint, 400), false);
+    } finally {
+      for (const socket of held) socket.destroy();
+      child.kill();
+    }
+  });
+
+  it("keeps `endpointAlive` a strict yes, for the callers that only decline to act", async () => {
+    // `reclaimEndpoint` must not unlink on an inconclusive probe either, so the
+    // boolean stays "a connect completed" and nothing else.
+    assert.equal(await endpointAlive(pipeEndpoint(APP, "test", "never-existed"), 500), false);
   });
 });

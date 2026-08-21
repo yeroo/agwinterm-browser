@@ -95,15 +95,54 @@ export function connectEndpoint(endpoint: string, timeoutMs = 10_000): Promise<n
   });
 }
 
-/** Whether someone is listening. The only stale-check a named pipe can support. */
-export async function endpointAlive(endpoint: string, timeoutMs = 1_000): Promise<boolean> {
+/**
+ * What a probe learned: someone is listening, nobody is, or we could not tell.
+ *
+ * The third case is the one that matters, and a boolean cannot express it. A
+ * connect fails for two very different reasons: the name does not exist — `ENOENT`
+ * on Windows for a pipe nobody has created, `ENOENT`/`ECONNREFUSED` on unix for a
+ * socket path that is gone or has no server — or the connect did not *finish*
+ * inside the deadline. The second says nothing about the owner. A Win32 pipe server
+ * accepts one connection per pipe instance and only creates the next one when its
+ * event loop gets around to it, so a browser busy painting a frame can leave a
+ * connect queued past any budget we are willing to wait; the same is true of a unix
+ * server whose backlog is full.
+ *
+ * Callers that destroy state on "not alive" must distinguish these — see
+ * `instances.ts`, where a wrong `absent` deletes the row of a running browser.
+ */
+export type EndpointStatus = "alive" | "absent" | "unknown";
+
+/**
+ * Probes an endpoint. The only stale-check a named pipe can support.
+ *
+ * Timeouts reject with a plain `Error` (`connectEndpoint` above) and therefore carry
+ * no `code`, which is exactly the `unknown` case.
+ */
+export async function endpointStatus(
+  endpoint: string,
+  timeoutMs = 1_000,
+): Promise<EndpointStatus> {
   try {
     const socket = await connectEndpoint(endpoint, timeoutMs);
     socket.destroy();
-    return true;
-  } catch {
-    return false;
+    return "alive";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ECONNREFUSED" ? "absent" : "unknown";
   }
+}
+
+/**
+ * Whether someone is listening.
+ *
+ * Anything other than a completed connect is `false`, which is the right answer for
+ * the callers that only ever *decline* to act on it — `reclaimEndpoint` refusing to
+ * unlink, `daemon.ts` refusing to start a second daemon. A caller that would delete
+ * something wants [`endpointStatus`] instead.
+ */
+export async function endpointAlive(endpoint: string, timeoutMs = 1_000): Promise<boolean> {
+  return (await endpointStatus(endpoint, timeoutMs)) === "alive";
 }
 
 /**

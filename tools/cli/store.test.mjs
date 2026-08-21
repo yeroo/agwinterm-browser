@@ -7,6 +7,7 @@
 // runner and SQLite, not of the schema file.
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -219,6 +220,42 @@ describe("pruning a dead browser", () => {
     assert.equal(fs.existsSync(socket), false);
   });
 
+  it("keeps a live browser whose probe merely ran out of budget", async () => {
+    // The row is deleted on "nobody is there", and a probe that did not *finish*
+    // does not say that. A browser busy enough not to accept inside
+    // `ENDPOINT_PROBE_MS` -- libuv arms a fixed number of pipe instances and creates
+    // more only when its loop comes round -- used to be evicted, and `Registry.write`
+    // only runs on a state change, so an idle one evicted this way never came back.
+    //
+    // The busy server is a real process (`busy-pipe-server.mjs`), for the reason
+    // `endpoint.test.mjs` gives: an in-process one cannot be made to stall, because
+    // the kernel completes the connect whatever this loop is doing.
+    if (process.platform !== "win32") return;
+    const endpoint = store.pipeEndpoint("winterm-test", String(process.pid), "busy");
+    const child = spawn(process.execPath, [path.join(HERE, "busy-pipe-server.mjs"), endpoint, "6000"], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    const held = [];
+    try {
+      await new Promise((resolve, reject) => {
+        child.stdout.once("data", resolve);
+        child.once("exit", () => reject(new Error("the busy server never listened")));
+      });
+      for (let at = 0; at < 6; at += 1) {
+        const socket = net.connect(endpoint);
+        socket.on("error", () => {});
+        held.push(socket);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      seed([{ key: "busy", pid: process.pid, endpoint }]);
+      assert.deepEqual((await store.listInstances()).map((row) => row.key), ["busy"]);
+      assert.deepEqual(rowsNow(), [{ key: "busy" }], "a running browser's row was deleted");
+    } finally {
+      for (const socket of held) socket.destroy();
+      child.kill();
+    }
+  });
+
   it("returns the survivors oldest first", async () => {
     seed([
       { key: "b", pid: process.pid, endpoint: await listening("b"), startedAt: 200 },
@@ -236,6 +273,21 @@ describe("the pruning rule in the shipped module", () => {
     // not signal. Upstream's bare `catch { return false }` would have deleted a
     // running browser's row.
     assert.match(source, /=== "EPERM"/);
+  });
+
+  it("deletes only on a definite absence", () => {
+    // `unknown` -- a probe that timed out rather than one that was refused -- keeps
+    // the row. The two mistakes are not the same size: a row kept in error costs one
+    // failed request, and a row deleted in error costs the browser.
+    assert.match(source, /!== "absent"/);
+    assert.ok(!/endpointAlive/.test(source), "instances.ts is back on the boolean probe");
+  });
+
+  it("does not let a failed prune abort the listing", () => {
+    // Cleanup is opportunistic; a listing is not. A locked database here used to
+    // reject `listInstances`, so `ls`, `new-tab` and `action` failed outright
+    // instead of reporting the live browsers they had already identified.
+    assert.match(source, /removeInstance\(row\.key\)\.catch\(\(\) => \{\}\)/);
   });
 
   it("still removes the endpoint, which is the unlink on unix", () => {

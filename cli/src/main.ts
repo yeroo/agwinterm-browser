@@ -31,7 +31,7 @@ import {
 } from "./launch";
 import type { LaunchPlan } from "./launch";
 import { lsCommand } from "./ls";
-import { clearPaneFrame } from "./pane";
+import { clearPaneFrame, restorePaneConsole } from "./pane";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -465,6 +465,12 @@ async function openInForeground(argv: string[]): Promise<number> {
     // destructor. Failure means the placement is gone anyway, so it cannot change
     // the exit code.
     await clearPaneFrame(process.env);
+    // And the console with it. The engine put *this* process's console on the
+    // alternate screen, hid the cursor and turned on mouse reporting; `ModeGuard`
+    // undoes that on an ordinary exit and not on any of the exits above, so the
+    // shell was getting the pane back unreadable — cursorless, echoless, and typing
+    // escape bytes on every mouse move. Idempotent, so it runs either way.
+    restorePaneConsole();
     return code;
   } finally {
     // A registered signal listener keeps Node's event loop alive, and `main`

@@ -296,3 +296,110 @@ describe("the CLI's foreground wait", () => {
     assert.match(body, /finally \{[\s\S]*process\.removeListener\(signal, handler\)/);
   });
 });
+
+describe("giving the console back, which is the other half of giving the pane back", () => {
+  /** The engine's `DISABLE_REPORTING`, read out of the Rust it is defined in. */
+  function rustDisableReporting() {
+    const source = fs.readFileSync(
+      path.join(REPO, "engine", "crates", "pixel-core", "src", "terminal_windows.rs"),
+      "utf8",
+    );
+    const at = source.indexOf('const DISABLE_REPORTING: &[u8] = b"');
+    assert.ok(at >= 0, "DISABLE_REPORTING is no longer where this test looks for it");
+    const from = source.indexOf('b"', at) + 2;
+    const to = source.indexOf('";', from);
+    assert.ok(to > from, "the literal is not terminated");
+    return source
+      .slice(from, to)
+      // A `\` at end of line continues a Rust string literal and eats the
+      // following indentation.
+      .replace(/\\\r?\n\s*/g, "")
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+  }
+
+  it("sends exactly what the engine would have sent, byte for byte", () => {
+    // Two copies of an escape string in two languages is a drift risk, and drifting
+    // means restoring some of the modes and leaving the rest on -- which is the bug
+    // this exists to fix, in a harder-to-see form.
+    assert.equal(pane.DISABLE_REPORTING, rustDisableReporting());
+  });
+
+  it("undoes each mode the engine turns on", () => {
+    // Not a restatement of the constant: `ENABLE_REPORTING` is the list of modes the
+    // browser leaves on after a `taskkill /F`, and every one of them has to be named
+    // here or the shell gets the pane back in that state.
+    const source = fs.readFileSync(
+      path.join(REPO, "engine", "crates", "pixel-core", "src", "terminal_windows.rs"),
+      "utf8",
+    );
+    const from = source.indexOf('const ENABLE_REPORTING: &[u8] = b"');
+    const enable = source.slice(from, source.indexOf('";', from));
+    const modes = [...enable.matchAll(/\\x1b\[\?(\d+)h/g)].map((match) => match[1]);
+    assert.ok(modes.length >= 8, "ENABLE_REPORTING is no longer a list of mode sets");
+    for (const mode of modes) {
+      assert.ok(
+        pane.DISABLE_REPORTING.includes(`\x1b[?${mode}l`),
+        `mode ${mode} is turned on and never turned off`,
+      );
+    }
+  });
+
+  it("writes it, and puts the console back into cooked mode", () => {
+    const written = [];
+    const calls = [];
+    const restored = pane.restorePaneConsole(
+      { write: (chunk) => written.push(chunk) },
+      {
+        isTTY: true,
+        setRawMode: (raw) => calls.push(`raw:${raw}`),
+        pause: () => calls.push("pause"),
+      },
+    );
+    assert.equal(restored, true);
+    assert.deepEqual(written, [pane.DISABLE_REPORTING]);
+    // `uv_tty_set_mode(NORMAL)` rewrites the input mode outright, which is what puts
+    // back echo and line input and takes `ENABLE_VIRTUAL_TERMINAL_INPUT` off again --
+    // the `SetConsoleMode` half that no escape string can reach.
+    assert.deepEqual(calls, ["raw:false", "pause"]);
+  });
+
+  it("leaves a stdin that is not a console alone", () => {
+    // `terminal-browser open > out.txt` still has a console to reset the modes on,
+    // and no tty to ask.
+    const calls = [];
+    pane.restorePaneConsole({ write: () => {} }, { isTTY: false, setRawMode: () => calls.push(1) });
+    assert.deepEqual(calls, []);
+    pane.restorePaneConsole({ write: () => {} }, {});
+  });
+
+  it("never throws, whatever the streams do", () => {
+    // It runs after something has already gone wrong, on the path that returns the
+    // browser's exit code. A closed stdout here must not become the CLI's failure.
+    const thrower = () => {
+      throw new Error("EPIPE");
+    };
+    assert.equal(pane.restorePaneConsole({ write: thrower }, {}), false);
+    assert.equal(
+      pane.restorePaneConsole({ write: () => {} }, { isTTY: true, setRawMode: thrower }),
+      true,
+    );
+  });
+
+  it("is run by the foreground wait, on the same path as the clear", () => {
+    // Both are state the engine set on this pane and both are normally undone by the
+    // same `Drop`, so the exits that skip one skip the other. Clearing the picture
+    // and leaving the console on the alternate screen with the cursor hidden and
+    // mouse reporting on is half a fix.
+    const body = mainSource.slice(
+      mainSource.indexOf("async function openInForeground"),
+      mainSource.indexOf("async function attachHere"),
+    );
+    const clear = body.indexOf("clearPaneFrame(process.env)");
+    const restore = body.indexOf("restorePaneConsole()");
+    assert.ok(restore > clear, "the console is not restored after the frame is cleared");
+    assert.ok(
+      restore < body.indexOf("return code"),
+      "the restore does not happen before the exit code is returned",
+    );
+  });
+});

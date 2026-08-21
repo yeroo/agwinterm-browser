@@ -2,21 +2,73 @@ import type { EngineKeyEvent, KeyMods } from "pixel-react";
 
 export type KeyBinding = KeyMods & { key: string };
 
+/**
+ * The chords that open find, devtools and the console.
+ *
+ * Windows gets a third answer rather than sharing Linux's, for the reason
+ * [`zoomHeld`] and [`navigationArrow`] already name: `ENABLE_VIRTUAL_TERMINAL_INPUT`
+ * encodes Ctrl only as the C0 bytes `0x01..=0x1a`, and **those carry no shift**
+ * (`terminal.rs`'s `byte_key_event` sets `ctrl` and nothing else). So `ctrl+shift+f`
+ * and `ctrl+f` arrive identically, as `0x06` with `shift` clear, and `matchesMods`
+ * compares shift exactly — a `ctrl+shift+*` default could never match whatever the
+ * user pressed. Ctrl+`i` is worse than unreachable: `0x09` is Tab.
+ *
+ *   - **find** is `ctrl+f`, which is the Windows browser convention anyway.
+ *   - **devtools** is `f12`, which arrives as a `CSI …~` sequence and decodes
+ *     intact. `session.tsx` already accepted a bare F12 as a fallback; this makes
+ *     it the binding, so `--devtools-key`'s default and the menu label agree with
+ *     the only key that works.
+ *   - **console** stays `ctrl+alt+j`: an Alt chord is an Esc-prefixed byte, so
+ *     `\x1b\x0a` decodes as ctrl+alt+j with both modifiers on it.
+ *   - **palette** is unchanged; `ctrl+k` and `alt+k` both survive.
+ */
 export const defaultKeys =
   process.platform === "darwin"
     ? { palette: "super+p", find: "super+shift+f", devtools: "super+shift+i", console: "super+alt+j" }
-    : { palette: "ctrl+k alt+k", find: "ctrl+shift+f", devtools: "ctrl+shift+i", console: "ctrl+alt+j" };
+    : process.platform === "win32"
+      ? { palette: "ctrl+k alt+k", find: "ctrl+f", devtools: "f12", console: "ctrl+alt+j" }
+      : { palette: "ctrl+k alt+k", find: "ctrl+shift+f", devtools: "ctrl+shift+i", console: "ctrl+alt+j" };
 
-export const recordKeyLabel = process.platform === "darwin" ? "ctrl+r" : "ctrl+shift+r";
+/**
+ * Start/stop recording, and what the record bar tells the user to press.
+ *
+ * Alt on Windows, for the shift reason above plus one that makes the obvious
+ * alternative wrong: `ctrl+shift+r` reaches `handleKey` as a plain `ctrl+r`, and
+ * `session.tsx` checks the record key *before* the accelerators, so binding record
+ * to a bare Ctrl+R would take Reload — the chord every Windows browser has — away
+ * from it. Alt+`r` is an Esc-prefixed byte, decodes intact, and collides with
+ * nothing: Alt is otherwise spoken for only by the zoom keys and the arrows.
+ *
+ * Left as it was on macOS and Linux, both of which can deliver what they bind.
+ */
+export const recordKeyLabel =
+  process.platform === "darwin" ? "ctrl+r" : process.platform === "win32" ? "alt+r" : "ctrl+shift+r";
 
 export function isRecordKey(event: EngineKeyEvent): boolean {
+  if (event.key.toLowerCase() !== "r" || event.mods.super) return false;
+  if (process.platform === "win32") {
+    return event.mods.alt && !event.mods.ctrl && !event.mods.shift;
+  }
   return (
-    event.key.toLowerCase() === "r" &&
-    event.mods.ctrl &&
-    !event.mods.super &&
-    !event.mods.alt &&
-    event.mods.shift === (process.platform !== "darwin")
+    event.mods.ctrl && !event.mods.alt && event.mods.shift === (process.platform !== "darwin")
   );
+}
+
+/**
+ * Finish a recording (as against taking one more snapshot), and its label.
+ *
+ * Enter is the key on every platform; the modifier is what differs. A Windows
+ * console has no encoding for Ctrl+Enter that survives as *Enter* — conhost sends
+ * `0x0a`, which is Ctrl+J — so `ctrl+enter` never reached `complete()` and a review
+ * could be started and never ended: Enter fell through to `snapshot()`. Alt+Enter
+ * is `\x1b\x0d`, which decodes as Enter with `alt` set.
+ */
+export const completeKeyLabel = process.platform === "win32" ? "alt+enter" : "ctrl+enter";
+
+export function isCompleteKey(event: EngineKeyEvent): boolean {
+  if (event.key !== "enter") return false;
+  if (process.platform === "win32") return event.mods.alt || event.mods.ctrl || event.mods.super;
+  return event.mods.ctrl || event.mods.super;
 }
 
 /**

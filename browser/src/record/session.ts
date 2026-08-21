@@ -34,7 +34,7 @@ import {
   unionRects,
 } from "./model";
 import type { CropScope, HandleId, MarkupObject, Rect, Tool, Vec } from "./model";
-import { isRecordKey, listStep } from "../session/keybindings";
+import { isCompleteKey, isRecordKey, listStep } from "../session/keybindings";
 import { newRecordingDir } from "./paths";
 import {
   CLICK_PULSE_MS,
@@ -384,7 +384,10 @@ export class RecordSession {
       return true;
     }
     if (event.key === "enter") {
-      if (cmd) this.complete();
+      // `isCompleteKey` rather than `cmd`: a Windows console has no encoding for
+      // Ctrl+Enter that arrives as Enter, so `complete()` was unreachable there and
+      // every attempt to finish a review took one more snapshot instead.
+      if (isCompleteKey(event)) this.complete();
       else this.snapshot();
       return true;
     }
