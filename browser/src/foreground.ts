@@ -1,6 +1,6 @@
 import { app } from "electron";
 
-import { callerCwd } from "./entry";
+import { callerCwd, FOREGROUND_SIGNALS } from "./entry";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
 
@@ -29,8 +29,18 @@ export async function runForeground(cdpPort: number | null, argv: string[]): Pro
     // Give the session a beat to tear the surfaces down before the process goes.
     setTimeout(() => app.exit(code), 200);
   };
-  process.on("SIGINT", () => stop(130));
-  process.on("SIGTERM", () => stop(143));
+  // All four, and for the reason `cli/src/launch.ts` gives for its own list: the
+  // point of listening is not to handle them but to *not be killed by them*. Node
+  // terminates immediately on one of these with no listener, and terminating here
+  // skips `Session.shutdown` — no `flushStorageData`, so storage written since
+  // Chromium's last autosave is lost; no `Registry.dispose`, so the `instances` row
+  // outlives the process with a pid Windows will hand to someone else; and no
+  // `root.stop()`, so the engine's `Drop` never runs and the pane keeps the last
+  // frame and the alternate screen. SIGBREAK is Ctrl+Break and SIGHUP a closing
+  // console window — both reach every process attached to the console, and both
+  // were missing. `tools/process-model/entry.test.mjs` pins this against the CLI's
+  // list, which the two halves have to agree on.
+  for (const [signal, code] of FOREGROUND_SIGNALS) process.on(signal, () => stop(code));
 
   session = createSession({
     key: `${process.pid}-1`,

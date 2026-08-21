@@ -215,21 +215,62 @@ struct FrameDir {
 impl FrameDir {
     /// One per publisher. The pid keeps two browsers apart; the counter keeps two
     /// publishers inside one process apart, which is a thing tests do.
+    ///
+    /// `create_dir` rather than `create_dir_all`, and a counter that keeps moving
+    /// until it lands on a name nobody has: a pid is unique among *live* processes
+    /// and nothing more. Only a clean `Drop` removes a directory and [`sweep_stale`]
+    /// leaves anything younger than an hour alone, so a browser that was killed
+    /// leaves its frames behind — and Windows recycles pids freely. Adopting that
+    /// directory would put `frame-00000000.png` in the path of a file that already
+    /// exists, and [`write_all_new`] refuses to touch one (rightly: overwriting a
+    /// file the host may be reading is what this module is built to avoid). Its
+    /// `AlreadyExists` is not the `NotFound` [`FramePublisher::write_frame`] retries,
+    /// so it reached `Terminal::draw`, and an error there ends the browser. The
+    /// first frame after an unlucky pid reuse would have been the last.
     fn create() -> io::Result<Self> {
+        let root = std::env::temp_dir();
+        sweep_stale(&root, STALE_AFTER);
+        Self::create_in(&root)
+    }
+
+    /// The half that does not read the environment, so a test can hand it a root of
+    /// its own and leave one of the names already taken.
+    fn create_in(root: &Path) -> io::Result<Self> {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
 
-        let root = std::env::temp_dir();
-        sweep_stale(&root, STALE_AFTER);
-        let path = root.join(format!(
-            "{DIR_PREFIX}{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        // Bounded: each turn burns a counter value no other publisher will use
+        // again, so this ends whether or not the collisions are ours.
+        let mut last = None;
+        for _ in 0..ATTEMPTS {
+            let path = root.join(format!(
+                "{DIR_PREFIX}{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                // A directory that already exists is a dead browser's, not ours.
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = Some(err),
+                // The temp directory itself may not exist yet on a fresh profile.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(root)?;
+                    last = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "no free frame directory under the temp directory",
+            )
+        }))
     }
 }
+
+/// How many names [`FrameDir::create`] will try before giving up.
+const ATTEMPTS: u32 = 64;
 
 impl Drop for FrameDir {
     fn drop(&mut self) {
@@ -838,6 +879,44 @@ mod tests {
         assert!(dir.is_dir());
         drop(publisher);
         assert!(!dir.exists(), "the frame directory outlived its publisher");
+    }
+
+    #[test]
+    fn a_directory_a_killed_browser_left_behind_is_not_adopted() {
+        // Windows recycles pids, only a clean `Drop` removes a frame directory, and
+        // `sweep_stale` leaves anything younger than an hour alone. So a new browser
+        // can be handed a dead one's name — and adopting it puts `frame-00000000.png`
+        // on top of a file that exists, which `write_all_new` refuses and
+        // `Terminal::draw` turns into the end of the browser.
+        let root = std::env::temp_dir().join(format!("frame-collide-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("a root");
+
+        // The counter never repeats inside one process, so the collision has to be
+        // staged the way a dead browser stages it: by taking the name this process
+        // is about to ask for next.
+        let first = FrameDir::create_in(&root).expect("the first name is free");
+        let name = first.path.file_name().expect("a name").to_string_lossy();
+        let next = name
+            .rsplit_once('-')
+            .and_then(|(head, seq)| Some(format!("{head}-{}", seq.parse::<u32>().ok()? + 1)))
+            .expect("the name ends in the counter");
+        let squatted = root.join(&next);
+        fs::create_dir(&squatted).expect("the name a dead browser holds");
+        fs::write(squatted.join("frame-00000000.png"), b"x").expect("its leftover frame");
+
+        let second = FrameDir::create_in(&root).expect("a name of its own");
+        assert_ne!(
+            second.path, squatted,
+            "the publisher adopted a directory that was not empty",
+        );
+        assert!(
+            !second.path.join("frame-00000000.png").exists(),
+            "the first frame would have collided with a file already there",
+        );
+
+        drop(second);
+        drop(first);
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

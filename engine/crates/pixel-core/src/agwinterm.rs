@@ -60,6 +60,17 @@ pub(crate) const SESSION_VAR: &str = "AGWINTERM_SESSION_ID";
 /// The same value under the name that says "pane" out loud, and the only one set by
 /// hosts that predate the session/pane merge.
 pub(crate) const PANE_VAR: &str = "AGWINTERM_PANE_ID";
+/// The agwinterm window our pane lives in.
+///
+/// Not cosmetic. A content verb with no `window` in it resolves against the
+/// *frontmost* window (`ControlServer.cs:126` -> `ResolveWindow(null)` ->
+/// `Frontmost`), and each window's `Resolve` searches only its own workspaces
+/// (`Program.ControlHost.cs:162`). So an unqualified `image.frame` from a pane in
+/// a background window is answered `no session` — and a refused frame is an error
+/// out of `Terminal::draw`, which `Engine::pump` propagates and `pixel-node` treats
+/// as a fatal exit. Focusing a second agwinterm window would have *closed* the
+/// browser. Hosts that predate multi-window ignore the field.
+pub(crate) const WINDOW_VAR: &str = "AGWINTERM_WINDOW_ID";
 /// `<width>x<height>` in pixels, overriding whatever the host says (or does not).
 pub(crate) const CELL_PX_VAR: &str = "TERMINAL_BROWSER_CELL_PX";
 
@@ -101,6 +112,8 @@ const BUSY_WAIT: Duration = Duration::from_millis(25);
 pub(crate) struct HostTarget {
     pipe: String,
     session: String,
+    /// The window the pane is in, when the host names one. See [`WINDOW_VAR`].
+    window: Option<String>,
 }
 
 impl HostTarget {
@@ -125,6 +138,7 @@ impl HostTarget {
         Ok(Self {
             pipe: nonempty(env, PIPE_VAR).unwrap_or_else(|| DEFAULT_PIPE.to_owned()),
             session,
+            window: nonempty(env, WINDOW_VAR),
         })
     }
 
@@ -407,7 +421,11 @@ impl ControlClient {
         &self.target
     }
 
-    /// Builds `{"cmd":…,"target":…,"args":…}` and sends it.
+    /// Builds `{"cmd":…,"target":…,"window":…,"args":…}` and sends it.
+    ///
+    /// `window` is omitted when the host did not name one, which is what a
+    /// single-window host and every host predating multi-window look like. When it
+    /// is there it is load-bearing rather than decorative: see [`WINDOW_VAR`].
     ///
     /// `args` is raw JSON — an object literal the caller composed — because the
     /// frame verb's `images` array is built once per frame and a generic value
@@ -417,6 +435,10 @@ impl ControlClient {
         push_quoted(&mut line, cmd);
         line.push_str(",\"target\":");
         push_quoted(&mut line, &self.target.session);
+        if let Some(window) = &self.target.window {
+            line.push_str(",\"window\":");
+            push_quoted(&mut line, window);
+        }
         if let Some(args) = args {
             line.push_str(",\"args\":");
             line.push_str(args);
@@ -718,7 +740,15 @@ pub(crate) mod fixture {
             ControlClient::to(HostTarget {
                 pipe: self.name.clone(),
                 session: "s3".to_owned(),
+                window: None,
             })
+        }
+
+        /// The same client, in a host that named the window our pane is in.
+        pub(crate) fn client_in_window(&self, window: &str) -> ControlClient {
+            let mut target = self.client().target;
+            target.window = Some(window.to_owned());
+            ControlClient::to(target)
         }
 
         pub(crate) fn requests(&self) -> Vec<String> {
@@ -1024,6 +1054,38 @@ mod tests {
     }
 
     #[test]
+    fn a_request_names_the_window_the_pane_is_in_when_the_host_named_one() {
+        // Without this the host resolves the pane against the *frontmost* window
+        // and answers `no session` whenever another window is in front — which
+        // `Terminal::draw` reports as an error and `pixel-node` turns into an exit.
+        // See `WINDOW_VAR`.
+        let server = PipeServer::always(r#"{"ok":true,"result":"pong"}"#);
+        let mut client = server.client_in_window("win-7");
+
+        assert_eq!(client.ping().unwrap(), "pong");
+        assert_eq!(
+            server.requests(),
+            [r#"{"cmd":"ping","target":"s3","window":"win-7"}"#.to_owned()],
+        );
+    }
+
+    #[test]
+    fn a_host_that_names_no_window_gets_a_request_without_one() {
+        // Hosts predating multi-window set no `AGWINTERM_WINDOW_ID`, and an empty
+        // selector is not the same as an absent one: `ResolveWindow("")` is the
+        // frontmost, which is right only by accident.
+        let target = HostTarget::from_env(&pane_env()).expect("a pane");
+        assert_eq!(target.window, None);
+        let with_window = HostTarget::from_env(&env_of(&[
+            (ENABLED_VAR, "1"),
+            (SESSION_VAR, "s3"),
+            (WINDOW_VAR, "win-7"),
+        ]))
+        .expect("a pane");
+        assert_eq!(with_window.window.as_deref(), Some("win-7"));
+    }
+
+    #[test]
     fn every_request_addresses_the_pane_by_id_and_never_the_active_one() {
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:1/1"}"#);
         let mut client = server.client();
@@ -1113,6 +1175,7 @@ mod tests {
         let mut client = ControlClient::to(HostTarget {
             pipe: format!("pixel-core-absent-{}", std::process::id()),
             session: "s3".to_owned(),
+            window: None,
         });
 
         let err = client.ping().expect_err("there is no server");
@@ -1248,6 +1311,7 @@ mod tests {
         let mut client = ControlClient::to(HostTarget {
             pipe: format!("pixel-core-absent-{}", std::process::id()),
             session: "s3".to_owned(),
+            window: None,
         });
         assert_eq!(cell_size(Some(&mut client), &env_of(&[])), FALLBACK_CELL);
     }

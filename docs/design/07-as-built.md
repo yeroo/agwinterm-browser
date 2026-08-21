@@ -235,8 +235,19 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
   before asking. This was not optional — while `set_clipboard` answered `Unsupported`,
   the error propagated through `?` from `engine/doc.rs` and `engine/clipboard.rs` out of
   `Engine::pump`, which `pixel-node` treats as a fatal engine exit: **Ctrl+C in the
-  address bar closed the browser**.
+  address bar closed the browser**. Nothing on that path inspects the error *kind*, so
+  answering a different kind would have changed the message and not the outcome: the
+  Windows `set_clipboard` returns no error at all and logs instead. A clipboard another
+  process is holding — `arboard` gives up on `OpenClipboard` after five tries at 5 ms,
+  which a clipboard manager or RDP redirection outlasts easily — is a lost copy, not a
+  lost browser.
 - **No Super modifier**, for the same reason, so `cmdModifier` is `ctrl` on Windows:
-  new tab, address bar, reload, back, forward and zoom are Ctrl chords. Not a degradation
-  — it is the Windows convention — but it is why a `cmd+p` chord written for a Mac is
-  mapped rather than dropped.
+  new tab, address bar, reload, copy and quit are Ctrl chords. Not a degradation — it is
+  the Windows convention — but it is why a `cmd+p` chord written for a Mac is mapped
+  rather than dropped. **Two of the accelerators are not letters, and Ctrl cannot carry
+  them.** `ENABLE_VIRTUAL_TERMINAL_INPUT` encodes Ctrl+a..z as the C0 bytes `0x01..=0x1a`
+  and has no encoding for the rest: Ctrl+`=` arrives as a plain `=` with no modifier on
+  it, and Ctrl+`[` arrives as `0x1b`, which is Escape. So zoom is **Alt+`=`/`-`/`0`** and
+  back/forward are **Alt+Left/Alt+Right** — the spellings an Esc prefix and `CSI 1;3D`
+  deliver intact, and the ones a Windows browser binds anyway. Alt is accepted for those
+  two and nowhere else, so it stays a page modifier: alt+t is still not "new tab".

@@ -147,9 +147,9 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **418 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 361 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **254 passed**, 66 suites |
+| `cargo nextest run --workspace` | **421 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 364 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **266 passed**, 68 suites |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |

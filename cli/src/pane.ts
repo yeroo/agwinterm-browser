@@ -57,6 +57,12 @@ export interface ClearRequest {
  *     else's.
  *   - `AGWINTERM_PIPE` carries the *bare* pipe name; the client spells the prefix.
  *     Unset means `agwinterm`, which is what `agwintermctl` falls back to.
+ *   - `AGWINTERM_WINDOW_ID`, when the host sets it, says which window the pane
+ *     is in. A content verb without it resolves against the *frontmost* window,
+ *     and each window searches only its own panes, so a clear sent while another
+ *     window is in front is answered "no session" and the dead browser's picture
+ *     stays on the pane — the exact failure this module exists to prevent. Hosts
+ *     predating multi-window set nothing, and the field is left out.
  *
  * Pure, so the addressing is testable without a pipe on the other end.
  */
@@ -68,9 +74,11 @@ export function paneClearRequest(env: PaneEnv): ClearRequest | null {
   const pipe = nonempty(env, "AGWINTERM_PIPE") ?? DEFAULT_PIPE;
   // A pipe name may not contain a separator: `\\.\pipe\a\b` names something else.
   if (/[\\/]/.test(pipe)) return null;
+  const window = nonempty(env, "AGWINTERM_WINDOW_ID");
+  const request = window ? { cmd: CLEAR_CMD, target, window } : { cmd: CLEAR_CMD, target };
   return {
     endpoint: PIPE_PREFIX + pipe,
-    line: `${JSON.stringify({ cmd: CLEAR_CMD, target })}\n`,
+    line: `${JSON.stringify(request)}\n`,
   };
 }
 

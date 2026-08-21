@@ -33,6 +33,29 @@ export function sessionArgv(argv: readonly string[]): string[] {
 }
 
 /**
+ * The signals a foreground browser has to survive, and the exit code each stands
+ * for (the conventional 128 + signo).
+ *
+ * Lives here rather than beside its use because `foreground.ts` imports Electron
+ * and this module imports nothing, so the list can be read by a test that has
+ * neither an Electron nor a built engine. Its other end is `FOREGROUND_SIGNALS` in
+ * `cli/src/launch.ts` — the CLI and the browser are attached to the same console
+ * and receive the same signal, so a signal one of them survives and the other does
+ * not is the case where the CLI takes the pane back from a browser that is still
+ * drawing into it. `tools/process-model/entry.test.mjs` asserts the two lists match.
+ *
+ * SIGINT is Ctrl+C and SIGBREAK is Ctrl+Break; a closing console window raises
+ * `CTRL_CLOSE_EVENT`, which libuv reports as SIGHUP. SIGTERM is never raised by a
+ * Windows console but is what `process.kill` sends.
+ */
+export const FOREGROUND_SIGNALS: ReadonlyArray<readonly [NodeJS.Signals, number]> = [
+  ["SIGINT", 130],
+  ["SIGTERM", 143],
+  ["SIGBREAK", 130],
+  ["SIGHUP", 129],
+];
+
+/**
  * The variable the CLI uses to tell a foreground browser which directory the user
  * ran the command in.
  *

@@ -36,10 +36,56 @@ export const cmdModifier: "super" | "ctrl" =
 /**
  * Is the Cmd accelerator held? `noSuper` is the host's answer to "can you deliver
  * Super at all", which off Windows is what decides whether Alt stands in for it.
+ *
+ * Alt is deliberately not accepted where Ctrl is the accelerator: alt+t is not "new
+ * tab" on Windows, and Alt is a modifier pages use in their own right. The chords a
+ * console cannot spell with Ctrl are handled by [`zoomHeld`] and
+ * [`navigationArrow`], which name the two exceptions rather than widening this one.
  */
 export function cmdHeld(event: EngineKeyEvent, noSuper: boolean): boolean {
   if (cmdModifier === "ctrl") return event.mods.ctrl;
   return event.mods.super || (noSuper && event.mods.alt);
+}
+
+/**
+ * Is the zoom accelerator held?
+ *
+ * Apart from the letters, a Windows console cannot deliver Ctrl at all.
+ * `ENABLE_VIRTUAL_TERMINAL_INPUT` encodes Ctrl+a..z as the C0 bytes `0x01..=0x1a`
+ * and has no encoding for anything else: Ctrl+`=` arrives as a plain `=` with no
+ * modifier on it, and Ctrl+`-` as a plain `-`. So Ctrl+T, Ctrl+L, Ctrl+R, Ctrl+C
+ * and Ctrl+Q reach the browser and the zoom chords — Ctrl with `=`, `+`, `-`, `_`
+ * or `0` — cannot, however they are spelled. Zoom was unreachable.
+ *
+ * Alt chords are deliverable: an Esc-prefixed byte decodes as Alt+that-key
+ * (`terminal.rs`), so Alt+`=` and Alt+`-` arrive intact. Accepted only for the zoom
+ * keys, so Alt stays a page modifier everywhere else. Ctrl is still accepted, which
+ * costs nothing and is what a host that grows a real keyboard protocol would send.
+ */
+export function zoomHeld(event: EngineKeyEvent, noSuper: boolean): boolean {
+  if (cmdModifier === "ctrl") return event.mods.ctrl || event.mods.alt;
+  return cmdHeld(event, noSuper);
+}
+
+/**
+ * Back and forward, spelled the way a Windows console can deliver them.
+ *
+ * The bracket chords the other platforms use are unreachable here whatever the
+ * accelerator: Ctrl+`[` is `0x1b`, which is Escape; Ctrl+`]` is `0x1d`, which
+ * decodes as no key at all; and Alt+`[` / Alt+`]` are the CSI and OSC introducers,
+ * so the decoder is waiting for the rest of a sequence rather than reporting a key.
+ * Alt with an arrow has an encoding of its own — `CSI 1;3D` and `CSI 1;3C` — which
+ * survives intact, and is what a Windows browser binds for this anyway.
+ *
+ * Only where Ctrl is the accelerator, so the hosts that can deliver the brackets
+ * keep exactly the bindings they had.
+ */
+export function navigationArrow(event: EngineKeyEvent): "back" | "forward" | null {
+  if (cmdModifier !== "ctrl") return null;
+  if (!event.mods.alt || event.mods.ctrl || event.mods.super || event.mods.shift) return null;
+  if (event.key === "left") return "back";
+  if (event.key === "right") return "forward";
+  return null;
 }
 
 /** Cmd, plus the platforms that also accept a bare Ctrl for navigation keys. */

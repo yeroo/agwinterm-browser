@@ -43,8 +43,17 @@ export interface PathOptions {
  * to whoever can reach the directory. The Win32 pipe namespace has no directory and
  * no owner: it is machine-global, enumerable, and *creating* a name is unrestricted.
  * Without a user in the name, two people signed in to the same machine from the same
- * install collide -- the second browser's `listen` fails with EADDRINUSE -- and any
- * local process can take a name it can predict before its owner does.
+ * install collide -- the second browser's `listen` fails with EADDRINUSE.
+ *
+ * Collision avoidance is all this is. It is *not* a secret: `home` and the install
+ * root are both public paths, so the whole name is computable by any local process,
+ * and Node's `net` cannot put an ACL on a pipe. On a machine with another signed-in
+ * user, that user can take the name first (the browser then runs unadvertised and
+ * says so, `browser/src/registry.ts`) or answer on it, and `cli/src/control.ts` will
+ * write `{cmd, url, cwd}` to whoever holds it and parse whatever comes back. Making
+ * that impossible needs an unguessable name -- a per-install random secret persisted
+ * under `dataDir`, read by both halves -- or a challenge before the request payload.
+ * Neither is here; `control.ts` capping the reply size is the only thing that is.
  *
  * Derived from the home directory rather than the user name because that is what
  * `PathOptions` already carries and what already differs per profile, and hashed so

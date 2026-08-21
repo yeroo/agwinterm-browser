@@ -38,7 +38,7 @@ import type {
   PopupView,
 } from "../ui/types";
 import { normalizeUrl, searchOrUrl } from "../url";
-import { accelHeld, bindingLabel, clipboardHeld, cmdHeld, cmdModifier, defaultKeys, isRecordKey, listStep, matchesBinding, parseKeyBindings, recordKeyLabel } from "./keybindings";
+import { accelHeld, bindingLabel, clipboardHeld, cmdHeld, cmdModifier, defaultKeys, isRecordKey, listStep, matchesBinding, navigationArrow, parseKeyBindings, recordKeyLabel, zoomHeld } from "./keybindings";
 import type { KeyBinding } from "./keybindings";
 import { clampDevtoolsFraction, computeLayout, dividerFraction, recordBarHeight } from "./layout";
 import type { DevtoolsPlacement } from "./layout";
@@ -322,6 +322,20 @@ class Session {
     this.displayScale = this.hostDisplayScale();
     this.root = createRoot({
       tty: this.ctx.tty,
+      // The engine's own React devtools, off. It is not a feature the browser
+      // wants — it has Chromium's, on `--devtools-key` — and turning it on has a
+      // side effect that is invisible until something goes wrong:
+      // `installConsoleCapture` replaces `process.stdout.write` *and*
+      // `process.stderr.write` with an in-memory ring
+      // (`pixel-react/src/devtools/console-capture.ts`). `createRoot` enables it
+      // whenever the session holds the default bridge, and the Windows foreground
+      // shape has one session per process, so on Windows that is always and
+      // permanently. Everything the port writes to stderr after this line —
+      // `registry.ts`'s "not reachable from the command line", `onEngineExit`,
+      // `createSession`'s start failure, `main.tsx`'s top-level catch — went into
+      // the ring instead of into the log file `cli/src/main.ts` opens on fd 2, and
+      // a browser that came up unadvertised looked exactly like one that worked.
+      devtools: false,
       wrapper: this.terminal?.wrapper,
       sessionEnv: this.ctx.env,
       keyEventTypes: true,
@@ -435,6 +449,10 @@ class Session {
     // we should use 2 shortcuts for console, also not sure if console actually works as expected
     this.devtoolsBinding = binding("--devtools-key", defaultKeys.devtools);
     this.consoleBinding = binding("--console-key", defaultKeys.console);
+  }
+
+  private zoomHeld(event: EngineKeyEvent): boolean {
+    return zoomHeld(event, this.noSuper);
   }
 
   private cmdHeld(event: EngineKeyEvent): boolean {
@@ -838,7 +856,7 @@ class Session {
         this.shutdown();
         return;
       }
-      if (!this.noShortcuts && event.kind !== "release" && this.cmdHeld(event)) {
+      if (!this.noShortcuts && event.kind !== "release" && this.zoomHeld(event)) {
         const direction = zoomDirection(event.key);
         if (direction !== null) {
           this.applyZoom(direction);
@@ -956,7 +974,19 @@ class Session {
           browser?.forward();
           return;
         }
-        if (this.cmdHeld(event)) {
+        // The same two, spelled the way a console can deliver them. The bracket
+        // chords above are unreachable on Windows whatever the accelerator: Ctrl+`[`
+        // is `0x1b`, which is Escape, Ctrl+`]` is `0x1d`, which decodes as no key at
+        // all, and Alt+`[` / Alt+`]` are the CSI and OSC introducers. Alt with an
+        // arrow arrives intact as `CSI 1;3D` / `CSI 1;3C`, and is what a Windows
+        // browser binds for this anyway.
+        const navigate = navigationArrow(event);
+        if (navigate !== null) {
+          if (navigate === "back") browser?.back();
+          else browser?.forward();
+          return;
+        }
+        if (this.zoomHeld(event)) {
           const direction = zoomDirection(event.key);
           if (direction !== null) {
             this.applyZoom(direction);

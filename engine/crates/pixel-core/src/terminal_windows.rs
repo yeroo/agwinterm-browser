@@ -1380,14 +1380,30 @@ impl Terminal {
     ///
     /// Refusing it was not free. `set_clipboard` is reached through `?` from
     /// `engine/clipboard.rs`'s `begin_rich_capture` and `engine/doc.rs`'s
-    /// `InputAction::Copy`, so an `Unsupported` error unwound out of
-    /// `Engine::handle_event` → `Engine::pump`, which `pixel-node` treats as a
-    /// fatal engine exit: Ctrl+C in the address bar closed the browser. A
-    /// capability the host lacks must not be able to end the process.
+    /// `InputAction::Copy`, so an error unwinds out of `Engine::handle_event` →
+    /// `Engine::pump`, which `pixel-node` treats as a fatal engine exit: Ctrl+C in
+    /// the address bar closed the browser. A capability the host lacks must not be
+    /// able to end the process.
+    ///
+    /// Which is why *no* failure here is returned. Answering `io::Error::other`
+    /// instead of `Unsupported` changed the message and not the outcome: nothing on
+    /// that path inspects the kind (`grep Unsupported engine/`), so any `Err` still
+    /// ends the browser. And a failure is not hypothetical on Windows: the clipboard
+    /// is a single global lock, `arboard` gives up on `OpenClipboard` after five
+    /// tries at 5 ms, and a clipboard manager, RDP redirection or an Office
+    /// application holding it for 25 ms is ordinary. Losing a copy is a nuisance;
+    /// losing the browser because someone else was pasting is not a trade to make.
+    /// The failure is logged, where it can be read without costing the session.
     pub fn set_clipboard(&mut self, text: &str) -> io::Result<()> {
-        clipboard()?
-            .set_text(text.to_owned())
-            .map_err(clipboard_error)
+        if let Err(err) = clipboard()
+            .and_then(|mut board| board.set_text(text.to_owned()).map_err(clipboard_error))
+        {
+            crate::logging::warn(
+                "clipboard",
+                format!("the copy did not reach the Windows clipboard ({err})"),
+            );
+        }
+        Ok(())
     }
 
     /// The read half. There is no reply to wait for — the OS answers now — so the
@@ -2394,17 +2410,26 @@ mod tests {
         // fatal engine exit. Ctrl+C in the address bar closed the browser.
         //
         // What is asserted is the round trip, because "did not error" would also be
-        // true of a `set_clipboard` that quietly did nothing.
+        // true of a `set_clipboard` that quietly did nothing — and it now *is* true
+        // of one whose `OpenClipboard` lost a race, which is the whole point: the
+        // write can fail, and the engine must not learn about it through an `Err`.
         let mut term = Terminal::detached(Inbox::new(), None);
         let text = "winterm-browser clipboard round trip";
-        if let Err(err) = term.set_clipboard(text) {
-            // A machine with no window station (a service, some CI images) has no
-            // clipboard to reach. That is the one honest failure, and it must not be
-            // `Unsupported`, which is the kind the engine treats as fatal.
-            assert_ne!(err.kind(), io::ErrorKind::Unsupported, "{err}");
+        // The `expect` is the load-bearing assertion, and it bites hardest on the
+        // machines where the write genuinely fails: `engine/doc.rs`'s
+        // `InputAction::Copy` and `engine/clipboard.rs`'s `begin_rich_capture` take
+        // this through `?`, and `pixel-node` ends the process on any error out of
+        // `Engine::pump`. Nothing in between inspects the error *kind*, so "not
+        // `Unsupported`" was never a protection — the only safe answer is that there
+        // is no error to propagate at all.
+        term.set_clipboard(text)
+            .expect("a copy must never be able to end the engine");
+        // A machine with no window station (a service, some CI images) has no
+        // clipboard to reach, and the read is where that shows. Nothing was written
+        // there, so there is no round trip to assert.
+        if term.request_clipboard().is_err() {
             return;
         }
-        term.request_clipboard().expect("reading it back");
         assert_eq!(
             term.poll_event(Some(Duration::from_millis(0)))
                 .expect("the parked reply needs no console"),

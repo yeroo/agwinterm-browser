@@ -108,6 +108,30 @@ describe("where the clear is addressed", () => {
     assert.equal(JSON.parse(request.line).target, "session-1");
   });
 
+  it("names the window the pane is in when the host names one", () => {
+    // A content verb with no `window` resolves against the *frontmost* window, and
+    // each window searches only its own panes (`ControlServer.cs`,
+    // `Program.ControlHost.cs`). Without this the clear misses whenever the user
+    // has another agwinterm window in front, and the dead browser's picture stays.
+    const request = pane.paneClearRequest(
+      inPane({ AGWINTERM_SESSION_ID: "abc-123", AGWINTERM_WINDOW_ID: "win-7" }),
+    );
+    assert.deepEqual(JSON.parse(request.line), {
+      cmd: "image.clear",
+      target: "abc-123",
+      window: "win-7",
+    });
+  });
+
+  it("leaves the window out when the host names none", () => {
+    // Hosts predating multi-window set nothing, and an empty selector is not the
+    // same as an absent one.
+    const request = pane.paneClearRequest(
+      inPane({ AGWINTERM_SESSION_ID: "abc-123", AGWINTERM_WINDOW_ID: "  " }),
+    );
+    assert.deepEqual(JSON.parse(request.line), { cmd: "image.clear", target: "abc-123" });
+  });
+
   it("falls back to the default pipe name, as agwintermctl does", () => {
     const request = pane.paneClearRequest(inPane({ AGWINTERM_SESSION_ID: "abc" }));
     assert.equal(request.endpoint, `${PIPE_PREFIX}agwinterm`);

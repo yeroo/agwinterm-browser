@@ -25,7 +25,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 418 Rust tests and 254 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 421 Rust tests and 266 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -84,7 +84,9 @@ upstream's daemon cannot serve N panes here at all. The reasoning and the measur
 
 **Ctrl is the accelerator** — Ctrl+T, Ctrl+L, Ctrl+R, Ctrl+C to copy, Ctrl+Q to quit. There is no
 Super key to bind, because agwinterm implements no kitty keyboard protocol. Ctrl+Shift+C is left to
-the terminal.
+the terminal. **Zoom is Alt+`=` / Alt+`-` / Alt+`0`, and back and forward are Alt+Left /
+Alt+Right**: a Windows console encodes Ctrl only with a letter, so Ctrl+`=` reaches the browser as a
+bare `=` and Ctrl+`[` as Escape. Alt is accepted for those two and nowhere else.
 
 ### Getting a sharp picture
 

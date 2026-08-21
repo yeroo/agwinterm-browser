@@ -438,7 +438,17 @@ async function openInForeground(argv: string[]): Promise<number> {
   const handlers = new Map<NodeJS.Signals, () => void>();
   const stopped = new Promise<number>((resolve) => {
     for (const [signal, code] of FOREGROUND_SIGNALS) {
-      const handler = () => setTimeout(() => resolve(code), FOREGROUND_SIGNAL_GRACE_MS);
+      const handler = () => {
+        // `unref` for the same reason the listeners are removed below, and it has
+        // to be here rather than there: a pending timer keeps Node's event loop
+        // alive exactly as a signal listener does, and this one outlives the race.
+        // Ctrl+C reaches the browser too, so `exited` normally wins in a couple of
+        // hundred milliseconds — and without this the CLI then sat on the grace
+        // timer for the rest of the two seconds before the shell got its prompt
+        // back, once per Ctrl+C. The race does not need the loop held open: if the
+        // timer is the only thing left, there is nothing to wait for anyway.
+        setTimeout(() => resolve(code), FOREGROUND_SIGNAL_GRACE_MS).unref();
+      };
       handlers.set(signal, handler);
       process.on(signal, handler);
     }

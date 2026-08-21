@@ -98,6 +98,40 @@ describe("the foreground session", () => {
     assert.match(foreground, /onClose:/);
     assert.match(foreground, /app\.exit\(code\)/);
   });
+
+  it("survives every signal the CLI survives, and shuts down on each", () => {
+    // The two are attached to the same console and receive the same signal. A
+    // signal the CLI listens for and the browser does not is the case where Node
+    // terminates the browser outright: no `flushStorageData`, no `Registry.dispose`
+    // (an `instances` row left behind with a pid Windows will reissue) and no
+    // engine `Drop` (the pane keeps the last frame). SIGBREAK is Ctrl+Break, which
+    // has no unix equivalent and was the one missing.
+    assert.deepEqual(
+      entry.FOREGROUND_SIGNALS.map(([signal]) => signal),
+      ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"],
+    );
+    assert.deepEqual(
+      entry.FOREGROUND_SIGNALS.map(([, code]) => code),
+      [130, 143, 130, 129],
+    );
+    assert.match(
+      foreground,
+      /for \(const \[signal, code\] of FOREGROUND_SIGNALS\) process\.on\(signal, \(\) => stop\(code\)\)/,
+      "the foreground shape registers signals by hand again; the table is the point",
+    );
+  });
+
+  it("agrees with the CLI's list, which is the other end of the same decision", () => {
+    const launch = readSource("cli", "src", "launch.ts");
+    const pairs = (source) =>
+      [...source.matchAll(/\["(SIG[A-Z]+)",\s*(\d+)\]/g)].map(([, signal, code]) => [
+        signal,
+        Number(code),
+      ]);
+    const cli = pairs(launch.slice(launch.indexOf("FOREGROUND_SIGNALS")));
+    assert.ok(cli.length > 0, "cli/src/launch.ts no longer spells out the signal table");
+    assert.deepEqual(cli, entry.FOREGROUND_SIGNALS.map(([signal, code]) => [signal, code]));
+  });
 });
 
 describe("the Electron binary the decision was measured against", () => {

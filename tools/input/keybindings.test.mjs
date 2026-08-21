@@ -79,6 +79,34 @@ describe("Windows: Ctrl is the accelerator", () => {
     assert.equal(win32.cmdHeld(press("t", "super"), NO_SUPER), false);
   });
 
+  it("reaches zoom through Alt, which is the only modifier the console can carry", () => {
+    // Apart from a..z there is no Ctrl encoding at all: under
+    // `ENABLE_VIRTUAL_TERMINAL_INPUT`, Ctrl+`=` arrives as a plain `=`. So the zoom
+    // chords could not be pressed, however they were spelled — the one accelerator
+    // in the set that is not a letter. Alt+`=` arrives as an Esc-prefixed byte and
+    // decodes intact, so zoom (and only zoom) also answers to Alt.
+    for (const key of ["=", "+", "-", "_", "0"]) {
+      assert.equal(win32.zoomHeld(press(key, "alt"), NO_SUPER), true, key);
+      assert.equal(win32.zoomHeld(press(key, "ctrl"), NO_SUPER), true, key);
+    }
+    // Widening zoom must not widen the accelerator: alt+t is still not "new tab".
+    assert.equal(win32.cmdHeld(press("t", "alt"), NO_SUPER), false);
+    assert.equal(win32.accelHeld(press("t", "alt"), NO_SUPER), false);
+    assert.equal(win32.zoomHeld(press("=", "shift"), NO_SUPER), false);
+  });
+
+  it("reaches back and forward through Alt and an arrow", () => {
+    // Ctrl+`[` is `0x1b`, which is Escape; Ctrl+`]` is `0x1d`, which decodes as no
+    // key; and Alt+`[` / Alt+`]` are the CSI and OSC introducers. `CSI 1;3D` is the
+    // one spelling that survives, and it is what a Windows browser binds anyway.
+    assert.equal(win32.navigationArrow(press("left", "alt")), "back");
+    assert.equal(win32.navigationArrow(press("right", "alt")), "forward");
+    assert.equal(win32.navigationArrow(press("left")), null);
+    assert.equal(win32.navigationArrow(press("left", "alt", "ctrl")), null);
+    assert.equal(win32.navigationArrow(press("left", "alt", "shift")), null);
+    assert.equal(win32.navigationArrow(press("up", "alt")), null);
+  });
+
   it("treats Ctrl as the navigation accelerator too", () => {
     assert.equal(win32.accelHeld(press("l", "ctrl"), NO_SUPER), true);
     assert.equal(win32.accelHeld(press("l", "alt"), NO_SUPER), false);
@@ -131,6 +159,26 @@ describe("macOS is untouched", () => {
       { super: true, ctrl: false, alt: false, shift: false, key: "p" },
     ]);
     assert.equal(darwin.bindingLabel(darwin.parseKeyBindings("cmd+p")), "cmd+p");
+  });
+});
+
+describe("the two console-shaped bindings do not leak off Windows", () => {
+  it("leaves zoom and the arrows exactly as they were on macOS and Linux", () => {
+    for (const platform of [darwin, linux]) {
+      assert.equal(platform.navigationArrow(press("left", "alt")), null);
+      assert.equal(platform.navigationArrow(press("right", "alt")), null);
+      // `zoomHeld` is `cmdHeld` off Windows, which is what the zoom sites used to
+      // call directly.
+      for (const held of [["super"], ["alt"], ["ctrl"], []]) {
+        for (const noSuper of [true, false]) {
+          assert.equal(
+            platform.zoomHeld(press("=", ...held), noSuper),
+            platform.cmdHeld(press("=", ...held), noSuper),
+            `${held.join("+") || "none"} noSuper=${noSuper}`,
+          );
+        }
+      }
+    }
   });
 });
 
