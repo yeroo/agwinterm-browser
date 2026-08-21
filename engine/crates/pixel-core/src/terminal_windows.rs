@@ -95,6 +95,7 @@ use windows_sys::Win32::System::Console::{
 
 use crate::agwinterm::{self, ControlClient};
 use crate::canvas::Canvas;
+use crate::frame_file;
 use crate::terminal::{
     ColorSlot, Event, RawEvent, SessionEnv, TerminalColors, Waker, WindowSize, parse_event_kitty,
     parse_osc_color,
@@ -704,6 +705,10 @@ pub struct Terminal {
     /// Set once the environment has been found not to describe an agwinterm pane,
     /// so the explanation is logged once rather than per frame.
     host_absent: bool,
+    /// The file-based frame path, created with the first frame. Lazily, because a
+    /// terminal that never draws should not leave a directory behind, and because
+    /// creating it is the one part of `draw` that can fail before any pixels move.
+    frames: Option<frame_file::FramePublisher>,
     color_query: Option<ColorQuery>,
     waker: Option<Waker>,
 }
@@ -765,6 +770,7 @@ impl Terminal {
             cell: None,
             host: None,
             host_absent: false,
+            frames: None,
             color_query: None,
             waker: None,
         })
@@ -800,6 +806,7 @@ impl Terminal {
             cell: None,
             host: None,
             host_absent: false,
+            frames: None,
             color_query: None,
             waker: None,
         }
@@ -829,8 +836,41 @@ impl Terminal {
         Ok(())
     }
 
-    pub fn draw(&mut self, _canvas: &Canvas) -> io::Result<usize> {
-        unimplemented("drawing a frame", "Task 7")
+    /// Puts a frame on screen: PNG to a file of its own, then one `image.frame`
+    /// request pointing the host at it. [`crate::frame_file`] documents why the
+    /// path is never reused.
+    ///
+    /// Two of the failures here are not failures of anything. A pane with no room
+    /// in it is a legitimate state — the frame is skipped and zero bytes are
+    /// reported, exactly as if it had been coalesced away — and so is a resize
+    /// arriving between the composite and the publish. Everything else is
+    /// reported: a frame that silently did not appear is the failure mode this
+    /// whole path is shaped around.
+    pub fn draw(&mut self, canvas: &Canvas) -> io::Result<usize> {
+        let cell = self.cell_size()?.unwrap_or(agwinterm::FALLBACK_CELL);
+        // `size()` reads the console, which is the pane; `None` when there is no
+        // console at all, in which case the canvas is the only geometry there is.
+        let pane = self.size().ok().map(|window| (window.cols, window.rows));
+        let span = match frame_file::cell_span((canvas.width, canvas.height), cell, pane) {
+            Ok(span) => span,
+            Err(frame_file::TooSmall) => return Ok(0),
+        };
+
+        // Taken out of `self` for the frame, because publishing borrows the host
+        // client — which also lives in `self` — at the same time.
+        let mut frames = match self.frames.take() {
+            Some(frames) => frames,
+            None => frame_file::FramePublisher::new()?,
+        };
+        let published = match self.host() {
+            Some(client) => frames.publish(client, canvas, span),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "there is no agwinterm pane to draw into; see the earlier log line                  for which variable is missing",
+            )),
+        };
+        self.frames = Some(frames);
+        published
     }
 
     pub fn read_event(&mut self) -> io::Result<Event> {
@@ -1840,6 +1880,39 @@ mod tests {
         );
     }
 
+    // -- drawing ----------------------------------------------------------
+
+    #[test]
+    fn a_frame_with_no_pane_to_put_it_in_is_reported_rather_than_swallowed() {
+        // The publisher and the pipe are exercised in `frame_file`, against a real
+        // named-pipe server. What is checked here is the seam: that `draw` no
+        // longer reports `Unsupported`, and that a browser running outside
+        // agwinterm gets an error instead of a frame that goes nowhere.
+        let mut term = Terminal::detached(Inbox::new(), None);
+        let err = term
+            .draw(&Canvas::new(16, 16))
+            .expect_err("there is no pane in an empty environment");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected);
+        assert!(
+            err.to_string().contains("agwinterm"),
+            "the message does not name what is missing: {err}",
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_area_is_skipped_rather_than_failed() {
+        // A pane dragged down to nothing is a legitimate state, and so is the
+        // canvas that goes with it. Skipping costs zero bytes and no error; the
+        // proof that it never reached the pipe is that there is no pipe here and
+        // the previous test shows that would have failed.
+        let mut term = Terminal::detached(Inbox::new(), None);
+        assert_eq!(
+            term.draw(&Canvas::new(0, 0))
+                .expect("nothing to draw is not a failure"),
+            0,
+        );
+    }
+
     #[test]
     fn what_later_tasks_own_still_names_the_task_that_will_implement_it() {
         let mut term = Terminal::detached(Inbox::new(), None);
@@ -1851,7 +1924,6 @@ mod tests {
                 "{what}: the message must name the task that will implement it, got {err}",
             );
         };
-        fails(term.draw(&Canvas::new(4, 4)).map(|_| ()), "draw");
         fails(term.set_pointer_shape("pointer"), "set_pointer_shape");
         fails(term.set_clipboard("text"), "set_clipboard");
         fails(term.request_clipboard(), "request_clipboard");

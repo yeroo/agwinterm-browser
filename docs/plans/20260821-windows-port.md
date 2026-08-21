@@ -614,25 +614,96 @@ keep-unchanged modules. [triage: major]
 
 ### Task 7: File-based frame output (bring-up path)
 
-- [ ] implement the output half using the **existing** `image.frame`, publishing with `cols`/`rows`
+- [x] implement the output half using the **existing** `image.frame`, publishing with `cols`/`rows`
       set to the pane's cell span
-- [ ] **write each frame to a unique path, or write-then-atomically-rename.** Do not reuse one path.
+      — `pixel-core/src/frame_file.rs`, gated `#[cfg(windows)]`: a canvas becomes a PNG, the PNG
+      becomes a file, and one `{"cmd":"image.frame","target":<pane>,"args":{"images":[…]}}` request
+      points the host at it through the Task 6 client. `Terminal::draw` is that call and no longer
+      reports `Unsupported`. `cell_span` is `canvas.div_ceil(cell)`, the same arithmetic the unix
+      backend's `grid_for` does, **clamped to the pane**: a resize landing between the composite and
+      the publish would otherwise place an image running off the bottom of the pane, and one
+      squashed frame is the better of the two. The cell size is the one `cell_size` cached, so the
+      span, the canvas and the pointer are all derived from a single number.
+      ➕ **agwinterm's reply is checked, not discarded.** `image.frame` answers
+      `frame:<placed>/<transmitted>` (`ControlServer.cs:482`); transmitted below placed means the
+      host placed an image it did not read our bytes for — the pane is then showing a stale frame
+      with nothing in any log. It is warned about once, naming the fact that unique paths make
+      "it looked unchanged" impossible, so the remaining cause is a failed read.
+- [x] **write each frame to a unique path, or write-then-atomically-rename.** Do not reuse one path.
       agwinterm's phase 1 does `ContentSignature(path)` then `File.ReadAllBytes(path)` synchronously
       while a free-running producer is already writing the next frame: `ReadAllBytes` either hits a
       sharing violation — swallowed by the bare `catch { data = null; }` at `ControlServer.cs:458`,
       silently re-placing the stale image — or returns a partial PNG the decoder then fails on.
       [triage: major]
-- [ ] **drop the id-reuse-for-cache rationale.** `ContentSignature` is
+      — unique path, which subsumes the rename: `frame-<seq>.png` under a private directory, `seq`
+      monotonic and never rewound by a failed frame. The host only learns a path **after** the bytes
+      are all there and the handle is closed, so there is nothing left to race. Files are opened
+      `create_new`, so a sequence that somehow went backwards fails the frame rather than
+      overwriting a file the host may be reading.
+- [x] **drop the id-reuse-for-cache rationale.** `ContentSignature` is
       `mtime ^ (length<<1) ^ hash(path)` and never reads bytes. Every browser frame differs, so the
       cache never skips; worse, two consecutive frames of equal PNG length within the filesystem's
       timestamp granularity produce the *same* signature and the new frame is silently dropped.
       [triage: major]
-- [ ] clean up the resulting file churn, and survive a failed frame write
-- [ ] keep this path permanently as the fallback and as the baseline the shm path is diffed against
-- [ ] write tests for cell-span computation, including a pane too small to place into
-- [ ] write tests for unique-path generation and cleanup under sustained frame production
-- [ ] write tests for the publish path against the Task 6 pipe fixture
-- [ ] run tests — must pass before Task 8
+      — dropped, and the id is now fixed at `FRAME_IMAGE_ID = 1` for the *opposite* reason: the path
+      is what varies, so the signature always differs, and a rotating id would leave the emulator
+      holding one texture per frame instead of one. `frame_args` is pinned by a vendor-check test
+      that fails if the id is ever derived from the frame sequence again.
+- [x] clean up the resulting file churn, and survive a failed frame write
+      — three layers, because each covers a failure the others cannot. `RETAINED = 3` frames stay
+      and the rest are deleted as the next frame goes out (three rather than one because
+      `ControlClient::request` replays a dropped request on a fresh connection, re-sending the same
+      path). `FrameDir`'s `Drop` removes the directory. `sweep_stale` removes the directories of
+      processes that never got to run their `Drop`, **by age rather than by liveness** — a pid check
+      is racy, and a directory in use gains a file every frame, so nothing live is ever an hour old.
+      A failed write retries once if the directory itself disappeared (the temp dir is swept by the
+      OS, by cleaners, and by another browser's sweep); any other failure is reported and costs
+      exactly one frame, since the sequence has already moved on. A refused or undelivered frame's
+      file is removed immediately rather than retained — it is litter, not history.
+- [x] keep this path permanently as the fallback and as the baseline the shm path is diffed against
+      — recorded in the module docs and pinned by a vendor-check test: Task 12 layers
+      `image.frameshm` over `frame_file` rather than replacing it, so everything picture-shaped
+      (`cell_span`, `encode_png`) lives here for both to share, and the verb is named in one place.
+      ⚠️ **The two paths must produce the same picture from the same canvas**, or the diff Task 12
+      is specified to do compares nothing.
+- [x] write tests for cell-span computation, including a pane too small to place into
+      — the steady state (canvas sized `cols*cw × rows*ch` comes back out as exactly the pane), a
+      partial cell rounding up rather than leaving the pane's own text showing through the last row,
+      the clamp, and four too-small cases: zero cols, zero rows, and either canvas dimension zero.
+      `TooSmall` is a distinct type rather than an `io::Error` because a pane dragged down to nothing
+      is a legitimate state — `draw` skips the frame and reports zero bytes instead of failing.
+      Plus a zero cell size, which `cell_size` never returns but which is a division here.
+- [x] write tests for unique-path generation and cleanup under sustained frame production
+      — twelve frames producing twelve paths no two of which repeat, asserted from **the host's copy
+      of the path** (parsed back out of the request the fixture recorded) rather than from the
+      publisher's own bookkeeping, with the directory left holding exactly `RETAINED` files. Plus the
+      directory going with its publisher, the sweep keeping a fresh directory and something that was
+      never ours while removing a stale one, and a directory removed out from under a live publisher
+      costing no frames while a write that retrying cannot fix costs exactly one.
+      ➕ **The test canvas is deliberately not a flat colour.** A constant image encodes to the same
+      PNG length every time, which is the very collision unique paths exist to make impossible — a
+      fixture that never varied could not tell the difference.
+- [x] write tests for the publish path against the Task 6 pipe fixture
+      — the fixture moved out of `agwinterm.rs`'s `mod tests` into a sibling `#[cfg(test)]
+      pub(crate) mod fixture`, because a frame reaching agwinterm is a claim about bytes on a pipe
+      and a second mock would be a second guess about Win32 rather than a second check of the same
+      one. Covered against a real `CreateNamedPipeW` server: the exact request bytes (verb, pane
+      target, id, `row`/`col`/`cols`/`rows`), the file the host was pointed at being on disk and
+      decoding to a whole PNG of the canvas's size, a Windows path surviving the JSON it travels in
+      (an unescaped `\` is not a syntax error on the wire — it is a *different path*, and the host
+      answers "not found"), a refusal leaving no file behind, a hangup replaying the same path with
+      the file still there to read, and `frame:1/0` being complained about once.
+- [x] run tests — must pass before Task 8 — **323 Rust tests pass on Windows** (0 failed; 303
+      before, +20) and **53 node tests** (49 before, +4 pinning the two decisions that compile
+      perfectly well when reversed: the unique path, and the id that is not rotated). `cargo clippy
+      -p pixel-core --all-targets` is at the **5** pre-existing warnings; `cargo check -p pixel-core
+      --all-targets --target x86_64-unknown-linux-gnu` is clean, since the module is
+      `#[cfg(windows)]`. `cargo fmt --all --check`'s residual is **173 hunks, identical to HEAD's**,
+      with `frame_file.rs` fmt-clean. `cargo check --workspace` still reports exactly the 2
+      `pixel-node` errors Task 4 handed to Task 8.
+      ➕ **`frame_file.rs` is declared in `tools/vendor-check`'s `PORT_ADDED_FILES`**, the same way
+      `agwinterm.rs` had to be: it is what `terminal.rs`'s Kitty-escape `draw` becomes on Windows,
+      not vendored code.
 
 ### Task 8: `pixel-node` on Windows
 

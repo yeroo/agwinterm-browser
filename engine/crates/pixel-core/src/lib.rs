@@ -7,6 +7,12 @@ mod canvas;
 pub mod clipboard_image;
 mod desc;
 mod engine;
+// The file-based frame path: a canvas to a PNG on disk, and the `image.frame`
+// request that points agwinterm at it. Windows-only for the same reason
+// `agwinterm` is - it is the output half of the port, where unix has `herdr` and
+// the Kitty escapes.
+#[cfg(windows)]
+mod frame_file;
 #[cfg(unix)]
 pub mod ghostty;
 #[cfg(unix)]

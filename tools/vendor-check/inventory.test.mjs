@@ -47,9 +47,16 @@ const UNIX_BOUND_MODULES = ["ghostty.rs", "herdr.rs", "terminal.rs"];
  * transport and the only source of pane geometry there is on Windows — the
  * analogue of `herdr.rs` on unix, which is one of the three modules the port
  * replaces rather than keeps.
+ *
+ * `frame_file.rs` is Task 7: the file-based frame path that rides on it — a canvas
+ * to a PNG on disk and the `image.frame` request that points agwinterm at the file.
+ * It is what `terminal.rs`'s Kitty-escape `draw` becomes on Windows, where ConPTY
+ * strips the escapes; Task 12's shared-memory path is layered over it rather than
+ * replacing it.
  */
 const PORT_ADDED_FILES = [
   "agwinterm.rs",
+  "frame_file.rs",
   "terminal_backend.rs",
   "terminal_types.rs",
   "terminal_windows.rs",
@@ -647,6 +654,85 @@ describe("the agwinterm control-pipe client", () => {
       [],
       "a bare (16, 32) reappeared in the Windows backend's code instead of going " +
         "through agwinterm::FALLBACK_CELL",
+    );
+  });
+});
+
+describe("the file-based frame path", () => {
+  // Task 7. Two of its decisions are the kind that compile perfectly well when
+  // reversed, and both were reversed in the design that preceded it: reusing one
+  // path per frame, and rotating the image id to exploit the host's cache. A Rust
+  // test can show the current code does the right thing; only this can show the
+  // wrong thing did not come back.
+  const frames = read("frame_file.rs");
+  const windows = read("terminal_windows.rs");
+
+  it("gives every frame a path no frame has had before", () => {
+    // agwinterm's phase 1 reads the file synchronously while a free-running
+    // producer writes the next frame. Reusing a path means either a sharing
+    // violation — swallowed by the bare `catch` at ControlServer.cs:458, which
+    // silently re-places the stale image — or a truncated PNG.
+    assert.match(
+      frames,
+      /fn next_path\(&mut self\) -> PathBuf \{[\s\S]*?self\.seq \+= 1;/,
+      "the frame path is no longer derived from a sequence that only goes up",
+    );
+    assert.ok(
+      frames.includes(".create_new(true)"),
+      "frames are written with a call that would silently overwrite an existing " +
+        "file, so a repeated path would race the host's read instead of failing",
+    );
+  });
+
+  it("does not rotate the image id to court the host's cache", () => {
+    // ContentSignature is mtime ^ (length << 1) ^ hash(path) and never reads a
+    // byte, so the cache cannot help a browser frame — and *can* drop one, when
+    // two consecutive frames of equal length land inside the timestamp
+    // granularity. The id therefore stays put and the path is what varies.
+    assert.ok(
+      frames.includes("const FRAME_IMAGE_ID: u32 = 1;"),
+      "the one fixed image id is gone; check nothing started rotating ids",
+    );
+    const built = frames.match(/fn frame_args\([\s\S]*?[\r\n]\}/);
+    assert.ok(built, "frame_file.rs no longer builds the image.frame args");
+    assert.ok(
+      built[0].includes("FRAME_IMAGE_ID"),
+      "the request's id is no longer the fixed one",
+    );
+    assert.doesNotMatch(
+      built[0],
+      /self\.seq|% *FRAME_SLOTS/,
+      "the image id is derived from the frame sequence again",
+    );
+  });
+
+  it("keeps the churn bounded and does not leave it behind", () => {
+    for (const [what, needle] of [
+      ["a retention limit", "const RETAINED: usize = 3;"],
+      ["the reaper", "fn reap(&mut self)"],
+      ["the drop that removes the directory", "impl Drop for FrameDir"],
+      ["the sweep for directories a crash left", "fn sweep_stale("],
+    ]) {
+      assert.ok(frames.includes(needle), `${what} is gone from frame_file.rs`);
+    }
+  });
+
+  it("is the Windows backend's draw, and stays the fallback", () => {
+    assert.ok(
+      windows.includes("frames.publish(client, canvas, span)"),
+      "the Windows backend no longer draws through the file-based path",
+    );
+    assert.doesNotMatch(
+      windows,
+      /fn draw\(&mut self, _canvas: &Canvas\)/,
+      "draw is back to ignoring its canvas",
+    );
+    // Task 12 layers image.frameshm over this path rather than replacing it, and
+    // diffs against it. A frame_file.rs that stops being reachable would make
+    // that comparison vacuous.
+    assert.ok(
+      frames.includes('pub(crate) const FRAME_CMD: &str = "image.frame";'),
+      "the verb this path uses is no longer named in one place",
     );
   });
 });

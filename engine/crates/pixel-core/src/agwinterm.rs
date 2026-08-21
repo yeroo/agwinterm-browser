@@ -356,7 +356,7 @@ fn unquote(raw: &str) -> Option<String> {
 
 /// Appends a JSON string literal. Control characters go out as `\uXXXX` rather
 /// than raw, because a newline inside a value would split the request line in two.
-fn push_quoted(out: &mut String, value: &str) {
+pub(crate) fn push_quoted(out: &mut String, value: &str) {
     out.push('"');
     for ch in value.chars() {
         match ch {
@@ -620,20 +620,15 @@ fn parse_cell_px(raw: &str) -> Option<(u32, u32)> {
 }
 
 #[cfg(test)]
-mod tests {
-    //! Two kinds of test here, and the split is deliberate.
+pub(crate) mod fixture {
+    //! A real named-pipe server, in this process, scripted turn by turn.
     //!
-    //! The envelope, the addressing and the metrics decision are pure functions of
-    //! text and environment, and are tested as such. Everything that claims
-    //! something about *a named pipe* is driven against a real
-    //! `CreateNamedPipeW` server in this process — round-trip, an error envelope,
-    //! a server that hangs up mid-request, and a pipe nobody is serving — because
-    //! the interesting cases are precisely the ones a mock would encode a guess
-    //! about.
+    //! It lives beside the client rather than inside `mod tests` because Task 7's
+    //! frame publisher is tested against it too: the claim that a frame reaches
+    //! agwinterm is a claim about bytes on a pipe, and a second mock would be a
+    //! second guess about Win32 rather than a second check of the same one.
 
     use super::*;
-    use std::collections::HashMap;
-    use std::io::Read;
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
@@ -648,28 +643,9 @@ mod tests {
     const ERROR_PIPE_CONNECTED: i32 = 535;
     const PIPE_UNLIMITED_INSTANCES: u32 = 255;
 
-    fn env_of(pairs: &[(&str, &str)]) -> SessionEnv {
-        SessionEnv::of_session(
-            pairs
-                .iter()
-                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
-                .collect::<HashMap<_, _>>(),
-        )
-    }
-
-    fn pane_env() -> SessionEnv {
-        env_of(&[
-            (ENABLED_VAR, "1"),
-            (PIPE_VAR, "agwinterm-dev"),
-            (SESSION_VAR, "s3"),
-        ])
-    }
-
-    // -- the fixture ------------------------------------------------------
-
     /// What the server does with the next request it reads.
     #[derive(Clone, Debug)]
-    enum Turn {
+    pub(crate) enum Turn {
         /// Answer with this line.
         Reply(String),
         /// Read the request and close the connection without answering — the
@@ -684,14 +660,14 @@ mod tests {
     /// exactly "the connection died and the client reconnected". Requests are
     /// recorded before the reply goes out, so an assertion that sees the reply can
     /// rely on seeing the request.
-    struct PipeServer {
-        name: String,
+    pub(crate) struct PipeServer {
+        pub(crate) name: String,
         requests: Arc<Mutex<Vec<String>>>,
         thread: Option<JoinHandle<()>>,
     }
 
     impl PipeServer {
-        fn scripted(turns: Vec<Turn>) -> Self {
+        pub(crate) fn scripted(turns: Vec<Turn>) -> Self {
             static SEQ: AtomicU32 = AtomicU32::new(0);
             let name = format!(
                 "pixel-core-test-{}-{}",
@@ -719,19 +695,26 @@ mod tests {
             }
         }
 
-        /// A server that answers every request with the same line.
-        fn always(reply: &str) -> Self {
-            Self::scripted(vec![Turn::Reply(reply.to_owned()); 8])
+        /// A server that answers every request with the same line, eight times —
+        /// enough for any single conversation, and finite so a test that loops
+        /// forever fails rather than hangs.
+        pub(crate) fn always(reply: &str) -> Self {
+            Self::answering(reply, 8)
         }
 
-        fn client(&self) -> ControlClient {
+        /// The same, for a test that knows how many requests it will make.
+        pub(crate) fn answering(reply: &str, turns: usize) -> Self {
+            Self::scripted(vec![Turn::Reply(reply.to_owned()); turns])
+        }
+
+        pub(crate) fn client(&self) -> ControlClient {
             ControlClient::to(HostTarget {
                 pipe: self.name.clone(),
                 session: "s3".to_owned(),
             })
         }
 
-        fn requests(&self) -> Vec<String> {
+        pub(crate) fn requests(&self) -> Vec<String> {
             self.requests.lock().expect("no test panics here").clone()
         }
     }
@@ -846,6 +829,41 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Two kinds of test here, and the split is deliberate.
+    //!
+    //! The envelope, the addressing and the metrics decision are pure functions of
+    //! text and environment, and are tested as such. Everything that claims
+    //! something about *a named pipe* is driven against a real
+    //! `CreateNamedPipeW` server in this process — round-trip, an error envelope,
+    //! a server that hangs up mid-request, and a pipe nobody is serving — because
+    //! the interesting cases are precisely the ones a mock would encode a guess
+    //! about.
+
+    use super::fixture::{PipeServer, Turn};
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Read;
+
+    fn env_of(pairs: &[(&str, &str)]) -> SessionEnv {
+        SessionEnv::of_session(
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    fn pane_env() -> SessionEnv {
+        env_of(&[
+            (ENABLED_VAR, "1"),
+            (PIPE_VAR, "agwinterm-dev"),
+            (SESSION_VAR, "s3"),
+        ])
     }
 
     // -- host detection ---------------------------------------------------
