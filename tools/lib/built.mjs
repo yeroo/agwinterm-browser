@@ -18,7 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-/** The newest mtime under `dir`, or 0 if it does not exist. */
+/** The newest mtime under `dir`, which the caller has already established exists. */
 function newestUnder(dir) {
   let newest = 0;
   const walk = (at) => {
@@ -50,7 +50,17 @@ export function requireBuilt(repo, builtRelative, sourceRelative, buildCommand) 
       `${builtRelative} is missing — this suite tests the built package. Run: ${buildCommand}`,
     );
   }
-  const source = newestUnder(path.join(repo, sourceRelative));
+  // `newestUnder` swallows every `readdirSync` failure, including one on the root
+  // it was handed, and answers 0 — which compares older than any build and makes
+  // the staleness check below pass unconditionally. So a `sourceRelative` that has
+  // been renamed, moved or mistyped would silently switch off the one thing this
+  // module exists to do. Establish it resolves first, uncaught: there is no reading
+  // of "the sources are not there" that this function should tolerate.
+  const sourceRoot = path.join(repo, sourceRelative);
+  if (!fs.statSync(sourceRoot).isDirectory()) {
+    throw new Error(`${sourceRelative} is not a directory — nothing to compare ${builtRelative} against`);
+  }
+  const source = newestUnder(sourceRoot);
   if (source > fs.statSync(built).mtimeMs) {
     throw new Error(
       `${builtRelative} is older than ${sourceRelative} — this suite would pass ` +

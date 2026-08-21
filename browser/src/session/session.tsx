@@ -16,7 +16,6 @@ import {
 } from "../page/browser-session";
 import type { DownloadProgress } from "../page/browser-session";
 import { BrowserController } from "../page/controller";
-import { setKeyReleaseReporting } from "../page/input";
 import { initOffscreenMode } from "../page/offscreen";
 import { initialBrowserState } from "../page/types";
 import type { BrowserState, BrowserSurfaceLayout } from "../page/types";
@@ -181,6 +180,13 @@ class Session {
   private devtoolsBinding: KeyBinding[] = [];
   private consoleBinding: KeyBinding[] = [];
   private noSuper = false;
+  /**
+   * Whether *this* session's terminal reports key releases. Read by every
+   * `PageInput` this session owns; see `applyKeyBindings`. `false` until probed,
+   * which is the safe default — a synthesized release is harmless on a host that
+   * sends real ones, a missing one holds a key down until the page loses focus.
+   */
+  private kittyKeyboard = false;
   private readonly tabs: TabManager;
   private readonly fallbackState: BrowserState;
 
@@ -271,6 +277,7 @@ class Session {
             this.tabsAsPopups,
             this.clipboardRead,
             this.ctx.key,
+            () => this.kittyKeyboard,
             onState,
           ),
         onActivated: () => {
@@ -415,8 +422,12 @@ class Session {
   private applyKeyBindings(kittyKeyboard: boolean) {
     this.noSuper = !kittyKeyboard;
     // The kitty protocol is the only thing that reports key *releases*, so its
-    // absence is also what tells `PageInput` to close each press itself.
-    setKeyReleaseReporting(kittyKeyboard);
+    // absence is also what tells `PageInput` to close each press itself. Held on
+    // the session, not on the module: a daemon runs one session per connected
+    // terminal in a single process (`browser/src/daemon.ts`), `kitty_keyboard` is
+    // probed per terminal, and a process-wide flag meant whichever session started
+    // last decided this for every other one.
+    this.kittyKeyboard = kittyKeyboard;
     const binding = (flag: string, fallback: string) =>
       parseKeyBindings(flagValue(this.argv, flag) ?? defaultBinding(fallback, this.noSuper));
     this.paletteBinding = binding("--palette-key", defaultKeys.palette);

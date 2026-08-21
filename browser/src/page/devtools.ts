@@ -41,6 +41,7 @@ export class DevtoolsWindow {
     dock: DevtoolsDock,
     background: string,
     renderScale: number,
+    reportsKeyReleases: () => boolean,
     onAction: (action: DevtoolsAction) => void,
     onClosed: () => void,
   ) {
@@ -74,6 +75,7 @@ export class DevtoolsWindow {
       contents: () => this.window.webContents,
       scale: () => this.layout.scale,
       size: () => cssSize(this.layout.width, this.layout.height, this.layout.scale),
+      reportsKeyReleases,
       focus: () => this.focus(),
       cdp: (method, params) => this.cdp(method, params),
     });

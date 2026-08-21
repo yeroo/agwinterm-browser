@@ -77,8 +77,12 @@ const win32 = await loadInput("win32");
 
 const NO_MODS = { shift: false, alt: false, ctrl: false, super: false };
 
-/** A recording `InputTarget`. `size` is omitted unless a test asks for one. */
-function makeTarget({ scale = 1, size = null } = {}) {
+/**
+ * A recording `InputTarget`. `size` and `reportsKeyReleases` are omitted unless a
+ * test asks for one — an absent `reportsKeyReleases` is what falls back to the
+ * module default, which is the shape every other suite here relies on.
+ */
+function makeTarget({ scale = 1, size = null, reportsKeyReleases = null } = {}) {
   const sent = [];
   const cdp = [];
   const inserted = [];
@@ -96,6 +100,7 @@ function makeTarget({ scale = 1, size = null } = {}) {
     },
   };
   if (size) target.size = () => size;
+  if (reportsKeyReleases !== null) target.reportsKeyReleases = () => reportsKeyReleases;
   return { target, sent, cdp, inserted };
 }
 
@@ -316,6 +321,61 @@ describe("key: releases on a host that reports them", () => {
       sent.filter((event) => event.type === "keyUp").length,
       1,
       "a real release after a synthesized one must not double up",
+    );
+  });
+});
+
+describe("key: two hosts in one process", () => {
+  // A daemon runs one session per connected terminal in a single process
+  // (`browser/src/daemon.ts`), and `kitty_keyboard` is probed per terminal — so a
+  // Ghostty session and a Terminal.app session are live side by side, disagreeing.
+  // The capability therefore belongs to the *target*, not to the module: as a
+  // process-wide flag, whichever session started last decided this for every other
+  // one, and the loser either held every key down forever or lost the ability to
+  // hold a key down at all.
+  beforeEach(() => win32.setKeyReleaseReporting(false));
+  after(() => win32.setKeyReleaseReporting(false));
+
+  it("lets one session synthesize while another waits for the host", () => {
+    const kitty = makeTarget({ reportsKeyReleases: true });
+    const console = makeTarget({ reportsKeyReleases: false });
+    const press = { kind: "press", key: "a", text: "a", mods: NO_MODS };
+
+    new win32.PageInput(kitty.target).key(press);
+    new win32.PageInput(console.target).key(press);
+
+    assert.deepEqual(
+      kitty.sent.map((event) => event.type),
+      ["rawKeyDown", "char"],
+      "a host that reports releases must be left to report one",
+    );
+    assert.deepEqual(
+      console.sent.map((event) => event.type),
+      ["rawKeyDown", "char", "keyUp"],
+      "a host that reports none must have the press closed for it",
+    );
+  });
+
+  it("is not disturbed by the process-wide default moving under it", () => {
+    const kitty = makeTarget({ reportsKeyReleases: true });
+    const input = new win32.PageInput(kitty.target);
+    win32.setKeyReleaseReporting(false);
+    input.key({ kind: "press", key: "a", text: "a", mods: NO_MODS });
+    assert.deepEqual(
+      kitty.sent.map((event) => event.type),
+      ["rawKeyDown", "char"],
+      "the target's answer outranks the module's",
+    );
+  });
+
+  it("falls back to the module default for a target that does not answer", () => {
+    // Which is `false`, the safe value: a synthesized release is a no-op on a host
+    // that sends real ones, a missing one holds the key down until focus is lost.
+    const { target, sent } = makeTarget();
+    new win32.PageInput(target).key({ kind: "press", key: "a", text: "a", mods: NO_MODS });
+    assert.deepEqual(
+      sent.map((event) => event.type),
+      ["rawKeyDown", "char", "keyUp"],
     );
   });
 });

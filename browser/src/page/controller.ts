@@ -63,6 +63,13 @@ export class BrowserController {
   onCursorChange: ((shape: string) => void) | null = null;
   onOpenTab: ((url: string, activate: boolean) => void) | null = null;
   private readonly popups: PopupWindow[] = [];
+  /**
+   * Whether this session's host reports key releases. Held per controller and
+   * handed to every `PageInput` it owns — the page's, devtools' and each popup's —
+   * because the answer belongs to the terminal this session is attached to, and a
+   * daemon runs several sessions attached to several terminals in one process.
+   */
+  private readonly reportsKeyReleases: () => boolean;
   onPopupChange: (() => void) | null = null;
   get popup(): PopupWindow | null {
     return this.popups[this.popups.length - 1] ?? null;
@@ -87,12 +94,14 @@ export class BrowserController {
     tabsAsPopups: boolean,
     clipboardRead: boolean,
     sessionKey: string,
+    reportsKeyReleases: () => boolean,
     onState: (state: BrowserState) => void,
   ) {
     this.partition = partition ? persistentPartition(partition) : null;
     this.tabsAsPopups = tabsAsPopups;
     this.clipboardRead = clipboardRead;
     this.sessionKey = sessionKey;
+    this.reportsKeyReleases = reportsKeyReleases;
     this.cwd = cwd;
     this.surface = surface;
     this.bitmaps = new BitmapPresenter(surface);
@@ -134,6 +143,7 @@ export class BrowserController {
       contents: () => this.window.webContents,
       scale: () => this.layout.scale,
       size: () => this.contentSize(this.layout),
+      reportsKeyReleases: () => this.reportsKeyReleases(),
       focus: () => this.focusContent(),
       cdp: async (method, params) => {
         await this.attachCdp();
@@ -406,6 +416,7 @@ export class BrowserController {
       dock,
       this.background,
       this.renderScale,
+      () => this.reportsKeyReleases(),
       (action) => this.onDevtoolsAction?.(action),
       () => {
         if (this.devtools !== devtools) return;
@@ -632,6 +643,7 @@ export class BrowserController {
       size,
       this.renderScale,
       () => this.layout.scale,
+      () => this.reportsKeyReleases(),
       () => this.onPopupChange?.(),
       () => {
         const at = this.popups.indexOf(popup);

@@ -337,6 +337,32 @@ async function kill(pid: number, why: string): Promise<number> {
 }
 
 /**
+ * Ends a browser that outlived the signal meant to stop it.
+ *
+ * Forceful on purpose: this is only reached after `FOREGROUND_SIGNAL_GRACE_MS` of a
+ * process that either never received the console's Ctrl+C or declined to act on it,
+ * so asking politely a second time has nothing new to offer. The whole tree, not
+ * the one process — Electron's GPU and renderer helpers are children, and
+ * `ChildProcess.kill` on Windows is `TerminateProcess` against a single pid, which
+ * would leave them behind still holding this pane's console.
+ *
+ * Never throws: the browser being gone already is the outcome this wants, and a
+ * failure here must not become the exit code the pane reports.
+ */
+async function terminateTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  const dead = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  try {
+    if (WINDOWS) execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    else child.kill("SIGKILL");
+  } catch {
+    return;
+  }
+  await Promise.race([dead, new Promise<void>((resolve) => setTimeout(resolve, 1_000).unref())]);
+}
+
+/**
  * The Windows shape of `open`: the browser runs here, in this pane's console.
  *
  * There is no daemon in this path and no tty in the request, because Windows has
@@ -375,12 +401,17 @@ async function openInForeground(argv: string[]): Promise<number> {
     if (typeof stderr === "number") fs.closeSync(stderr);
   }
 
+  let running = true;
   const exited = new Promise<number>((resolve) => {
     child.on("error", (error) => {
+      running = false;
       process.stderr.write(`could not start ${plan.file}: ${error.message}\n`);
       resolve(1);
     });
-    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+    child.on("exit", (code, signal) => {
+      running = false;
+      resolve(code ?? (signal ? 1 : 0));
+    });
   });
 
   // Ctrl+C is how a foreground job is normally stopped, and a Windows console
@@ -391,10 +422,19 @@ async function openInForeground(argv: string[]): Promise<number> {
   // the exact failure `pane.ts` exists to prevent, reached by the most common way
   // a user stops a browser.
   //
-  // The handlers kill nothing. The child already received the same Ctrl+C; all
-  // this process has to do is outlive it, which is what the grace period is. If
-  // the browser is wedged and never exits, the clear still runs — a pane with no
-  // placement is recoverable, a pane holding a dead browser's last frame is not.
+  // The handlers kill nothing *yet*. A browser already attached to this console
+  // received the same Ctrl+C, and all this process has to do is outlive it — which
+  // is what the grace period is for. What the grace period cannot cover is a
+  // browser that never got the signal at all: `electron.exe` is a GUI-subsystem
+  // image and starts with **no console** (measured, `tools/console-inherit-probe`),
+  // so until the engine's `AttachConsole` has run there is a window in which Ctrl+C
+  // reaches this process and not the child. Returning then would hand the shell its
+  // prompt back and leave a browser that is about to attach to *that same console*,
+  // start eating its keystrokes and paint frames over it — which is the failure
+  // `pane.ts` exists to prevent, not a milder version of it. So anything still
+  // running when the grace period is up is terminated before the pane is taken
+  // back; a browser that is wedged rather than absent ends the same way, and the
+  // clear still runs.
   const handlers = new Map<NodeJS.Signals, () => void>();
   const stopped = new Promise<number>((resolve) => {
     for (const [signal, code] of FOREGROUND_SIGNALS) {
@@ -406,6 +446,8 @@ async function openInForeground(argv: string[]): Promise<number> {
 
   try {
     const code = await Promise.race([exited, stopped]);
+    // Only reachable through `stopped`: `exited` cannot win with the child alive.
+    if (running) await terminateTree(child);
     // Whatever just happened to the browser, the pane is ours again — and a frame
     // is a placement agwinterm holds until something replaces it, so without this
     // the last page stays painted over a shell that is running underneath. The

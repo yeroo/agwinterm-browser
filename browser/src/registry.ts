@@ -69,7 +69,22 @@ export class Registry {
     this.host = host;
     this.tty = host.tty ?? callerTty().path;
     this.endpoint = instanceEndpoint(host.key);
-    this.ready = this.bind();
+    // Nothing in the browser awaits `ready`, so a rejection here has no handler
+    // and Node ends the process on it — skipping `dispose`, which is what deletes
+    // the `instances` row and (on unix) the socket file, and on Windows what lets
+    // the engine's `Drop` clear the pane. Upstream bound synchronously in this
+    // constructor, so the same throw reached `createSession`'s `.catch` and became
+    // an orderly `shutdown(1)`. Binding became asynchronous; the handling has to
+    // follow it. The outcome is the one `bind` already chose for `EADDRINUSE` —
+    // the browser runs, unadvertised, and says so.
+    this.ready = this.bind().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(
+        `terminal-browser: could not set up the ${endpointKind(this.endpoint)} ` +
+          `${this.endpoint} (${message}). This browser is not reachable from the ` +
+          `command line, and is not being advertised as though it were.\n`,
+      );
+    });
   }
 
   /**

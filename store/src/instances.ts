@@ -40,9 +40,15 @@ function alive(pid: number): boolean {
  */
 export async function listInstances(): Promise<InstanceRow[]> {
   const rows = await store().db.select().from(instances);
+  // Concurrently, because the expensive rows are the *dead* ones: each costs the
+  // whole of `ENDPOINT_PROBE_MS`, and run one after another a handful of phantoms
+  // turned `ls` into a multi-second command. Overlapped, the worst case is one
+  // probe's budget however many rows there are — which is also what makes a budget
+  // generous enough to not evict a busy browser affordable.
+  const verdicts = await Promise.all(rows.map((row) => stillThere(row)));
   const live: InstanceRow[] = [];
-  for (const row of rows) {
-    if (await stillThere(row)) {
+  for (const [at, row] of rows.entries()) {
+    if (verdicts[at]) {
       live.push(row);
       continue;
     }
@@ -76,8 +82,17 @@ async function stillThere(row: InstanceRow): Promise<boolean> {
 }
 
 /**
- * How long a row's endpoint gets to answer before it is treated as gone. Short: a
- * live browser answers a local pipe connect immediately, and this runs once per
- * row on every `ls`.
+ * How long a row's endpoint gets to answer before it is treated as gone.
+ *
+ * A live browser answers a local pipe connect immediately, so the *typical* cost of
+ * this is nothing at all and the number only decides how long a phantom stalls
+ * `ls`. Since `listInstances` overlaps its probes, that stall is paid once rather
+ * than once per row, which is what makes a budget this generous affordable — and
+ * generous is the side to err on, because the two outcomes are not symmetric.
+ * Waiting too long makes `ls` slow; giving up too early **deletes the row of a
+ * running browser**, and the row is the only thing that tells `ls`, `new-tab` and
+ * `action` there is anything to talk to. It does not come back on its own either:
+ * `Registry.write` only runs on a state change, so an idle browser evicted this way
+ * stays invisible indefinitely.
  */
-const ENDPOINT_PROBE_MS = 250;
+const ENDPOINT_PROBE_MS = 2_000;

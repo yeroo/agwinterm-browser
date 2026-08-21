@@ -42,11 +42,17 @@ def complaints():
     # the toolchain, a file it cannot parse). Without this the second case reports
     # "0 complaints" and exits green, which reads as "the port's lines are clean"
     # when in fact nothing was read.
-    if proc.returncode != 0 and not out.strip():
+    #
+    # "Nothing on stdout" was the wrong half of that to test. This tree always has
+    # complaints to print, so `out` is never empty and the guard never fired --
+    # including when rustfmt failed on *one* file after printing diffs for others,
+    # which is the case where the unread file could be a port-authored one. What
+    # says "it could not run" is rustfmt writing an error, so that is what is read.
+    if proc.returncode != 0 and (not out.strip() or "error" in proc.stderr.lower()):
         sys.stderr.write(proc.stderr)
         sys.stderr.write(
-            f"cargo fmt exited {proc.returncode} with no diff to attribute: "
-            "it could not run, so nothing was checked.\n"
+            f"cargo fmt exited {proc.returncode} and could not attribute every file: "
+            "some of the tree was not checked.\n"
         )
         raise SystemExit(2)
     found = []
@@ -74,8 +80,22 @@ def complaints():
 
 
 def blame(path, line):
+    """The commit that wrote `line` **as the file stands now**.
+
+    Deliberately no `HEAD`: the line numbers handed here come from cargo reading
+    the working tree, and blaming HEAD's blob at the same number reads a different
+    line whenever there is an uncommitted edit above it. The mis-attribution is
+    one-sided and therefore worse than noise -- a warning on a freshly written,
+    not-yet-committed port line whose HEAD counterpart happens to be vendored
+    blames to the baseline, is counted as vendored, is never printed, and the check
+    exits green. Running before committing is the normal case.
+
+    Blaming the working tree instead reports `000000000` for an uncommitted line,
+    which does not start with BASELINE and so is charged to the port -- the answer
+    that is correct, and the answer that is safe.
+    """
     out = subprocess.run(
-        ["git", "blame", "-L", f"{line},{line}", "--porcelain", "HEAD", "--", path],
+        ["git", "blame", "-L", f"{line},{line}", "--porcelain", "--", path],
         cwd=REPO,
         capture_output=True,
         text=True,

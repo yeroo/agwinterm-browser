@@ -14,6 +14,15 @@ export interface InputTarget {
    * track its own size keeps the unclamped behaviour.
    */
   size?(): { width: number; height: number } | null;
+  /**
+   * Whether *this* target's host reports key releases. Per-target rather than
+   * per-process: one daemon serves many sessions (`browser/src/daemon.ts`), each
+   * attached to a different terminal, and `kitty_keyboard` is probed per terminal
+   * — so a Ghostty session and a Terminal.app session can be live in the same
+   * process at once. Optional, and absent means the module default below, which is
+   * the safe value.
+   */
+  reportsKeyReleases?(): boolean;
   focus(): Promise<void> | void;
   cdp(method: string, params?: Record<string, unknown>): Promise<unknown>;
 }
@@ -35,6 +44,13 @@ export interface InputTarget {
  */
 let keyReleasesReported = false;
 
+/**
+ * The process-wide fallback, for a target that does not answer for itself.
+ *
+ * Not what a session sets: a session's answer is its own and belongs on its
+ * targets (`InputTarget.reportsKeyReleases`). This is the value a `PageInput`
+ * built without one falls back to, and the tests' way of driving both branches.
+ */
 export function setKeyReleaseReporting(reported: boolean) {
   keyReleasesReported = reported;
 }
@@ -87,6 +103,11 @@ export class PageInput {
 
   constructor(target: InputTarget) {
     this.target = target;
+  }
+
+  /** This target's host, or the process default when the target does not say. */
+  private get keyReleasesReported(): boolean {
+    return this.target.reportsKeyReleases?.() ?? keyReleasesReported;
   }
 
   private syncFocus(): Promise<void> | null {
@@ -257,7 +278,7 @@ export class PageInput {
     }
     // Nothing will arrive to close this key, so close it here. The modifiers are
     // the press's, not an empty set: shift is still down while `a` comes back up.
-    if (!keyReleasesReported) this.sendKeyUp(event.key, keyCode, modifiers);
+    if (!this.keyReleasesReported) this.sendKeyUp(event.key, keyCode, modifiers);
   }
 
   /** `left`/`right` tells Chromium which of a paired modifier key was used. */
@@ -350,7 +371,7 @@ export class PageInput {
     }
     // Enter takes the CDP path on every platform, so it needs the same synthetic
     // release the `sendInputEvent` path above gets.
-    if (!keyReleasesReported) {
+    if (!this.keyReleasesReported) {
       await this.target.cdp("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     }
   }
@@ -397,7 +418,7 @@ export class PageInput {
     // already send. Without it these keys -- backspace, the four arrows and the
     // ctrl/cmd editing combos -- are the one route left that opens a press and
     // never closes it, on exactly the hosts that report no releases of their own.
-    if (!keyReleasesReported) {
+    if (!this.keyReleasesReported) {
       await this.target.cdp("Input.dispatchKeyEvent", { type: "keyUp", ...base });
     }
   }

@@ -34,6 +34,7 @@ export class PopupWindow {
     size: { width: number; height: number },
     renderScale: number,
     scale: () => number,
+    reportsKeyReleases: () => boolean,
     onChange: () => void,
     onClosed: () => void,
     openWindow?: (details: Electron.HandlerDetails) => Electron.WindowOpenHandlerResponse,
@@ -55,6 +56,7 @@ export class PopupWindow {
       // Popup sizes are already CSS pixels — `BrowserWindow` was given them with
       // `useContentSize`.
       size: () => ({ width: this.stateValue.width, height: this.stateValue.height }),
+      reportsKeyReleases,
       focus: () => this.focus(),
       cdp: (method, params) => this.cdp(method, params),
     });

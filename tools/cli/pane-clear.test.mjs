@@ -238,6 +238,33 @@ describe("the CLI's foreground wait", () => {
     );
   });
 
+  it("does not hand the pane back while the browser is still running", () => {
+    // The grace period covers a browser that got the same Ctrl+C this process did.
+    // It cannot cover one that did not: `electron.exe` is a GUI-subsystem image and
+    // starts with no console (`tools/console-inherit-probe`), so between spawn and
+    // the engine's `AttachConsole` there is a window in which the console's Ctrl+C
+    // reaches the CLI alone. Returning there would give the shell its prompt back
+    // and leave a browser about to attach to that same console -- eating its keys
+    // and painting over it, which is what `pane.ts` exists to prevent.
+    const kill = body.indexOf("if (running) await terminateTree(child)");
+    const clear = body.indexOf("clearPaneFrame(process.env)");
+    assert.ok(kill > 0, "a browser that outlived the signal is no longer terminated");
+    assert.ok(kill < clear, "the pane is taken back before the browser is stopped");
+  });
+
+  it("terminates the whole tree, because kill() on Windows is one pid", () => {
+    // Electron's GPU and renderer processes are children. `ChildProcess.kill` maps
+    // to `TerminateProcess` against the parent alone, which would leave them behind
+    // still attached to this pane's console.
+    const helper = mainSource.slice(
+      mainSource.indexOf("async function terminateTree"),
+      mainSource.indexOf("The Windows shape of `open`"),
+    );
+    assert.match(helper, /taskkill/);
+    assert.match(helper, /"\/T"/, "taskkill is not asked for the process tree");
+    assert.match(helper, /"\/F"/, "taskkill is not asked to force");
+  });
+
   it("takes the listeners off again, so a clean quit does not hang", () => {
     // A registered signal listener keeps Node's event loop alive, and `main` only
     // calls `process.exit` for a non-zero code -- so leaving them on would hang

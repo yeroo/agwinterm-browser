@@ -30,11 +30,20 @@ def warnings():
     # below matches nothing and the whole check would report "0 warnings" and exit
     # green -- which is exactly backwards. cargo's exit code is the only thing that
     # separates "clean" from "never ran".
-    if proc.returncode != 0 and "warning:" not in proc.stderr:
+    #
+    # The exit code is the *whole* test. There is no `-D warnings` here and every
+    # workspace lint is `warn`, so a non-zero exit already means "did not compile"
+    # and nothing else. An earlier version also required that stderr carry no
+    # `warning:` line, which on this tree can never be true -- the vendored crates
+    # always emit some -- and which therefore skipped the guard in exactly the case
+    # it was written for: `pixel-core` compiles first and warns, port-authored
+    # `pixel-node` then fails to compile, and the crate that never built contributes
+    # no diagnostics, so the script printed "on port lines: 0" and exited 0.
+    if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         sys.stderr.write(
-            f"cargo clippy exited {proc.returncode} without producing warnings: "
-            "the workspace does not build, so nothing was checked.\n"
+            f"cargo clippy exited {proc.returncode}: the workspace does not build, "
+            "so nothing was checked.\n"
         )
         raise SystemExit(2)
     found = {}
@@ -50,8 +59,22 @@ def warnings():
 
 
 def blame(path, line):
+    """The commit that wrote `line` **as the file stands now**.
+
+    Deliberately no `HEAD`: the line numbers handed here come from cargo reading
+    the working tree, and blaming HEAD's blob at the same number reads a different
+    line whenever there is an uncommitted edit above it. The mis-attribution is
+    one-sided and therefore worse than noise -- a warning on a freshly written,
+    not-yet-committed port line whose HEAD counterpart happens to be vendored
+    blames to the baseline, is counted as vendored, is never printed, and the check
+    exits green. Running before committing is the normal case.
+
+    Blaming the working tree instead reports `000000000` for an uncommitted line,
+    which does not start with BASELINE and so is charged to the port -- the answer
+    that is correct, and the answer that is safe.
+    """
     out = subprocess.run(
-        ["git", "blame", "-L", f"{line},{line}", "--porcelain", "HEAD", "--", path],
+        ["git", "blame", "-L", f"{line},{line}", "--porcelain", "--", path],
         cwd=REPO,
         capture_output=True,
         text=True,
