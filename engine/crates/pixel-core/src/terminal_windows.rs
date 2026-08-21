@@ -71,9 +71,12 @@
 //!
 //! The trait's contract is that raw mode is tied to the value's lifetime. [`ModeGuard`]
 //! is that lifetime, and it also registers with a process-global panic hook, because
-//! `Drop` alone does not cover a panic on another thread or a panic while the guard
-//! is owned by something that leaks. Both routes restore the exact mode that was
-//! read at entry, and both are idempotent.
+//! `Drop` alone does not cover a panic that aborts, or a panic while the guard is
+//! owned by something that leaks, or a message that would otherwise be printed onto
+//! the alternate screen. The hook fires only for a panic on a thread that holds a
+//! guard — see [`OWNERS`], which is what keeps an unrelated worker thread's panic
+//! from handing the console back underneath a browser that is still running. Both
+//! routes restore the exact mode that was read at entry, and both are idempotent.
 
 use std::io;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -438,8 +441,8 @@ struct Restore {
     /// sequences, not console modes, so restoring `mode` does not undo them — and
     /// they are the visible half: the alternate screen, the hidden cursor, and
     /// any-motion mouse reporting. Registering the mirror sequence here is what
-    /// lets the panic hook put those back too, in the one case the hook exists for
-    /// (a panic on another thread, or a leaked guard) where no `Drop` will.
+    /// lets the panic hook put those back too, in the cases the hook exists for (an
+    /// aborting panic, or a leaked guard) where no `Drop` will.
     ///
     /// It must go out before `SetConsoleMode`, because it needs the VT *output*
     /// mode this backend turned on; written after, it would be printed literally.
@@ -457,8 +460,33 @@ static REGISTRY: Mutex<Vec<Restore>> = Mutex::new(Vec::new());
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 static HOOK: Once = Once::new();
 
+/// The threads holding a live [`ModeGuard`], most recent last.
+///
+/// The panic hook consults this rather than firing on every panic, because a panic
+/// is not always the end of the process: this crate is loaded into a Node process
+/// (`pixel-node`) that runs the engine on a thread of its own and keeps worker
+/// threads besides — the image decoder (`image_cache`) and the capture writer. None
+/// of those Cargo profiles set `panic = "abort"`, so a panic on a worker unwinds
+/// that one thread and the process carries on. Restoring there would hand the
+/// console back — cooked input, no mouse, off the alternate screen — while the
+/// engine is still drawing to it, and because the restore *drains* the registry
+/// nothing would ever put raw mode back. A panic on a thread that owns a guard is
+/// the case the hook is for: that thread's unwind ends the terminal.
+static OWNERS: Mutex<Vec<std::thread::ThreadId>> = Mutex::new(Vec::new());
+
 fn registry() -> MutexGuard<'static, Vec<Restore>> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn owners() -> MutexGuard<'static, Vec<std::thread::ThreadId>> {
+    OWNERS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Does the calling thread hold a [`ModeGuard`]? Asked from the panic hook, so it
+/// takes the poison in its stride exactly as [`registry`] does.
+fn panicking_thread_owns_terminal() -> bool {
+    let current = std::thread::current().id();
+    owners().contains(&current)
 }
 
 /// Puts every registered console back the way it was found: the farewell sequences
@@ -600,11 +628,18 @@ fn restore_input_code_page() {
 
 /// Installs the panic hook, once per process. It runs before the previous hook, so
 /// the console is already back to normal by the time the panic message is printed.
+///
+/// Only for a panic on a thread that owns a [`ModeGuard`] — see [`OWNERS`] for why
+/// a worker thread's panic must leave the console alone. The message a worker panic
+/// prints is painted over the alternate screen, which is the lesser of the two
+/// wrongs: the browser it panicked underneath is still running and still readable.
 fn install_panic_hook() {
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_registered_modes();
+            if panicking_thread_owns_terminal() {
+                restore_registered_modes();
+            }
             previous(info);
         }));
     });
@@ -620,14 +655,21 @@ struct ModeGuard {
     /// Whether this guard is the one that changed the console's input code page,
     /// and so the one that has to change it back.
     code_page: bool,
+    /// The thread this guard was built on, which is the thread whose panic the hook
+    /// treats as the end of the terminal. Recorded per guard rather than once per
+    /// process so two terminals on two threads each speak for themselves.
+    owner: std::thread::ThreadId,
 }
 
 impl ModeGuard {
     fn new() -> Self {
         install_panic_hook();
+        let owner = std::thread::current().id();
+        owners().push(owner);
         Self {
             entries: Vec::new(),
             code_page: false,
+            owner,
         }
     }
 
@@ -679,6 +721,14 @@ impl Drop for ModeGuard {
     /// insertion order would leave the console in the *inner* guard's mode, which
     /// on this backend is raw.
     fn drop(&mut self) {
+        // One entry, not every match: a second guard on this thread is still live
+        // and its panic is still the terminal's end.
+        {
+            let mut owners = owners();
+            if let Some(at) = owners.iter().position(|owner| *owner == self.owner) {
+                owners.remove(at);
+            }
+        }
         // First, because it was taken last, and because the farewell bytes below
         // are ASCII under every code page either way.
         if std::mem::take(&mut self.code_page) {
@@ -2255,6 +2305,42 @@ mod tests {
             before,
             "a panic left the console in raw mode",
         );
+    }
+
+    #[test]
+    fn a_panic_on_a_thread_that_owns_no_terminal_leaves_the_console_alone() {
+        // The engine runs on a thread `pixel-node` spawned, alongside workers of its
+        // own -- the image decoder and the capture writer -- and no shipped profile
+        // sets `panic = "abort"`, so a panic on one of those unwinds that thread and
+        // the process carries on. If the hook fired there it would hand the console
+        // back and drain the registry while the engine was still drawing: cooked
+        // input, no mouse, off the alternate screen, and no `Drop` left holding a
+        // token that could put any of it back.
+        let _serial = one_at_a_time();
+        let buffer = private_screen_buffer();
+        let before = buffer.mode().expect("a real console mode");
+        let mut guard = ModeGuard::new();
+        guard.apply(&buffer, vt_output_mode).expect("apply");
+        let raw = buffer.mode().unwrap();
+        assert_ne!(raw, before, "the guard never changed the mode");
+
+        let elsewhere = std::thread::spawn(|| {
+            let _ = std::panic::catch_unwind(|| panic!("a worker fell over"));
+        });
+        elsewhere.join().expect("the worker thread is joinable");
+
+        assert_eq!(
+            buffer.mode().unwrap(),
+            raw,
+            "another thread's panic took raw mode away from a live terminal",
+        );
+        assert!(
+            !registry().is_empty(),
+            "another thread's panic drained the registry, so no Drop can restore",
+        );
+
+        drop(guard);
+        assert_eq!(buffer.mode().unwrap(), before, "the guard's Drop is undone");
     }
 
     // -- colours ----------------------------------------------------------

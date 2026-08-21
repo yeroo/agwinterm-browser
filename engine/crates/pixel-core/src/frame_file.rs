@@ -473,8 +473,17 @@ impl FramePublisher {
     ///
     /// A publisher that never published has nothing to take back, and asking anyway
     /// would clear a placement some *other* process owns.
+    ///
+    /// The test is `written`, not `seq`: [`next_path`](Self::next_path) bumps `seq`
+    /// for every frame *attempted*, so a first frame the host refused — `no session`,
+    /// an unreadable frame directory, a write that failed — would leave `seq` at 1
+    /// with nothing ever placed, and the clear that follows it out of
+    /// [`Terminal::drop`](crate::terminal::Terminal) would take down whatever the
+    /// pane was already showing. `written` is pushed only in the `Ok` arm of
+    /// [`publish_encoded`](Self::publish_encoded), and [`reap`](Self::reap) keeps at
+    /// least [`RETAINED`] entries, so it is empty exactly when nothing was placed.
     pub(crate) fn clear(&mut self, client: &mut ControlClient) -> io::Result<()> {
-        if self.seq == 0 {
+        if self.written.is_empty() {
             return Ok(());
         }
         client.send(CLEAR_CMD, None).and_then(Reply::result)?;
@@ -1213,16 +1222,49 @@ mod tests {
         // This runs from `Drop`, usually because something already went wrong. A
         // refusal is reported to the caller — which is what makes it testable — but
         // the caller is an exit path that has nothing left to do about it.
+        //
+        // The frame has to land first: a publisher whose every frame was refused has
+        // placed nothing, and the test below is that it stays quiet.
+        let server = PipeServer::scripted(vec![
+            Turn::Reply(ok_frame()),
+            Turn::Reply(r#"{"ok":false,"error":"no session"}"#.to_owned()),
+        ]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the frame");
+        publisher
+            .clear(&mut client)
+            .expect_err("and says so rather than pretending");
+    }
+
+    #[test]
+    fn a_publisher_whose_first_frame_was_refused_clears_nothing_either() {
+        // The seq-versus-written distinction. An attempted frame bumps the sequence
+        // whether or not the host took it, so a browser that started in a pane
+        // already holding someone else's image, failed its very first frame and
+        // exited would have cleared that placement on the way out.
         let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
-            .expect_err("the host refuses the frame too");
-        publisher
-            .clear(&mut client)
-            .expect_err("and says so rather than pretending");
+            .expect_err("the host refuses the frame");
+        publisher.clear(&mut client).expect("nothing to take back");
+
+        let spoken = server.requests();
+        assert_eq!(
+            spoken.len(),
+            1,
+            "it asked for a clear it had never earned: {spoken:?}",
+        );
+        assert!(
+            spoken[0].contains(FRAME_CMD),
+            "the one request was not the refused frame: {spoken:?}",
+        );
     }
 
     // -- the frame budget -------------------------------------------------

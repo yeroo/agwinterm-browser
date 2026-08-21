@@ -34,7 +34,7 @@ import {
   unionRects,
 } from "./model";
 import type { CropScope, HandleId, MarkupObject, Rect, Tool, Vec } from "./model";
-import { isCompleteKey, isRecordKey, listStep } from "../session/keybindings";
+import { isCompleteKey, isRecordKey, listStep, zoomHeld } from "../session/keybindings";
 import { newRecordingDir } from "./paths";
 import {
   CLICK_PULSE_MS,
@@ -431,7 +431,13 @@ export class RecordSession {
       this.host.requestRender();
       return true;
     }
-    if (cmd) {
+    // `zoomHeld` rather than `cmd`, for the reason it documents: a Windows console
+    // has no encoding for Ctrl+`=`, Ctrl+`-` or Ctrl+`0`, so the review canvas could
+    // not be zoomed there at all — and the Alt spelling that *is* deliverable fell
+    // through line 449 to `session.tsx`, which does accept it, and zoomed the live
+    // page underneath the review instead. Widened, not replaced: off Windows this is
+    // `event.mods.super`, which `cmd` already covers, so the chords are unchanged.
+    if (cmd || zoomHeld(event, false)) {
       const direction = zoomDirection(event.key);
       if (direction === 0) {
         this.transform = null;
