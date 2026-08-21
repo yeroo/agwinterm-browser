@@ -42,8 +42,14 @@ const UNIX_BOUND_MODULES = ["ghostty.rs", "herdr.rs", "terminal.rs"];
  * backends have to agree on, and the Windows backend itself. `terminal.rs`
  * re-exports `Terminal` from the latter on Windows, so — again — no importer
  * changed and `lib.rs`'s crate-root `pub use terminal::Terminal` still resolves.
+ *
+ * `agwinterm.rs` is Task 6: the control-pipe client. It is the output half's
+ * transport and the only source of pane geometry there is on Windows — the
+ * analogue of `herdr.rs` on unix, which is one of the three modules the port
+ * replaces rather than keeps.
  */
 const PORT_ADDED_FILES = [
+  "agwinterm.rs",
   "terminal_backend.rs",
   "terminal_types.rs",
   "terminal_windows.rs",
@@ -528,6 +534,120 @@ describe("the Windows console input backend", () => {
         `${capability} no longer answers false, which the setup string assumes`,
       );
     }
+  });
+});
+
+describe("the agwinterm control-pipe client", () => {
+  // Task 6. Structural claims that compile either way, so a Rust test cannot be the
+  // only thing holding them: that a frame is addressed to *this* pane, that the
+  // cell-metrics decision in docs/design/04-cell-metrics.md and the code that
+  // implements it still name the same verb, and that the wrong-guess fallback the
+  // plan warned about did not quietly reappear elsewhere.
+  const client = read("agwinterm.rs");
+  const windows = read("terminal_windows.rs");
+  const DECISION = path.join(REPO, "docs", "design", "04-cell-metrics.md");
+
+  it("addresses the pane by id and never the active one", () => {
+    // agwinterm resolves an absent target as the active session
+    // (`target ?? "active"` throughout ControlServer.cs), so a frame sent without
+    // one lands wherever the user last looked.
+    assert.ok(
+      client.includes(`push_quoted(&mut line, &self.target.session);`),
+      "requests no longer carry the pane id as their target",
+    );
+    assert.ok(
+      client.includes(`if session == "active" {`),
+      'the guard that refuses "active" as a session id is gone',
+    );
+    assert.doesNotMatch(
+      client,
+      /push_quoted\(&mut line, "active"\)/,
+      'something builds a request addressed to "active"',
+    );
+  });
+
+  it("names what is required when the host is not there", () => {
+    // A blank pane with no explanation is the failure this exists to prevent, so
+    // the message names all three variables rather than the first one missing.
+    const message = client.match(/fn not_hosted\(missing: &str\) -> io::Error \{[\s\S]*?\n\}/);
+    assert.ok(message, "agwinterm.rs no longer explains an absent host");
+    for (const name of ["ENABLED_VAR", "SESSION_VAR", "PIPE_VAR"]) {
+      assert.ok(
+        message[0].includes(name),
+        `the "no agwinterm here" message no longer names ${name}`,
+      );
+    }
+  });
+
+  it("treats a dropped pipe as recoverable rather than fatal", () => {
+    assert.ok(
+      client.includes("fn recoverable(err: &io::Error) -> bool"),
+      "nothing distinguishes a dropped connection from a missing host, so either " +
+        "a host restart is fatal or an absent host is retried forever",
+    );
+    assert.match(
+      client,
+      /Err\(err\) if recoverable\(&err\) => \{[\s\S]*?self\.attempt\(line\)/,
+      "a recoverable failure no longer replays the request on a new connection",
+    );
+  });
+
+  it("keeps the cell-metrics decision and the code that implements it in step", () => {
+    const decision = fs.readFileSync(DECISION, "utf8");
+    for (const constant of ["METRICS_CMD", "CELL_PX_VAR"]) {
+      const declared = client.match(
+        new RegExp(`const ${constant}: &str = "([^"]+)"`),
+      );
+      assert.ok(declared, `agwinterm.rs no longer declares ${constant}`);
+      assert.ok(
+        decision.includes(declared[1]),
+        `${declared[1]} is not what docs/design/04-cell-metrics.md records for ` +
+          `${constant}; the decision and the code have drifted`,
+      );
+    }
+  });
+
+  it("never lets cell_size answer None on Windows", () => {
+    // `engine/mod.rs:347` does `term.cell_size()?.unwrap_or((16, 32))`. A `None`
+    // means the engine sizes the canvas with a number the backend does not have
+    // and the pointer is mapped in a different coordinate space — the failure that
+    // actually moves click targets. So it resolves once and both readers use the
+    // cache.
+    assert.ok(
+      client.includes("pub(crate) fn cell_size("),
+      "the three-source resolution the decision records is gone",
+    );
+    assert.ok(
+      windows.includes("agwinterm::cell_size(self.host(), &env)"),
+      "cell_size no longer goes through that resolution",
+    );
+    assert.ok(
+      windows.includes("let (width, height) = self.cell.unwrap_or(agwinterm::FALLBACK_CELL);"),
+      "the pointer no longer falls back to the number the canvas would be sized " +
+        "with, so a report before the first cell_size lands in the wrong place",
+    );
+  });
+
+  it("keeps the fallback a named constant in one place", () => {
+    // The plan's instruction was that terminal.rs's hardcoded (16, 32) must not
+    // stand as the answer. It may be the last resort, but only once, named, and
+    // logged where the reason is known.
+    assert.ok(
+      client.includes("pub(crate) const FALLBACK_CELL: (u32, u32) = (16, 32);"),
+      "the fallback cell size is no longer a named constant",
+    );
+    // Comments are allowed to name the number — explaining why the constant is
+    // what it is *requires* naming it. Code is not.
+    const inCode = windows
+      .split(/\r?\n/)
+      .map((line, i) => [i + 1, line])
+      .filter(([, line]) => !/^\s*(\/\/|\*)/.test(line) && /\(16, 32\)/.test(line));
+    assert.deepEqual(
+      inCode,
+      [],
+      "a bare (16, 32) reappeared in the Windows backend's code instead of going " +
+        "through agwinterm::FALLBACK_CELL",
+    );
   });
 });
 

@@ -38,7 +38,9 @@ Two ceilings are host-side and are accepted rather than solved here
 - **Pointer resolution is one character cell.** agwinterm discards the sub-cell offset at the encode
   site and has no `?1016`. Small link targets, hover, drag-select and scrollbar grabs all quantise.
 - **Cell pixel metrics are not published**, so the renderer cannot match the pane's physical pixels
-  without a host change.
+  without a host change — the frame is resampled to fit the pane. Task 6 settled the mechanism
+  (`session.metrics`) and shipped `TERMINAL_BROWSER_CELL_PX` as the explicit way to render sharp
+  meanwhile.
 
 Both have a cheap host-side fix, and both are now **explicit dependencies on the agwinterm plan**
 rather than assumptions. If that plan does not ship them, this port still works — with a
@@ -78,8 +80,10 @@ agwinterm source: `C:\Users\boris\source\agwinterm`.
   allowing electron's own postinstall leaves `node_modules/electron/dist` empty and no `electron.exe`
   anywhere — a worse failure, hit at the milestone rather than at install. Task 1 handles both halves.
 - **This plan depends on the agwinterm plan** for three things now, not one: `image.frameshm`
-  (Task 12, optional, self-guarding), cell metrics (Task 6, blocking), and `?1016` pixel mouse
-  (Task 11, degrades gracefully). Contract lives in `agwinterm/docs/specs/image-frameshm.md`.
+  (Task 12, optional, self-guarding), cell metrics (Task 6, ~~blocking~~ **degrades** — Task 6
+  found that a wrong-but-consistent cell size costs sharpness, not click accuracy, and shipped an
+  explicit override; see [`docs/design/04-cell-metrics.md`](../design/04-cell-metrics.md)), and
+  `?1016` pixel mouse (Task 11, degrades gracefully). Contract lives in `agwinterm/docs/specs/image-frameshm.md`.
   **Tasks 1–10 have zero dependency on the agwinterm plan** [triage: confirmed against
   `HandleImageFrame` — every capability Task 7 needs is in shipped code].
 - **Never test against the real agwinterm instance.** Debug build → instance id `agwinterm-dev`, own
@@ -497,25 +501,116 @@ keep-unchanged modules. [triage: major]
 
 ### Task 6: agwinterm control-pipe client, and where cell metrics come from
 
-- [ ] implement a Rust client for the control pipe: connect to `%AGWINTERM_PIPE%`, one JSON request
+- [x] implement a Rust client for the control pipe: connect to `%AGWINTERM_PIPE%`, one JSON request
       per line, read the `{"ok":true,"result":...}` / `{"ok":false,"error":...}` envelope
-- [ ] target `%AGWINTERM_SESSION_ID%`, never `"active"` — a frame must not land in a pane the user
+      — `pixel-core/src/agwinterm.rs`, gated `#[cfg(windows)]` and declared first in `lib.rs`. A
+      named-pipe *client* is an ordinary file on Windows, so the transport is `OpenOptions` +
+      `BufReader` and needs no Win32 of its own — only the `ERROR_PIPE_BUSY` retry `CreateFile` on
+      a pipe requires. `Reply::Ok` carries the `result` as **raw JSON** rather than a string,
+      because agwinterm answers with a string for most verbs (`Ok`, `ControlServer.cs:521`) and an
+      object for the structured ones (`OkRaw`, `:522`), and only the caller knows which it asked
+      for. Envelope parsing follows `herdr.rs`'s hand-rolled precedent rather than adding serde:
+      `result`/`error` are always the last top-level key, so they are read as "everything to the
+      closing brace". ⚠️ **`.NET`'s `JsonSerializer` escapes non-ASCII, `<`, `>`, `&` and `'` as
+      `\uXXXX` by default** — `unknown command 'session.metrics'` arrives with `'` in it — so
+      the string decoder handles `\uXXXX` (via UTF-16 code units, so surrogate pairs survive).
+- [x] target `%AGWINTERM_SESSION_ID%`, never `"active"` — a frame must not land in a pane the user
       switched to
-- [ ] absent `AGWINTERM_ENABLED`, fail with a message naming what is required rather than producing
+      — every request carries `"target":<the id>`; `HostTarget::from_env` refuses the literal
+      `"active"`, refuses an *empty* id (agwinterm reads `""` as null and null resolves to the
+      active pane), and falls back to `AGWINTERM_PANE_ID` when only that is set. A vendor-check
+      assertion pins that the request builder addresses `self.target.session` and never a literal.
+- [x] absent `AGWINTERM_ENABLED`, fail with a message naming what is required rather than producing
       a blank pane
-- [ ] handle a closed pipe as recoverable with reconnect, not a panic
-- [ ] **decide and record where cell pixel metrics come from before Task 7 needs them.** Neither of
+      — one message naming all three variables rather than reporting the first one missing, at
+      `io::ErrorKind::NotFound`. Read through `SessionEnv`, not `std::env`, so it answers for the
+      pane that asked — the same reason `TERMINAL_BROWSER_CONSOLE_PID` is read that way.
+      ➕ **The absence latches.** `Terminal::host()` resolves once and sets `host_absent`, so a
+      browser started outside agwinterm explains itself once instead of per frame.
+- [x] handle a closed pipe as recoverable with reconnect, not a panic
+      — `recoverable()` separates "the host went away mid-conversation" (`BrokenPipe`,
+      `UnexpectedEof`, `ConnectionAborted`/`Reset`, `NotConnected`, and raw `ERROR_NO_DATA` /
+      `ERROR_PIPE_NOT_CONNECTED`) from "there is no host" (`NotFound`), which is the distinction
+      that matters: without it either a host restart is fatal or a missing host is retried forever.
+      One replay, then the error is reported. ⚠️ **Replay re-executes the command**, which is safe
+      only because both verbs are idempotent — `image.frame` replaces the pane's placements
+      outright and `session.metrics` only reads. Recorded in the module docs as a constraint on
+      any verb added later. Any failure also drops the connection, so a half-written request cannot
+      desynchronise the next one.
+- [x] **decide and record where cell pixel metrics come from before Task 7 needs them.** Neither of
       `pixel-core`'s mechanisms works here: `\x1b[16t` hits agwinterm's `csi_dispatch`
       (`emulator.rs:964-1045`) which has no `t` arm, and `tcgetwinsize`'s `ws_xpixel` has no Windows
       equivalent. No control verb and no `AGWINTERM_*` variable carries them. The options are a new
       agwinterm verb, a config value, or "render at a fixed resolution and let `cols`/`rows` scale
       it". **Do not let `terminal.rs:840-843`'s hardcoded `(16, 32)` fallback stand as the answer** —
       it is a silent wrong guess and produces wrong click targets. [triage: major]
-- [ ] if the choice is a host change, open it in the agwinterm plan and record the dependency here
-- [ ] write tests against a real named-pipe server fixture: round-trip, error envelope, server closes
+      — **Decision: a new control verb, `session.metrics`**, recorded in
+      [`docs/design/04-cell-metrics.md`](../design/04-cell-metrics.md) with the wire shape both
+      sides code against. Chosen over XTWINOPS for three reasons specific to this consumer: the
+      pipe client exists for the frame path anyway, so one more verb is a method rather than a
+      mechanism; Task 5 established that console input arrives on a reader thread through an inbox,
+      and a second deadline-bounded write-then-read-the-reply parse layered on that — for a value
+      wanted at construction *and* on every resize — is the part most likely to fail
+      intermittently; and one round trip answers `cols`, `rows`, the cell size **and** the pane's
+      pixel box, where `GetConsoleScreenBufferInfo` gives cells only and nothing gives the pixel
+      box. `TERMINAL_BROWSER_CELL_PX=<w>x<h>` overrides it — checked *first*, because it is the
+      only source that exists before the verb ships and because it is how a user corrects a host
+      that reports the wrong thing. `FALLBACK_CELL` is the last resort, logged at `warn` with the
+      variable that fixes it.
+      ➕ **The rationale in this checkbox is wrong, and the correction is what de-blocks Task 7.**
+      A wrong cell size does *not* produce wrong click targets. The canvas (`engine/mod.rs:43-55`,
+      `width = cols * cell.0`) and the pointer (`mouse_position_px`, cell centre) are derived from
+      the **same** number, so a click on a cell lands in that cell at any scale. What a wrong scale
+      costs is resolution — agwinterm draws the placement into `Cols * cw` with
+      `BitmapInterpolationMode.Linear` (`Program.Render.cs:77-87`), so the frame is resampled — and
+      a mis-sized CSS viewport. ⚠️ **What *does* move click targets is the two consumers
+      disagreeing, and that was a live defect**: `cell_size()` returned `Unsupported`,
+      `engine/mod.rs:347`'s `unwrap_or((16, 32))` sized the canvas at 16×32/cell, and
+      `mouse_position_px`'s `None` arm returned raw cell units — a click on column 40 delivered at
+      x=39 in a 640px canvas. So `Terminal::cell_size` now **never answers `None`**, both readers
+      share one cache, and `FALLBACK_CELL` is deliberately the same `(16, 32)` the engine
+      substitutes. The agwinterm plan's Task 6b is downgraded from **blocking** to **degrades**
+      accordingly.
+- [x] if the choice is a host change, open it in the agwinterm plan and record the dependency here
+      — it was already open as `agwinterm/docs/plans/20260821-image-frameshm-command.md` Task 6b,
+      which asked the consumer to choose. Its first checkbox is now `[x]` with the choice and the
+      reasoning, its second carries the exact wire shape this client codes against, and its
+      deliverables table carries the blocking→degrades correction above. Nothing here waits on it.
+- [x] write tests against a real named-pipe server fixture: round-trip, error envelope, server closes
       mid-request, server never accepts
-- [ ] write tests for host detection with the env vars present and absent
-- [ ] run tests — must pass before Task 7
+      — a real `CreateNamedPipeW` server in-process, scripted turn by turn (`Reply` / `Hangup`),
+      with unique per-test pipe names. Covered: round trip, the exact request bytes for `ping` and
+      `image.frame`, an error envelope from a real server, a hangup mid-request recovered by
+      reconnect, a client that stays usable across the reconnect, a host that keeps dying giving up
+      after exactly one replay, and a pipe nobody is serving failing as `NotFound` with the pipe
+      name in the message. Plus a test that reads the fixture's bytes off the wire by hand, so a
+      silently broken fixture cannot make the others pass by never connecting.
+      ⚠️ **Two races had to be designed out, and both would have shown up as "no such pipe".** The
+      constructor blocks on a channel until the server thread has created its first instance; and
+      the thread posts the *next* instance before serving the current one, because a pipe name
+      ceases to exist the moment its last instance closes — without that, the reconnect after a
+      hangup dials a name that is briefly gone.
+- [x] write tests for host detection with the env vars present and absent
+      — a pane's variables, the `AGWINTERM_PIPE` default matching `agwintermctl`'s, `PANE_ID`
+      standing in, and the four refusals: no `ENABLED`, no id, an empty id, and the literal
+      `"active"`. ➕ `Terminal::detached` now builds with an **empty** `SessionEnv` rather than
+      `of_process()`: the suite may itself be running in an agwinterm pane, and a test that dialled
+      the developer's live instance is exactly what the plan's "never test against the real
+      agwinterm" constraint forbids.
+- [x] run tests — must pass before Task 7 — **303 Rust tests pass on Windows** (0 failed; 268
+      before, +35) and **49 node tests** (43 before, +6 pinning this task's structural claims:
+      pane-not-active addressing, the "name what is required" message, the recoverable-reconnect
+      shape, decision-doc/code agreement on the verb and override names, `cell_size` never
+      answering `None`, and the fallback staying one named constant). `cargo clippy -p pixel-core
+      --all-targets` on Windows is at the **5** pre-existing warnings and on
+      `x86_64-unknown-linux-gnu` at HEAD's set **kind for kind**; `cargo check --all-targets` is
+      clean on both. `cargo fmt --all --check`'s residual is **173 hunks, identical to HEAD's**,
+      with the new file fmt-clean. `cargo check --workspace` still reports exactly the 2
+      `pixel-node` errors Task 4 handed to Task 8.
+      ➕ **`agwinterm.rs` had to be declared in `tools/vendor-check`'s `PORT_ADDED_FILES`** — the
+      inventory pins upstream at 46 source files with 43 unix-free, and a port-added file that is
+      not declared reads as vendor drift. It is the Windows analogue of `herdr.rs`, which is one
+      of the three modules the port replaces rather than keeps.
 
 ### Task 7: File-based frame output (bring-up path)
 

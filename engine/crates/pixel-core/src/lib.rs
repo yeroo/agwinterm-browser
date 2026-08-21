@@ -1,3 +1,8 @@
+// The agwinterm control-pipe client: the output half's transport, and the only
+// source of pane geometry there is. Windows-only because a named pipe is, and
+// because the unix build reaches its host through `herdr` instead.
+#[cfg(windows)]
+mod agwinterm;
 mod canvas;
 pub mod clipboard_image;
 mod desc;

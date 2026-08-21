@@ -57,6 +57,16 @@
 //! handles them — and both routes share one "last size" so a host that does both
 //! does not produce the event twice.
 //!
+//! ## Cell metrics, which the console cannot supply
+//!
+//! `GetConsoleScreenBufferInfo` reports cells, never pixels, and there is no
+//! `ws_xpixel` here — so `size()` reports zero for both pixel fields and
+//! `WindowSize::cell_size()` honestly answers `None`. [`Terminal::cell_size`] is
+//! therefore answered by the *host* rather than by the console:
+//! [`crate::agwinterm::cell_size`] asks the control pipe, honours an explicit
+//! override, and falls back loudly. `docs/design/04-cell-metrics.md` is the
+//! decision; what matters here is that it never answers `None`.
+//!
 //! ## Restoring the console
 //!
 //! The trait's contract is that raw mode is tied to the value's lifetime. [`ModeGuard`]
@@ -83,6 +93,7 @@ use windows_sys::Win32::System::Console::{
     ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleScreenBufferInfo, SetConsoleMode,
 };
 
+use crate::agwinterm::{self, ControlClient};
 use crate::canvas::Canvas;
 use crate::terminal::{
     ColorSlot, Event, RawEvent, SessionEnv, TerminalColors, Waker, WindowSize, parse_event_kitty,
@@ -666,7 +677,9 @@ impl ColorQuery {
 /// The Windows console backend.
 pub struct Terminal {
     wrapper: Wrapper,
-    #[allow(dead_code, reason = "Task 6 reads AGWINTERM_* out of this")]
+    /// The environment the pane was started with, which is where the `AGWINTERM_*`
+    /// addressing lives. Kept rather than read once because [`Terminal::host`]
+    /// dials lazily and [`Terminal::forget_cell_size`] can make it ask again.
     env: SessionEnv,
     inbox: Arc<Inbox>,
     /// Bytes read but not yet parsed into an event — the decoder's incomplete tail.
@@ -681,9 +694,16 @@ pub struct Terminal {
     focused: bool,
     watching_resize: bool,
     last_size: Option<WindowSize>,
-    /// Cell metrics, once something can supply them. `None` until Task 6, which is
-    /// why mouse positions are still in cells; see [`Terminal::mouse_position_px`].
+    /// The resolved cell size, cached until [`Terminal::forget_cell_size`]. It is
+    /// the *same* number the canvas is sized from and the pointer is mapped with —
+    /// see [`Terminal::mouse_position_px`], where the two meet.
     cell: Option<(u32, u32)>,
+    /// The control-pipe client, dialled on first use. `None` before that and after
+    /// [`Terminal::host_absent`] has latched.
+    host: Option<ControlClient>,
+    /// Set once the environment has been found not to describe an agwinterm pane,
+    /// so the explanation is logged once rather than per frame.
+    host_absent: bool,
     color_query: Option<ColorQuery>,
     waker: Option<Waker>,
 }
@@ -743,6 +763,8 @@ impl Terminal {
             watching_resize: false,
             last_size: None,
             cell: None,
+            host: None,
+            host_absent: false,
             color_query: None,
             waker: None,
         })
@@ -763,7 +785,11 @@ impl Terminal {
     fn detached(inbox: Arc<Inbox>, conout: Option<Arc<ConsoleHandle>>) -> Self {
         Self {
             wrapper: Wrapper::named(None),
-            env: SessionEnv::of_process(),
+            // An *empty* session environment, not the process's. The suite may
+            // itself be running in an agwinterm pane, and a test that dialled the
+            // developer's live instance would be exactly what the port plan
+            // forbids.
+            env: SessionEnv::of_session(Default::default()),
             inbox,
             pending: Vec::new(),
             conout,
@@ -772,6 +798,8 @@ impl Terminal {
             watching_resize: false,
             last_size: None,
             cell: None,
+            host: None,
+            host_absent: false,
             color_query: None,
             waker: None,
         }
@@ -901,13 +929,16 @@ impl Terminal {
     /// size — a wrong multiplier is a wrong click target, which is worse than a
     /// coarse one. Task 11 converts, using whatever Task 6 decides.
     fn mouse_position_px(&self, x: u32, y: u32) -> (u32, u32) {
-        match self.cell {
-            Some((width, height)) => (
-                x.saturating_sub(1) * width + width / 2,
-                y.saturating_sub(1) * height + height / 2,
-            ),
-            None => (x.saturating_sub(1), y.saturating_sub(1)),
-        }
+        // `cell_size` is resolved during `Engine::new`, before anything is on
+        // screen to click, so the cache is populated by the time a report arrives.
+        // The fallback is the same constant `cell_size` would have returned rather
+        // than a cell-unit coordinate, because a pointer mapped in different units
+        // than the canvas was drawn in is precisely the wrong-click-target bug.
+        let (width, height) = self.cell.unwrap_or(agwinterm::FALLBACK_CELL);
+        (
+            x.saturating_sub(1) * width + width / 2,
+            y.saturating_sub(1) * height + height / 2,
+        )
     }
 
     /// Re-reads the console's size and reports it if it changed. `None` when
@@ -966,8 +997,47 @@ impl Terminal {
         self.cell = None;
     }
 
+    /// The size of one character cell in pixels.
+    ///
+    /// Never `None`, which is the one thing worth knowing about it. `engine/mod.rs`
+    /// substitutes `(16, 32)` for a `None` and then sizes the canvas with it, while
+    /// this backend would go on mapping the pointer with whatever *it* had — two
+    /// coordinate spaces, and click targets that land in the wrong place. So the
+    /// resolution happens here, once, and both sides read the cached result.
+    /// [`crate::agwinterm::cell_size`] is where the three sources are ordered.
     pub fn cell_size(&mut self) -> io::Result<Option<(u32, u32)>> {
-        unimplemented("cell metrics", "Task 6")
+        if self.cell.is_none() {
+            // The client borrows `self` mutably; the environment it is resolved
+            // against is cheap to clone and immutable for the process's life.
+            let env = self.env.clone();
+            self.cell = Some(agwinterm::cell_size(self.host(), &env));
+        }
+        Ok(self.cell)
+    }
+
+    /// The control-pipe client, dialled on first use.
+    ///
+    /// Resolving the target is what fails informatively — the message names every
+    /// `AGWINTERM_*` variable a pane sets — but it fails *once*: a browser started
+    /// outside agwinterm should say so and carry on, not repeat itself per frame.
+    /// Connecting is separate and happens on the first request.
+    fn host(&mut self) -> Option<&mut ControlClient> {
+        if self.host.is_none() && !self.host_absent {
+            match ControlClient::from_env(&self.env) {
+                Ok(client) => {
+                    crate::logging::info(
+                        "agwinterm",
+                        format!("frames go to pane {}", client.target().session()),
+                    );
+                    self.host = Some(client);
+                }
+                Err(err) => {
+                    self.host_absent = true;
+                    crate::logging::warn("agwinterm", err.to_string());
+                }
+            }
+        }
+        self.host.as_mut()
     }
 
     /// Asks for the palette and waits for it, up to [`COLOR_QUERY_DEADLINE`].
@@ -1242,9 +1312,11 @@ mod tests {
                 kind: MouseKind::Down,
                 button: MouseButton::Left,
                 mods: Default::default(),
-                // Cell coordinates, zero-based: no cell metrics until Task 6.
-                x: 11,
-                y: 4,
+                // The centre of cell (12, 5), in pixels. Since Task 6 the report
+                // is scaled by the same cell size the canvas is drawn at — here
+                // the fallback, because a detached terminal has no host to ask.
+                x: 11 * agwinterm::FALLBACK_CELL.0 + agwinterm::FALLBACK_CELL.0 / 2,
+                y: 4 * agwinterm::FALLBACK_CELL.1 + agwinterm::FALLBACK_CELL.1 / 2,
             })),
         );
     }
@@ -1665,6 +1737,109 @@ mod tests {
         term.forget_cell_size();
     }
 
+    // -- cell metrics -----------------------------------------------------
+
+    #[test]
+    fn cell_size_always_answers_because_a_none_would_be_guessed_at_elsewhere() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        // No host and no override, which is the worst case. `engine/mod.rs:347`
+        // would turn a `None` into `(16, 32)` and size the canvas with it; the
+        // point is that the backend now names the same number instead of keeping
+        // one of its own.
+        assert_eq!(
+            term.cell_size().unwrap(),
+            Some(agwinterm::FALLBACK_CELL),
+            "cell_size must never answer None on Windows",
+        );
+    }
+
+    #[test]
+    fn the_pointer_is_mapped_with_the_number_the_canvas_is_sized_from() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        let (width, height) = term
+            .cell_size()
+            .unwrap()
+            .expect("cell_size always answers here");
+
+        // A click on cell (1, 1) — the SGR report is one-based — lands in the
+        // first cell of a canvas drawn `cols * width` pixels across, and a click
+        // on (3, 2) lands in the third column of the second row. If the two used
+        // different cell sizes this would drift by a cell per cell.
+        assert_eq!(term.mouse_position_px(1, 1), (width / 2, height / 2));
+        assert_eq!(
+            term.mouse_position_px(3, 2),
+            (2 * width + width / 2, height + height / 2),
+        );
+    }
+
+    #[test]
+    fn a_resolved_cell_size_is_cached_until_it_is_forgotten() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        assert_eq!(term.cell_size().unwrap(), Some(agwinterm::FALLBACK_CELL));
+
+        // The cache is what `mouse_position_px` reads, so proving it holds is
+        // proving the pointer does not re-resolve mid-drag.
+        term.cell = Some((9, 19));
+        assert_eq!(term.cell_size().unwrap(), Some((9, 19)));
+        assert_eq!(term.mouse_position_px(1, 1), (4, 9));
+
+        // A font change invalidates it, and the next call resolves again.
+        term.forget_cell_size();
+        assert_eq!(term.cell_size().unwrap(), Some(agwinterm::FALLBACK_CELL));
+    }
+
+    #[test]
+    fn an_environment_that_is_not_a_pane_is_explained_once_and_not_retried() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        assert!(term.host().is_none(), "an empty environment is no host");
+        assert!(
+            term.host_absent,
+            "the absence must latch, or every frame re-derives and re-logs it",
+        );
+    }
+
+    #[test]
+    fn a_pane_environment_resolves_a_target_without_dialling_anything() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        term.env = SessionEnv::of_session(
+            [
+                (agwinterm::ENABLED_VAR.to_owned(), "1".to_owned()),
+                // A pipe name nothing is serving: construction must not need it.
+                (
+                    agwinterm::PIPE_VAR.to_owned(),
+                    format!("terminal-windows-absent-{}", std::process::id()),
+                ),
+                (agwinterm::SESSION_VAR.to_owned(), "w1:p2".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            term.host().expect("a pane is a host").target().session(),
+            "w1:p2",
+        );
+        // And with the host unreachable, the metrics question still gets an answer.
+        assert_eq!(term.cell_size().unwrap(), Some(agwinterm::FALLBACK_CELL));
+    }
+
+    #[test]
+    fn an_explicit_override_reaches_the_backend_through_the_session_environment() {
+        let mut term = Terminal::detached(Inbox::new(), None);
+        term.env = SessionEnv::of_session(
+            [(agwinterm::CELL_PX_VAR.to_owned(), "9x19".to_owned())]
+                .into_iter()
+                .collect(),
+        );
+
+        assert_eq!(term.cell_size().unwrap(), Some((9, 19)));
+        assert_eq!(
+            term.mouse_position_px(1, 1),
+            (4, 9),
+            "the pointer follows the override, not the fallback",
+        );
+    }
+
     #[test]
     fn what_later_tasks_own_still_names_the_task_that_will_implement_it() {
         let mut term = Terminal::detached(Inbox::new(), None);
@@ -1677,7 +1852,6 @@ mod tests {
             );
         };
         fails(term.draw(&Canvas::new(4, 4)).map(|_| ()), "draw");
-        fails(term.cell_size().map(|_| ()), "cell_size");
         fails(term.set_pointer_shape("pointer"), "set_pointer_shape");
         fails(term.set_clipboard("text"), "set_clipboard");
         fails(term.request_clipboard(), "request_clipboard");
