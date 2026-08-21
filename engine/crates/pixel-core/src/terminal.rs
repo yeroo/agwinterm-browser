@@ -9,9 +9,9 @@ use rustix::termios::{self, OptionalActions, Termios};
 #[cfg(unix)]
 use crate::canvas::Canvas;
 #[cfg(unix)]
-use crate::wrapper::Wrapper;
-#[cfg(unix)]
 use crate::kitty::Placement;
+#[cfg(unix)]
+use crate::wrapper::Wrapper;
 
 // The type vocabulary lives in `terminal_types` so the tty backend below can be
 // platform-gated without taking the vocabulary with it. It is re-exported here so

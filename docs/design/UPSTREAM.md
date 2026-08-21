@@ -121,6 +121,21 @@ fails loudly rather than at the Task 10 milestone.
    behaviour, but a re-vendor that drops it fails as a picture that stops being
    right rather than as a build error, so it is listed here and pinned by a test.
 
+6. **`engine/crates/pixel-core/src/engine/mod.rs` — one added `#[test]`** (Task 11).
+   No production line changed, and the test asserts something about *upstream's*
+   code rather than the port's: that `NativeScroll::spawn(None)` yields nothing
+   unless `NATIVE_SCROLL_HELPER` names a helper.
+
+   It is here because that is what makes `reports_pixel_mouse() == false` a
+   documented ceiling instead of a bug. Both gates the flag feeds — `pointer.rs:61`
+   and `scroll.rs:192` — sit behind `self.native`, so on a platform with no scroll
+   helper the flag changes nothing that runs. If upstream ever spawns a helper
+   without the variable, that reasoning stops holding, and this is what says so.
+
+   The lightest possible touch to one of the 43, and still a touch: recorded so the
+   `git diff`-against-baseline check in `tools/vendor-check/unchanged.test.mjs` has
+   a written reason for every file it finds.
+
 ## Re-vendoring checklist
 
 1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update this file.

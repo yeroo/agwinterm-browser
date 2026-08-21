@@ -874,6 +874,28 @@ impl Terminal {
         published
     }
 
+    /// Takes the last frame back off the pane.
+    ///
+    /// A frame is a placement the host holds until something replaces it, so on unix
+    /// there is nothing to undo — the Kitty escapes go through the terminal's own
+    /// stream and the shell's next output scrolls them away. Here the picture would
+    /// simply stay, over a pane that is otherwise a working terminal.
+    ///
+    /// Every failure is swallowed on purpose. This runs from `Drop`, on the way out,
+    /// often *because* something already went wrong; a dead pipe or a host that has
+    /// closed the pane are both "the placement is gone anyway", and neither is worth
+    /// a message on an exit path. The publisher is put back afterwards so the field
+    /// is left as it was found.
+    fn clear_frame(&mut self) {
+        let Some(mut frames) = self.frames.take() else {
+            return;
+        };
+        if let Some(client) = self.host() {
+            let _ = frames.clear(client);
+        }
+        self.frames = Some(frames);
+    }
+
     pub fn read_event(&mut self) -> io::Result<Event> {
         match self.poll_event(None)? {
             Some(event) => Ok(event),
@@ -1176,6 +1198,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
+        self.clear_frame();
         if let Some(conout) = self.conout.as_ref() {
             let _ = conout.write_all(DISABLE_REPORTING);
         }

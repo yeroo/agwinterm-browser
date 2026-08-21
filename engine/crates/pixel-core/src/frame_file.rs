@@ -69,6 +69,18 @@ use crate::frame_shm::Transport;
 /// the bring-up path rather than something that waits on the agwinterm plan.
 pub(crate) const FRAME_CMD: &str = "image.frame";
 
+/// The verb that takes the picture back off the pane.
+///
+/// A frame is a *placement*: agwinterm holds it until something replaces it, which
+/// is what makes switching sessions free (Task 10) and what makes an exiting
+/// browser a problem. The last frame outlives the process that drew it, and the
+/// shell underneath goes on running with a page painted over it — the pane is a
+/// working terminal that cannot be read. Every exit path owes the host this verb:
+/// [`Terminal`](crate::terminal::Terminal)'s `Drop` for an ordinary quit or an
+/// unwind, and the CLI's foreground wait for the exits `Drop` cannot see —
+/// `TerminalProcess` killed, a crash, a `taskkill /F`.
+pub(crate) const CLEAR_CMD: &str = "image.clear";
+
 /// The one image id this path ever transmits under.
 ///
 /// Fixed, not rotated. Placement is replaced wholesale by every `image.frame`
@@ -409,6 +421,23 @@ impl FramePublisher {
     #[cfg(test)]
     pub(crate) fn peek_path(&self) -> PathBuf {
         self.path_for(self.seq)
+    }
+
+    /// Takes the last frame back off the pane, so what is underneath can be read.
+    ///
+    /// Sent on the way out and nowhere else. It is deliberately not a `Drop` on this
+    /// type: the publisher is taken out of the terminal and put back on every frame
+    /// (see [`Terminal::draw`](crate::terminal::Terminal::draw)), so a `Drop` here
+    /// would clear the pane in the middle of drawing to it.
+    ///
+    /// A publisher that never published has nothing to take back, and asking anyway
+    /// would clear a placement some *other* process owns.
+    pub(crate) fn clear(&mut self, client: &mut ControlClient) -> io::Result<()> {
+        if self.seq == 0 {
+            return Ok(());
+        }
+        client.send(CLEAR_CMD, None).and_then(Reply::result)?;
+        Ok(())
     }
 
     /// Encodes, writes and publishes one frame. Returns the bytes written, which is
@@ -1011,6 +1040,67 @@ mod tests {
         assert_eq!(raw, "\"frame:1/1\"");
     }
 
+    // -- taking the frame back off the pane --------------------------------
+    //
+    // A frame is a placement the host holds, so an exiting browser leaves a page
+    // painted over a pane that has gone back to being a shell. Task 14's acceptance
+    // check — "a killed browser leaves the pane usable as a terminal" — is about
+    // this, and found it: the shell underneath was running and answering, and none
+    // of it was readable.
+
+    #[test]
+    fn the_way_out_takes_the_picture_with_it() {
+        let server = PipeServer::answering(&ok_frame(), 2);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the frame goes out");
+        publisher.clear(&mut client).expect("and comes back off");
+
+        let requests = server.requests();
+        assert!(
+            requests.last().is_some_and(|last| last.contains(CLEAR_CMD)),
+            "the last thing said was not {CLEAR_CMD}: {requests:?}",
+        );
+    }
+
+    #[test]
+    fn a_publisher_that_never_drew_clears_nothing() {
+        // The placement on that pane belongs to whoever *did* draw it. A browser
+        // that failed before its first frame must not take someone else's picture
+        // down on its way out.
+        let server = PipeServer::answering(&ok_frame(), 1);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        publisher.clear(&mut client).expect("nothing to do");
+
+        assert!(
+            server.requests().is_empty(),
+            "it spoke anyway: {:?}",
+            server.requests(),
+        );
+    }
+
+    #[test]
+    fn a_host_that_refuses_the_clear_is_still_an_exit() {
+        // This runs from `Drop`, usually because something already went wrong. A
+        // refusal is reported to the caller — which is what makes it testable — but
+        // the caller is an exit path that has nothing left to do about it.
+        let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect_err("the host refuses the frame too");
+        publisher
+            .clear(&mut client)
+            .expect_err("and says so rather than pretending");
+    }
+
     // -- the frame budget -------------------------------------------------
     //
     // Task 10 had to measure this path before Task 12 could argue against it, and
@@ -1168,7 +1258,8 @@ mod tests {
     /// The log store is one per process and `cargo test` runs these in threads, so
     /// two transport tests reading it at once would each count the other's line.
     /// Held for the whole of each such test — the window being guarded is
-    /// "publish, then read the log", not either half.
+    /// "publish, then read the log", not either half. Every test that publishes
+    /// under `shm` takes it, reader or not: publishing is the half that writes.
     static TRANSPORT_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn alone_with_the_log() -> std::sync::MutexGuard<'static, ()> {
@@ -1196,6 +1287,10 @@ mod tests {
         // `image.frameshm`'s layout is unpublished: the frame goes out, and it goes
         // out as an `image.frame`. A request for a transport this build lacks must
         // never cost a frame.
+        //
+        // This one reads no log, but publishing under `shm` *writes* one, and a
+        // reader holding the lock would otherwise count this line as its own.
+        let _alone = alone_with_the_log();
         let server = PipeServer::answering(&ok_frame(), 3);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");

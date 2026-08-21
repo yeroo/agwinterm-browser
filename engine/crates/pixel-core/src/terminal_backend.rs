@@ -129,7 +129,6 @@ pub trait TerminalBackend: Sized {
     /// Ask for the clipboard's contents in a given mime type. The answer arrives as
     /// `Event::ClipboardData`.
     fn request_clipboard_data(&mut self, mime: &str) -> io::Result<()>;
-
 }
 
 // One impl, both platforms. Each body forwards to the inherent method of the same

@@ -27,6 +27,7 @@ import {
 } from "./launch";
 import type { LaunchPlan } from "./launch";
 import { lsCommand } from "./ls";
+import { clearPaneFrame } from "./pane";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -353,13 +354,20 @@ async function openInForeground(argv: string[]): Promise<number> {
     stdio: "inherit",
     env: { ...process.env, TERMINAL_BROWSER_CONSOLE_PID: String(process.pid) },
   });
-  return new Promise<number>((resolve) => {
+  const exited = await new Promise<number>((resolve) => {
     child.on("error", (error) => {
       process.stderr.write(`could not start ${plan.file}: ${error.message}\n`);
       resolve(1);
     });
     child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
   });
+  // Whatever just happened to the browser, the pane is ours again — and a frame is
+  // a placement agwinterm holds until something replaces it, so without this the
+  // last page stays painted over a shell that is running underneath. The engine
+  // clears it on an ordinary exit; this covers the exits that run no destructor.
+  // Failure means the placement is gone anyway, so it cannot change the exit code.
+  await clearPaneFrame(process.env);
+  return exited;
 }
 
 async function attachHere(argv: string[]): Promise<never> {

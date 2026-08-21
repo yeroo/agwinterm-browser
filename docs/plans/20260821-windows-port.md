@@ -1265,18 +1265,63 @@ foreground and set the pane title; with `AGWINTERM_ENABLED` unset it refuses wit
 
 ### Task 14: Verify acceptance criteria
 
-- [ ] verify every requirement in the Overview is implemented
-- [ ] verify no WSL and no patched Electron anywhere in the dependency chain — including that
+The whole run is written up in [`docs/design/06-acceptance.md`](../design/06-acceptance.md):
+method, evidence and the two defects it found. Every live check ran against a Debug
+agwinterm on its own pipe (`--app-id agwinterm-dev`), built for this and stopped afterwards.
+
+- [x] verify every requirement in the Overview is implemented
+      — the table in §1 of the acceptance doc, requirement by requirement. Both accepted
+      ceilings are still ceilings and still documented.
+- [x] verify no WSL and no patched Electron anywhere in the dependency chain — including that
       `browser/package.json` has no `postinstall` and no fork mirror appears in the lockfile
-- [ ] verify the file-based fallback works with `image.frameshm` disabled
-- [ ] verify a killed browser process leaves the pane usable as a terminal
-- [ ] **verify the 43 keep-unchanged files are unchanged** (`git diff` against the vendored baseline)
+      — no WSL outside prose saying it is out of scope. The `postinstall` is *not* absent: it is
+      `node node_modules/electron/install.js`, divergence 1, because removing it outright leaves no
+      Electron binary at all (Task 1). The check that matters is the fork, and there is none —
+      `electron@43.3.0` resolves by npm-registry integrity hash, and the lockfile has no `tarball:`
+      resolution, no non-registry URL and no `overrides` block. Binary reports 43.3.0, stock.
+- [x] verify the file-based fallback works with `image.frameshm` disabled
+      — run with `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` in a dev pane: 11 frames, each with a
+      `publish_ms` (the `image.frame` round trip) in the budget TSV, page legible on screen.
+      ➕ **Found a test-isolation bug on the way**: the transport tests share a process-wide log
+      store behind a mutex that only the *readers* took, so the `shm` publisher's warning landed in
+      another test's window under `cargo test`'s threads. `cargo nextest` gives each test its own
+      process and structurally cannot see this; both runners are now part of "tests pass".
+- [x] verify a killed browser process leaves the pane usable as a terminal
+      — ⚠️ **it did not, and the failure was invisible to everything but the eye.** The shell
+      underneath was running and answering — `session.text` returned its prompt, typing produced
+      output — and none of it was readable, because a frame is a *placement* agwinterm holds until
+      something replaces it, and nothing in the port ever sent `image.clear`. Fixed in the two
+      places that can, because neither covers the other: `Terminal::drop` → `FramePublisher::clear`
+      for an ordinary quit or unwind, and `clearPaneFrame` (`cli/src/pane.ts`) after
+      `openInForeground`'s wait for the exits that run no destructor. Both verified live, with
+      captures. 3 Rust tests + 13 node tests, the latter against a real named-pipe server.
+- [x] **verify the 43 keep-unchanged files are unchanged** (`git diff` against the vendored baseline)
       — all 46 `pixel-core` source files including the five subdirectories, not the 19 revision 1
       named. The Task 3 re-export shim is the one expected diff. [triage: major]
-- [ ] verify the inherited ~197 tests still pass
-- [ ] run `cargo nextest run --workspace` and `node --test`
-- [ ] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
-- [ ] verify coverage meets the project standard
+      — **4 of 46 differ**: `terminal.rs` (a replaceable module — the port *is* that diff), `lib.rs`
+      (module declarations only), and — beyond what this plan expected — `clipboard_image.rs`
+      (divergence 4) and `engine/mod.rs` (divergence 6, one added `#[test]`). So **40 of the 43 are
+      byte-identical** and three have a written reason. `ghostty.rs` and `herdr.rs` are byte-identical
+      too: "drop one" is a `#[cfg(unix)]` in `lib.rs`, not an edit. Task 4 predicted this list would
+      grow and said why. Now pinned by `tools/vendor-check/unchanged.test.mjs`, which fails if the
+      set moves either way and cross-checks each entry against `UPSTREAM.md`.
+- [x] verify the inherited ~197 tests still pass — the 203 measured at Task 4, still green on Windows
+- [x] run `cargo nextest run --workspace` and `node --test`
+      — **406 Rust tests** (1 skipped: `bench_encode`, a manual benchmark) and **223 node tests**,
+      all passing. `cargo test --workspace` is run as well and is not redundant: it shares one
+      process, which is the only way the log-store race above is observable.
+- [x] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
+      — 12 clippy warnings and 298 rustfmt complaints, **none of them on a line this port wrote**.
+      That is Task 1's disposition (the vendored tree fails both checks at the baseline, and
+      reformatting it is the silent edit the Constraints forbid), and it is now *enforced* rather
+      than asserted: `tools/vendor-check/{fmt,clippy}-scope.py` run the real check and `git blame`
+      every complaint against the vendoring commit. Two genuinely port-authored fmt complaints were
+      found this way and fixed.
+- [x] verify coverage meets the project standard
+      — the standard is this plan's own (tests per task, success and error scenarios); there is no
+      coverage percentage in this repo and inventing one here would be a number, not a standard.
+      What is checked is that every port-added module carries tests — 120 Rust across six modules,
+      223 node across fifteen files — plus the stronger inherited-suite claim above. Table in §6.
 
 ### Task 15: [Final] Update documentation
 

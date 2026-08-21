@@ -46,7 +46,6 @@ fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     file.read_exact_at(buf, offset)
 }
 
-
 pub struct Config {
     pub queue_frames: usize,
     pub key_interval: Duration,
