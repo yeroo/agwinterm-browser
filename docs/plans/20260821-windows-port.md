@@ -249,16 +249,53 @@ Done before any gating, because `lib.rs` declares `mod terminal;` unconditionall
 `pub use terminal::SessionEnv;` at crate root — a bare `#[cfg(unix)]` breaks the crate root and 11
 keep-unchanged modules. [triage: major]
 
-- [ ] move `Event`, `KeyEvent`, `KeyKind`, `Mods`, `Key`, `Mouse`, `MouseKind`, `MouseButton`,
+- [x] move `Event`, `KeyEvent`, `KeyKind`, `Mods`, `Key`, `Mouse`, `MouseKind`, `MouseButton`,
       `TerminalColors`, `ColorSlot`, `WindowSize`, `Waker`, `SessionEnv` into their own module
-- [ ] **re-export them from `terminal`** so all 11 importers and `lib.rs`'s `pub use` are untouched:
+      — `pixel-core/src/terminal_types.rs`, the crate's 47th file and the first the port adds.
+      Three private members widened to `pub(crate)` because the decoder and the tty code still
+      construct them: `KeyEvent::plain` (18 call sites, all in the decoder), `TerminalColors::set`
+      (`terminal.rs:986`), and `Waker.fd` (built at `:774`, read at `:785`). Nothing became `pub`.
+      ⚠️ **`Waker` is in the vocabulary but is not portable**: its body is the write end of the tty
+      backend's self-pipe (`rustix::fd::OwnedFd`). It moved because `lib.rs` exports it at the crate
+      root, so gating it would break the root — but Task 5 replaces the body, not just the backend.
+      It happens to *compile* on Windows (rustix aliases `fd` to the socket types there), which is
+      why the baseline error count did not move; that is not the same as working.
+- [x] **re-export them from `terminal`** so all 11 importers and `lib.rs`'s `pub use` are untouched:
       `engine/{clipboard,doc,embed,input,keys,mod,pointer,scroll}.rs`, `menu.rs`, `native.rs`,
       `text_input.rs`
-- [ ] verify `text_input.rs`'s tests still resolve `crate::terminal::Mods` and `KeyKind` (:1345-1351)
-- [ ] note in the commit that a re-export shim is the expected diff, so Task 14's unchanged-check
+      — one `pub use crate::terminal_types::{…}` at `terminal.rs:14`. All 11 importers and both of
+      `lib.rs`'s `pub use terminal::…` lines are byte-identical; `git diff` inside `pixel-core` is
+      two files, and `lib.rs`'s is a single added `mod terminal_types;`.
+- [x] verify `text_input.rs`'s tests still resolve `crate::terminal::Mods` and `KeyKind` (:1345-1351)
+      — verified by compiling, not by reading: `cargo check -p pixel-core --all-targets
+      --target x86_64-unknown-linux-gnu` is clean, and that target is the only one on which the
+      crate compiles at all today. ➕ **cross-checking against a unix target is how this task got
+      real verification on a Windows box.** `rustup target add x86_64-unknown-linux-gnu` plus
+      `cargo check` needs no linker, so the unix build — including every `#[cfg(test)]` target — is
+      compile-verified here. This is a development check, not a WSL fallback; nothing runs.
+- [x] note in the commit that a re-export shim is the expected diff, so Task 14's unchanged-check
       does not read it as a violation
-- [ ] write tests asserting each re-exported path still resolves (a compile-level test module)
-- [ ] run tests — must pass before Task 4
+      — noted in the commit body, and made mechanical rather than remembered: the Task 1 vendor-check
+      now separates `PORT_ADDED_FILES` from upstream's 46 and asserts the shim's shape directly
+      (every moved name re-exported, no importer rewritten onto the new path, `lib.rs` limited to the
+      one `mod` line). Its decoder-region test was re-anchored to `enum RawEvent` … `mod tests`
+      instead of hardcoded lines 1251-1909, since this extraction shifted the region up by 178 lines
+      and Task 4's gating will move it again.
+- [x] write tests asserting each re-exported path still resolves (a compile-level test module)
+      — `terminal_types.rs`'s `mod tests`: three sub-modules naming the vocabulary through
+      `crate::terminal::_`, through the crate root, and as the importers themselves spell it, plus a
+      test that a value built through one path is assignable through another (a duplicate definition
+      rather than an alias would fail to compile there). Five behavioural tests cover the moved
+      bodies — `KeyEvent::plain`, `TerminalColors::set`, `WindowSize::cell_size`, `SessionEnv::var`.
+      ⚠️ The compile-level half is verified now; the `#[test]` bodies cannot *run* until Task 4 makes
+      `pixel-core` build on Windows, since running them on a unix target would need WSL.
+- [x] run tests — must pass before Task 4 — 30 node tests (24 before, +6 for the split), 15
+      `conpty-probe` and 14 `console-inherit-probe` Rust tests still green. `cargo check -p
+      pixel-core --all-targets --target x86_64-unknown-linux-gnu` clean; `cargo clippy` on that
+      target yields a warning set **identical to HEAD's, file for file** (15, all pre-existing
+      upstream); `rustfmt --check` clean on `terminal_types.rs` and unchanged (23 diffs, as before)
+      on the vendored `terminal.rs`. `cargo check --workspace` on Windows: still exactly the 41
+      baseline errors, in the same three files.
 
 ### Task 4: The backend seam — gate the tty code, keep the decoder
 

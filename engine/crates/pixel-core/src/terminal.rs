@@ -7,140 +7,14 @@ use crate::canvas::Canvas;
 use crate::wrapper::Wrapper;
 use crate::kitty::Placement;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event {
-    Key(KeyEvent),
-    Mouse(Mouse),
-    Paste(String),
-    Focus(bool),
-    WindowSize(WindowSize),
-    ClipboardData {
-        items: Vec<(String, Vec<u8>)>,
-        ok: bool,
-    },
-    ColorSchemeChanged,
-    Colors(TerminalColors),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeyEvent {
-    pub key: Key,
-    pub mods: Mods,
-    pub kind: KeyKind,
-    pub text: Option<String>,
-}
-
-impl KeyEvent {
-    fn plain(key: Key) -> Self {
-        let text = match key {
-            Key::Char(c) => Some(c.to_string()),
-            _ => None,
-        };
-        Self {
-            key,
-            mods: Mods::default(),
-            kind: KeyKind::Press,
-            text,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum KeyKind {
-    #[default]
-    Press,
-    Repeat,
-    Release,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Mods {
-    pub shift: bool,
-    pub alt: bool,
-    pub ctrl: bool,
-    pub sup: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    Char(char),
-    Up,
-    Down,
-    Left,
-    Right,
-    Home,
-    End,
-    Insert,
-    PageUp,
-    PageDown,
-    Function(u8),
-    LeftShift,
-    LeftControl,
-    LeftAlt,
-    LeftSuper,
-    RightShift,
-    RightControl,
-    RightAlt,
-    RightSuper,
-    Enter,
-    Backspace,
-    Delete,
-    Escape,
-    Tab,
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mouse {
-    pub kind: MouseKind,
-    pub button: MouseButton,
-    pub mods: Mods,
-    pub x: u32,
-    pub y: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseKind {
-    Down,
-    Up,
-    Move,
-    ScrollUp,
-    ScrollDown,
-    ScrollLeft,
-    ScrollRight,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MouseButton {
-    Left,
-    Middle,
-    Right,
-    None,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TerminalColors {
-    pub foreground: Option<[u8; 4]>,
-    pub background: Option<[u8; 4]>,
-    pub palette: [Option<[u8; 4]>; 16],
-}
-
-impl TerminalColors {
-    fn set(&mut self, slot: ColorSlot, rgba: [u8; 4]) {
-        match slot {
-            ColorSlot::Foreground => self.foreground = Some(rgba),
-            ColorSlot::Background => self.background = Some(rgba),
-            ColorSlot::Palette(i) => self.palette[i as usize] = Some(rgba),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorSlot {
-    Foreground,
-    Background,
-    Palette(u8),
-}
+// The type vocabulary lives in `terminal_types` so the tty backend below can be
+// platform-gated without taking the vocabulary with it. It is re-exported here so
+// every importer of `crate::terminal::{…}` — eleven modules plus `lib.rs`'s
+// crate-root `pub use` — keeps compiling unchanged.
+pub use crate::terminal_types::{
+    ColorSlot, Event, Key, KeyEvent, KeyKind, Mods, Mouse, MouseButton, MouseKind, SessionEnv,
+    TerminalColors, Waker, WindowSize,
+};
 
 const COLOR_SLOT_COUNT: usize = 18;
 const COLOR_QUERY_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -167,25 +41,6 @@ impl ColorQuery {
         match self.last_reply {
             Some(at) => (at + COLOR_QUERY_IDLE).min(self.started + COLOR_QUERY_TIMEOUT),
             None => self.started + COLOR_QUERY_TIMEOUT,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowSize {
-    pub cols: u32,
-    pub rows: u32,
-    pub width_px: u32,
-    pub height_px: u32,
-}
-
-impl WindowSize {
-    // fixme: why is this an option? if this is not an invariant, we should define the terminals this is the case for
-    pub fn cell_size(&self) -> Option<(u32, u32)> {
-        if self.cols > 0 && self.rows > 0 && self.width_px > 0 && self.height_px > 0 {
-            Some((self.width_px / self.cols, self.height_px / self.rows))
-        } else {
-            None
         }
     }
 }
@@ -296,39 +151,6 @@ extern "C" fn sigwinch_handler(_: libc::c_int) {
             unsafe {
                 libc::write(fd, [1u8].as_ptr().cast(), 1);
             }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Waker {
-    fd: std::sync::Arc<rustix::fd::OwnedFd>,
-}
-
-impl Waker {
-    pub fn wake(&self) {
-        let _ = rustix::io::write(&*self.fd, &[1]);
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SessionEnv {
-    session: Option<std::collections::HashMap<String, String>>,
-}
-
-impl SessionEnv {
-    pub fn of_session(env: std::collections::HashMap<String, String>) -> Self {
-        Self { session: Some(env) }
-    }
-
-    pub fn of_process() -> Self {
-        Self { session: None }
-    }
-
-    pub(crate) fn var(&self, key: &str) -> Option<String> {
-        match &self.session {
-            Some(env) => env.get(key).cloned(),
-            None => std::env::var(key).ok(),
         }
     }
 }
