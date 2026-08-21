@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { sandboxSetupNote } from "./unsupported";
+
 const REFUSAL = `the codex sandbox blocks commands terminal-browser needs to run to determine the terminal pane terminal-browser is running in.
 Re-run this command with escalated permissions.`;
 
@@ -68,8 +70,20 @@ export function linuxSandboxError(electronBinary: string): string | null {
   return null;
 }
 
+/**
+ * The sandbox half of `terminal-browser setup`.
+ *
+ * Upstream returned 0 in silence off Linux. That is the wrong shape for a setup
+ * step: the user cannot tell whether a sandbox was configured or whether the
+ * command decided there was nothing to do. Off Linux this now says which, and
+ * `sandboxSetupNote` in `unsupported.ts` owns the wording.
+ */
 export function apparmorSetup(electronBinary: string): number {
-  if (process.platform !== "linux") return 0;
+  const note = sandboxSetupNote(process.platform);
+  if (note) {
+    process.stdout.write(`${note}\n`);
+    return 0;
+  }
   try {
     execFileSync("bash", [APPARMOR_SCRIPT, electronBinary], { stdio: "inherit" });
     return 0;

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 
-import { DAEMON_SOCKET, LOGS_DIR, ensureDataDir } from "pixel-store";
+import { DAEMON_ENDPOINT, LOGS_DIR, ensureDataDir } from "pixel-store";
 import {
   callerTty,
   canSplit,
@@ -18,7 +18,7 @@ import { actionCommand } from "./action";
 import { control } from "./control";
 import { setupCommand } from "./editors";
 import { commandHelp, helpTopics, rootHelp } from "./help";
-import { browsers, describe, recordKey } from "./instances";
+import { browsers, describe, recordKey, scopeHere } from "./instances";
 import type { Browser } from "./instances";
 import {
   browserLaunchPlan,
@@ -33,6 +33,13 @@ import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from
 import type { RemoteBundle } from "./ssh";
 import type { InstanceRecord } from "./registry";
 import { installedVersion, upgradeCommand } from "./upgrade";
+import { splitUnsupported, windowsHostRefusal } from "./unsupported";
+
+// The port runs one browser per pane, in the foreground, rather than sessions
+// inside a shared daemon: `docs/design/03-process-model.md`. Every branch below
+// that reads this constant is a consequence of that decision, not a platform
+// quirk of its own.
+const WINDOWS = process.platform === "win32";
 
 const DIST_ROOT = process.env.TERMINAL_BROWSER_DIST_ROOT ?? null;
 delete process.env.ELECTRON_RUN_AS_NODE;
@@ -139,7 +146,7 @@ function browserBuildStamp(): string {
 
 function connectDaemon(): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
-    const socket = net.connect(DAEMON_SOCKET);
+    const socket = net.connect(DAEMON_ENDPOINT);
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
   });
@@ -273,6 +280,16 @@ async function gone(pid: number, within: number): Promise<boolean> {
 }
 
 async function shutdownDaemon(): Promise<number> {
+  // On Windows there is no daemon to stop, and this must return before
+  // `daemonPid()` runs: that function returns the first live *instance* pid, which
+  // in the foreground shape is a browser someone is using, and `kill` would then
+  // stop it while reporting that it stopped a daemon.
+  if (WINDOWS) {
+    process.stdout.write(
+      "no daemon on Windows — each browser runs in its own pane. Close one with q, or stop its process.\n",
+    );
+    return 0;
+  }
   let socket: net.Socket | null = null;
   try {
     socket = await connectDaemon();
@@ -312,6 +329,37 @@ async function kill(pid: number, why: string): Promise<number> {
   if (!(await gone(pid, 2000))) process.kill(pid, "SIGKILL");
   process.stdout.write(`daemon stopped, killed ${pid} because ${why}\n`);
   return 0;
+}
+
+/**
+ * The Windows shape of `open`: the browser runs here, in this pane's console.
+ *
+ * There is no daemon in this path and no tty in the request, because Windows has
+ * neither to offer — see `docs/design/03-process-model.md`. What replaces the tty
+ * path is the console the CLI is already attached to: `stdio: "inherit"` hands the
+ * child the same handles, and `TERMINAL_BROWSER_CONSOLE_PID` names this process so
+ * the engine's `AttachConsole` has an explicit target rather than relying on the
+ * process tree staying one level deep (`terminal_windows.rs:347`). Electron is a
+ * GUI-subsystem binary and is given no console of its own, which is measured, not
+ * assumed (`tools/console-inherit-probe`).
+ *
+ * Not detached, and not unref'd: this process is the pane's foreground job, so it
+ * stays until the browser exits and carries its exit code out.
+ */
+async function openInForeground(argv: string[]): Promise<number> {
+  const plan = browserLaunchCommand(argv);
+  const child = spawn(plan.file, plan.args, {
+    cwd: plan.cwd,
+    stdio: "inherit",
+    env: { ...process.env, TERMINAL_BROWSER_CONSOLE_PID: String(process.pid) },
+  });
+  return new Promise<number>((resolve) => {
+    child.on("error", (error) => {
+      process.stderr.write(`could not start ${plan.file}: ${error.message}\n`);
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
 }
 
 async function attachHere(argv: string[]): Promise<never> {
@@ -391,6 +439,10 @@ function isDirection(value: string): value is Direction {
 function takeSplitFlag(args: string[]): Direction | null {
   const raw = takeFlag(args, "--split");
   if (raw === undefined) return null;
+  // Refused before the direction is validated, so an unsupported flag is not
+  // reported as a mistyped one.
+  const unsupported = splitUnsupported(process.platform);
+  if (unsupported) fail(unsupported);
   if (!isDirection(raw)) fail(`invalid --split ${raw} (right, left, down, up)`);
   return raw;
 }
@@ -441,6 +493,15 @@ async function launchInSplit(
 let asked: Promise<TerminalCheck> | null = null;
 
 function currentTerminal(): Promise<TerminalCheck> {
+  // The Kitty graphics probe writes an APC escape to the terminal and waits for a
+  // reply. ConPTY strips APC, so on Windows it can only ever time out — and the
+  // answer would be about the wrong channel anyway, since frames leave over
+  // agwinterm's control pipe. `windowsHostRefusal` asks the question that decides
+  // it there, and `checkTerminal` is never given the chance to guess.
+  if (WINDOWS) {
+    asked ??= Promise.resolve({ terminal: null, graphics: "supported" as const });
+    return asked;
+  }
   asked ??= checkTerminal(detect());
   return asked;
 }
@@ -450,7 +511,7 @@ async function newTabCommand(url: string | undefined, key: string | undefined): 
   const found = await browsers(check.terminal);
   const here = key
     ? found.filter((browser) => recordKey(browser) === key)
-    : found.filter((browser) => browser.inCurrentTab);
+    : scopeHere(found);
   const list = (browsers: Browser[]) => browsers.map((browser) => `  ${describe(browser)}`).join("\n");
   if (key && here.length === 0) fail(`no browser ${key}. Running:\n${list(found)}`);
   if (here.length > 1) {
@@ -459,11 +520,12 @@ async function newTabCommand(url: string | undefined, key: string | undefined): 
   const target = here[0];
   if (target) {
     const where = url ? { cmd: "open-tab", url, cwd: process.cwd() } : { cmd: "open-tab" };
-    print(await control(target.socket, where));
+    print(await control(target.endpoint, where));
     return 0;
   }
   await requireGraphics(check);
   const argv = url ? [url] : [];
+  if (WINDOWS) return openInForeground(argv);
   if (interactiveTty()) return openHere(argv);
   if (!canSplit(check.terminal)) fail(cannotOpenPanes(check.terminal));
   const split = url && fs.existsSync(url) ? [path.resolve(url)] : argv;
@@ -475,6 +537,8 @@ async function newTabCommand(url: string | undefined, key: string | undefined): 
 }
 
 async function requireGraphics(check: TerminalCheck) {
+  const refusal = windowsHostRefusal(process.platform, process.env);
+  if (refusal) fail(refusal);
   if (check.graphics !== "unsupported") return;
   process.stderr.write(unsupportedGraphicsMessage(process.stderr.isTTY === true));
   process.exit(1);
@@ -554,6 +618,13 @@ async function openCommand(args: string[]) {
     fail(`unexpected ${positionals[1]} (one url; --split <direction> opens a new pane)`);
   }
   await requireGraphics(await currentTerminal());
+  // `split` is always null here on Windows — `takeSplitFlag` refuses first — so
+  // this is the only Windows path out of `open`, and it is the foreground one.
+  if (WINDOWS) {
+    const code = await openInForeground(args);
+    if (code !== 0) process.exit(code);
+    return;
+  }
   if (!split && interactiveTty()) {
     return openHere(args);
   }

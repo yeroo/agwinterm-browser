@@ -5,6 +5,7 @@ import readline from "node:readline";
 
 import { instances } from "./registry";
 import type { InstanceRecord } from "./registry";
+import { upgradeUnsupported } from "./unsupported";
 
 const RELEASE_ORIGIN = process.env.TERMINAL_BROWSER_RELEASE_ORIGIN ?? "https://terminal-browser.sh/install";
 
@@ -68,6 +69,10 @@ function runInstaller(url: string): Promise<number> {
 }
 
 export async function upgradeCommand(): Promise<number> {
+  // Checked before the version lookup, so the refusal names the real obstacle
+  // rather than "could not perform upgrade" from a missing dist root.
+  const unsupported = upgradeUnsupported(process.platform);
+  if (unsupported) throw new Error(unsupported);
   const current = installedVersion();
   if (!current) {
     throw new Error("Could not perform upgrade: please file an issue https://github.com/zenbu-labs/terminal-browser/issues");

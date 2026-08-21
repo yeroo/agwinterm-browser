@@ -21,6 +21,13 @@ mod frame_file;
 mod frame_shm;
 #[cfg(unix)]
 pub mod ghostty;
+// A second host protocol, and permanently disabled on Windows rather than pending.
+// `herdr` is not a transport for the agwinterm path — it is a different host, found
+// through `HERDR_SOCKET_PATH` and negotiated with `pane.graphics.info`, which must
+// answer `file_frame_transport: "direct-kitty"` before the module will speak to it
+// (`herdr.rs:56`). Kitty escapes are exactly what ConPTY strips, so a Windows port
+// of the transport would produce a client that connects and then cannot draw. The
+// host does not run on Windows either. Recorded in `docs/design/05-cli-and-endpoints.md`.
 #[cfg(unix)]
 mod herdr;
 mod image_cache;

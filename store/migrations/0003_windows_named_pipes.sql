@@ -1,0 +1,1 @@
+ALTER TABLE `instances` RENAME COLUMN `socket` TO `endpoint`;

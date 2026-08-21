@@ -10,6 +10,10 @@ const migrations = files.map((file) => ({
   id: file.replace(/\.sql$/, ""),
   statements: fs
     .readFileSync(path.join(dir, file), "utf8")
+    // A Windows checkout has CRLF in the .sql files, so without this the embedded
+    // statements differ byte for byte depending on where the script was run. The
+    // SQL is unaffected either way; the diff is not.
+    .replaceAll("\r\n", "\n")
     .split("--> statement-breakpoint")
     .map((statement) => statement.trim())
     .filter(Boolean),

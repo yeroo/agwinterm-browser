@@ -10,6 +10,12 @@ export interface CallerTty {
 }
 
 export function callerTty(): CallerTty {
+  // Windows has no path that names a terminal — that is the fact the whole port
+  // is built around (`docs/design/03-process-model.md`). Answering "none, and
+  // nothing stopped me looking" is the truth; walking the process tree with `ps`
+  // would throw on the first hop and report `denied: true`, which callers read as
+  // a sandbox refusal and print advice about escalating permissions.
+  if (process.platform === "win32") return { path: null, denied: false };
   let pid = process.pid;
   for (let hops = 0; hops < 30 && pid > 1; hops++) {
     let out: string;

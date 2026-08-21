@@ -1,15 +1,25 @@
 import net from "node:net";
 
+import { endpointKind } from "pixel-store";
+
+/**
+ * One request, one line, one reply, to a browser's control endpoint.
+ *
+ * The endpoint is a unix socket path on unix and a `\\.\pipe\…` name on Windows;
+ * `net.connect` takes both through the same argument, so the protocol below is
+ * untouched by the port. Only the diagnostics needed to change — "socket" is the
+ * wrong noun for half the addresses this now sees.
+ */
 export function control(
-  socketPath: string,
+  endpoint: string,
   request: Record<string, unknown>,
   timeoutMs = 10_000,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const connection = net.connect(socketPath);
+    const connection = net.connect(endpoint);
     const timer = setTimeout(() => {
       connection.destroy();
-      reject(new Error("control request timed out"));
+      reject(new Error(`control request timed out (${endpointKind(endpoint)} ${endpoint})`));
     }, timeoutMs);
     let buffer = "";
     connection.setEncoding("utf8");

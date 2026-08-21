@@ -5,6 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import { sshUnsupported } from "./unsupported";
+
 export interface SshTunnel {
   destination: string;
   socksPort: number;
@@ -51,6 +53,10 @@ export function resolveSshTarget(target: string): ResolvedTarget {
 }
 
 export function validateSshTarget(target: string): void {
+  // The first thing `--ssh` touches, on the argument-parsing path, so a platform
+  // that cannot hold the tunnel open says so before anything is spawned.
+  const unsupported = sshUnsupported(process.platform);
+  if (unsupported) throw new Error(unsupported);
   const words = target.trim().split(/\s+/).filter(Boolean);
   if (words.length > 1) parseSshWords(words, target);
   else parseSshTarget(words[0] ?? "");

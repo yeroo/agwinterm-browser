@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { app } from "electron";
 
-import { DAEMON_SOCKET } from "pixel-store";
+import { DAEMON_ENDPOINT, endpointAlive, isPipeEndpoint, removeEndpoint } from "pixel-store";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
 
@@ -30,13 +30,18 @@ export function buildStamp(): string {
 }
 
 export async function runDaemon(cdpPort: number | null): Promise<void> {
-  if (await socketAlive()) {
+  if (await endpointAlive(DAEMON_ENDPOINT)) {
     process.stderr.write("terminal-browser daemon already running\n");
     app.exit(3);
     return;
   }
-  fs.mkdirSync(path.dirname(DAEMON_SOCKET), { recursive: true });
-  fs.rmSync(DAEMON_SOCKET, { force: true });
+  // A socket path needs its directory to exist and its remnant unlinked before
+  // `listen`. A pipe name needs neither: it has no directory, and the object
+  // manager dropped the name when the previous owner died. See store/src/endpoint.ts.
+  if (!isPipeEndpoint(DAEMON_ENDPOINT)) {
+    fs.mkdirSync(path.dirname(DAEMON_ENDPOINT), { recursive: true });
+  }
+  removeEndpoint(DAEMON_ENDPOINT);
 
   const build = buildStamp();
   const sessions = new Map<string, SessionHandle>();
@@ -146,19 +151,9 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
     });
   });
   server.on("error", (error) => {
-    process.stderr.write(`terminal-browser daemon socket error: ${error}\n`);
+    process.stderr.write(`terminal-browser daemon endpoint error: ${error}\n`);
     app.exit(1);
   });
-  server.listen(DAEMON_SOCKET);
+  server.listen(DAEMON_ENDPOINT);
 }
 
-function socketAlive(): Promise<boolean> {
-  return new Promise((resolve) => {
-    const probe = net.connect(DAEMON_SOCKET);
-    probe.once("connect", () => {
-      probe.end();
-      resolve(true);
-    });
-    probe.once("error", () => resolve(false));
-  });
-}

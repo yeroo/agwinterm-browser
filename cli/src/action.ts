@@ -6,7 +6,7 @@ import { AGENT_SOCKETS_DIR } from "pixel-store";
 import type { Terminal } from "pixel-terminals";
 
 import { control } from "./control";
-import { browsers, describe, recordKey, targets } from "./instances";
+import { browsers, describe, noBrowserHere, recordKey, scopeHere, targets } from "./instances";
 import type { Browser, TabTarget } from "./instances";
 
 const DIST_ROOT = process.env.TERMINAL_BROWSER_DIST_ROOT ?? null;
@@ -161,13 +161,9 @@ async function select(terminal: Terminal | null, options: ActionOptions): Promis
       );
     }
   } else {
-    const here = all.filter((browser) => browser.inCurrentTab);
+    const here = scopeHere(all);
     if (here.length === 0) {
-      throw new Error(
-        `no terminal browser in this terminal tab — pass --browser <key>\n\nrunning:\n  ${all
-          .map(describe)
-          .join("\n  ")}`,
-      );
+      throw new Error(`${noBrowserHere()}\n\nrunning:\n  ${all.map(describe).join("\n  ")}`);
     }
     candidates = here;
   }
@@ -229,16 +225,16 @@ async function interceptTabLifecycle(
   const positional = args.filter((arg) => !arg.startsWith("-"));
   const [command, sub, value] = positional;
   if (command === "open") {
-    return control(selection.browser.socket, { cmd: "open-tab", url: sub });
+    return control(selection.browser.endpoint, { cmd: "open-tab", url: sub });
   }
   if (command !== "tab") return null;
   if (sub === "new") {
-    return control(selection.browser.socket, { cmd: "open-tab", url: value });
+    return control(selection.browser.endpoint, { cmd: "open-tab", url: value });
   }
   if (sub === "close") {
     const id = value ? Number(value.replace(/^t/, "")) : selection.tab.id;
     if (!Number.isFinite(id)) throw new Error(`cannot read a tab id from ${value}`);
-    return control(selection.browser.socket, { cmd: "close-tab", tab: id });
+    return control(selection.browser.endpoint, { cmd: "close-tab", tab: id });
   }
   return null;
 }
@@ -273,7 +269,7 @@ export async function actionCommand(terminal: Terminal | null, options: ActionOp
     if (switched.status !== 0) throw new Error(`agent-browser could not switch to ${match.tabId}`);
   }
   if (options.follow && !tab.active) {
-    await control(browser.socket, { cmd: "activate-tab", tab: tab.id });
+    await control(browser.endpoint, { cmd: "activate-tab", tab: tab.id });
   }
 
   const child = spawnSync(binary, ["--session", session, ...options.passthrough], {

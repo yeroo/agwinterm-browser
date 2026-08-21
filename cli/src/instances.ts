@@ -33,13 +33,35 @@ export interface Where {
 export async function asked(records: InstanceRecord[]): Promise<Map<string, Where>> {
   const answers = await Promise.all(
     records.map(async (record) => {
-      const where = await control(record.socket, { cmd: "where" }, 2000).catch(() => null);
+      const where = await control(record.endpoint, { cmd: "where" }, 2000).catch(() => null);
       return [recordKey(record), where as Where | null] as const;
     }),
   );
   return new Map(
     answers.filter((entry): entry is [string, Where] => entry[1] !== null),
   );
+}
+
+/**
+ * The browsers a command with no `--browser` should consider.
+ *
+ * On unix that is "the ones in this terminal tab", which upstream computes by
+ * asking each browser where it is and comparing with where the CLI is. On Windows
+ * the question does not arise: the port runs one browser per pane, in the
+ * foreground, holding that pane's console for as long as it lives
+ * (`docs/design/03-process-model.md`). A CLI process running in that pane is
+ * therefore impossible, so `inCurrentTab` is false for every browser and filtering
+ * on it would scope every command to nothing. The whole list is the honest scope.
+ */
+export function scopeHere(found: Browser[], platform: NodeJS.Platform = process.platform): Browser[] {
+  return platform === "win32" ? found : found.filter((browser) => browser.inCurrentTab);
+}
+
+/** Why nothing was in scope, phrased for the platform the user is on. */
+export function noBrowserHere(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32"
+    ? "no terminal browser to act on — pass --browser <key>"
+    : "no terminal browser in this terminal tab — pass --browser <key>";
 }
 
 export function locate(
@@ -79,7 +101,7 @@ export async function browsers(terminal: Terminal | null): Promise<Browser[]> {
 }
 
 export async function targets(browser: Browser): Promise<TabTarget[]> {
-  const reply = (await control(browser.socket, { cmd: "targets" })) as { tabs?: TabTarget[] };
+  const reply = (await control(browser.endpoint, { cmd: "targets" })) as { tabs?: TabTarget[] };
   return reply.tabs ?? [];
 }
 

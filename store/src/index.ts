@@ -5,10 +5,25 @@ export {
   FAVICONS_DIR,
   INSTANCES_DIR,
   AGENT_SOCKETS_DIR,
-  DAEMON_SOCKET,
+  DAEMON_ENDPOINT,
   DB_FILE,
+  appPaths,
   ensureDataDir,
+  instanceEndpoint,
+  instanceEndpointIn,
 } from "./paths";
+export type { AppPaths, PathOptions } from "./paths";
+export {
+  PIPE_PREFIX,
+  connectEndpoint,
+  endpointAlive,
+  endpointKind,
+  isPipeEndpoint,
+  pipeEndpoint,
+  pipeSegment,
+  reclaimEndpoint,
+  removeEndpoint,
+} from "./endpoint";
 export { openStore, store } from "./client";
 export type { Store } from "./client";
 export { appState, instances, settings } from "./schema";

@@ -1,14 +1,14 @@
 import { callerTty } from "pixel-terminals";
 import type { Terminal } from "pixel-terminals";
 
-import { browsers, recordKey, targets } from "./instances";
+import { browsers, recordKey, scopeHere, targets } from "./instances";
 import type { Browser, TabTarget } from "./instances";
 
 interface Listed {
   key: string;
   pid: number;
   cdpPort: number | null;
-  socket: string;
+  endpoint: string;
   tty: string | null;
   pane: { tab: string | null; pane: string | null };
   splitDir: Browser["splitDir"];
@@ -24,7 +24,7 @@ async function collect(list: Browser[]): Promise<Listed[]> {
       key: recordKey(browser),
       pid: browser.pid,
       cdpPort: browser.cdpPort,
-      socket: browser.socket,
+      endpoint: browser.endpoint,
       tty: browser.tty,
       pane: { tab: browser.paneTab, pane: browser.pane },
       splitDir: browser.splitDir,
@@ -54,7 +54,9 @@ function render(list: Listed[]): string {
 
 export async function lsCommand(terminal: Terminal | null, all: boolean, json: boolean) {
   const found = await browsers(terminal);
-  const scoped = all ? found : found.filter((browser) => browser.inCurrentTab);
+  // `scopeHere` is the whole list on Windows, so `--all` is implied there rather
+  // than being a flag the user has to learn — see its comment for why.
+  const scoped = all ? found : scopeHere(found);
   const list = await collect(scoped);
   if (!json) {
     process.stdout.write(render(list));

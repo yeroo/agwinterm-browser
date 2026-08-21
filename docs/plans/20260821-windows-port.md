@@ -1132,26 +1132,136 @@ capability it uses, and a static page is precisely the workload it is in product
 Larger than revision 1's "port the CLI": upstream has **two** socket protocols, not one, and their
 endpoint strings are persisted and consumed across four CLI modules. [triage: major]
 
-- [ ] port both to named pipes behind **one shared endpoint abstraction**: the daemon socket
+> The decisions are written up in [`docs/design/05-cli-and-endpoints.md`](../design/05-cli-and-endpoints.md).
+> The short version: Node's `net` speaks named pipes through the same API as unix sockets, so the
+> line protocol needed no porting at all — what differs is the **lifetime of the name**, and that is
+> the whole of the new abstraction.
+
+- [x] port both to named pipes behind **one shared endpoint abstraction**: the daemon socket
       (`store/src/paths.ts:46-48`, `browser/src/daemon.ts:38-39`) and the per-browser socket
       (`browser/src/registry.ts:52-57`), both currently filesystem paths deleted with `fs.rmSync`
-- [ ] update the persisted endpoint column (`store/src/schema.ts:7`) and its four consumers —
+      — **`store/src/endpoint.ts`** (new), and it is deliberately not a transport shim: `net.connect`
+      and `net.createServer` already take `\\.\pipe\<name>` where a path went, so every handler,
+      frame and reply in `daemon.ts` and `registry.ts` is untouched. What the module owns is the
+      asymmetry those two files got wrong for Windows — a socket *file* outlives its server and must
+      be unlinked before binding; a pipe *name* does not exist apart from its server and frees
+      itself when the process dies. So `removeEndpoint` unlinks on unix, is an honest no-op on
+      Windows, **and returns which**, `endpointAlive` is the probe that is the only stale-check a
+      pipe can support, and `reclaimEndpoint` probes *before* unlinking — which upstream did not,
+      and which on unix silently detaches a live server from its name.
+      ➕ `endpoint.ts` never imports `paths.ts`, only the reverse, so the naming rules are testable
+      without a home directory.
+- [x] update the persisted endpoint column (`store/src/schema.ts:7`) and its four consumers —
       `cli/src/{main,control,instances,action}.ts`
-- [ ] cover stale-endpoint cleanup, which has no `fs.rmSync` analogue for named pipes
-- [ ] port `registry.ts`, `ls.ts` and application-data locations to Windows conventions
-- [ ] `sandbox.ts` is apparmor-specific: stub it with an explicit "not supported on Windows" rather
+      — `instances.socket` → `instances.endpoint`, by a real `ALTER TABLE … RENAME COLUMN` in
+      migration **`0003_windows_named_pipes`**, so an existing database keeps its rows (asserted
+      against a database migrated to 0002, filled, then reopened). All four consumers follow, plus
+      `ls.ts`'s `--json` field, which the plan's list missed — it is a fifth. `control.ts` takes an
+      `endpoint`, not a `socketPath`, and its timeout message names the kind.
+      ➕ `store/scripts/embed-migrations.ts` now normalises CRLF: a Windows checkout has it in the
+      `.sql` files, so without this `pnpm db:generate` rewrites every earlier migration's embedded
+      text and the diff hides the one real change. The drizzle-kit meta snapshot and journal were
+      updated by hand alongside, so the next `generate` diffs from the right state.
+- [x] cover stale-endpoint cleanup, which has no `fs.rmSync` analogue for named pipes
+      — and the answer is that on Windows **there is nothing at the endpoint to clean up**: the name
+      is already free. What actually goes stale is the **row**, on both platforms, and it is what
+      strands `terminal-browser ls` behind a 2 s control timeout per phantom. `listInstances` drops
+      it and then calls `removeEndpoint`, which is the unlink on unix and nothing on Windows.
+      ➕ **a real bug found on the way**: `alive(pid)` treated *any* `process.kill(pid, 0)` throw as
+      death. Windows reports `EPERM` for a live process at a higher integrity level, so a running
+      browser's row could be pruned out from under it. Only `ESRCH` is death now.
+- [x] port `registry.ts`, `ls.ts` and application-data locations to Windows conventions
+      — `%LOCALAPPDATA%\<app>\{data,logs,cache\favicons,instances}` in place of five independent XDG
+      bases, one root so an uninstall is one directory. `appPaths(platform, env, home, appDirName)`
+      is pure and each branch joins with its own platform's `path` flavour, so **both columns of the
+      layout table are checked from one test run on one machine**. `<app>` is unchanged, which is
+      what keeps two installs off each other's pipe names.
+      ➕ **`ls`'s scope needed a decision, not a port.** With `--split` unsupported the Windows shape
+      is one browser per pane holding that pane's console, so a CLI running *in that pane* is
+      impossible and `inCurrentTab` is false for every browser, always — filtering on it scopes
+      every command to nothing. `scopeHere` (`cli/src/instances.ts`) returns the whole list on
+      Windows, making `ls` behave as though `--all` were passed, and `action`'s "no terminal browser
+      in this terminal tab" is reworded because on Windows the tab is not the reason.
+      ➕ `callerTty()` (`pixel-terminals`) returned `{ path: null, denied: true }` on Windows — it
+      shells out to `ps`, and the first-hop throw is read as a sandbox refusal. It now answers
+      "none, and nothing stopped me looking", which is the truth.
+- [x] `sandbox.ts` is apparmor-specific: stub it with an explicit "not supported on Windows" rather
       than silently pretending a sandbox is in place
-- [ ] `ssh.ts`, `upgrade.ts`: port, stub or drop per command, and record the decision — do not leave
+      — `apparmorSetup` returned 0 in silence off Linux, which reads as "a sandbox was configured".
+      It now prints `sandboxSetupNote(platform)`. The wording is careful: Chromium *is* sandboxed on
+      Windows, by the OS, with nothing to install — the AppArmor profile is a Linux-only workaround
+      for Ubuntu withholding unprivileged user namespaces, and the note says so rather than claiming
+      Windows is unsandboxed.
+- [x] `ssh.ts`, `upgrade.ts`: port, stub or drop per command, and record the decision — do not leave
       a command that appears to work but does not
-- [ ] port `herdr.rs` to named pipes, or record it as permanently disabled on Windows with a reason
-- [ ] **`--split` is out of scope unless agwinterm gains a matching verb.** `pixel-terminals` has no
+      — both **refused, each naming its own obstacle**, from the new import-free `cli/src/unsupported.ts`.
+      `--ssh`: the tunnel is multiplexed over an ssh control socket (`ssh -S`, `ssh -O exit`) and
+      Win32 OpenSSH does not implement ControlMaster, so it cannot be held open between commands;
+      the rest of `ssh.ts` would port, this one thing does not. Checked in `validateSshTarget`, on
+      the argument-parsing path, so nothing is spawned first. `upgrade`: runs the release channel's
+      `curl | bash` installer and no Windows channel publishes one; checked *before* the version
+      lookup, so the message is the real obstacle rather than "could not perform upgrade" from a
+      missing dist root. Both ordering claims are pinned by tests.
+      ➕ **`shutdown` was the dangerous one, and it is not on the plan's list.** There is no daemon
+      in the foreground shape, but `shutdownDaemon` falls back to `daemonPid()` — which returns *the
+      first live instance pid*, i.e. a browser somebody is using — and then `kill`s it while
+      reporting that it stopped a daemon. The Windows branch returns before that, and a test asserts
+      the ordering rather than the message.
+- [x] port `herdr.rs` to named pipes, or record it as permanently disabled on Windows with a reason
+      — **permanently disabled**, recorded at the `#[cfg(unix)]` in `lib.rs` and in the design doc.
+      It is not a transport for the agwinterm path; it is a *different host*, found through
+      `HERDR_SOCKET_PATH` and negotiated with `pane.graphics.info`, which must answer
+      `file_frame_transport: "direct-kitty"` before the module will speak to it (`herdr.rs:56`).
+      Kitty escapes are exactly what ConPTY strips, so porting the socket would produce a client
+      that connects and then cannot draw. The host does not run on Windows either.
+- [x] **`--split` is out of scope unless agwinterm gains a matching verb.** `pixel-terminals` has no
       agwinterm detector, and agwinterm's `session.split` takes an operation but not a command
       (`ControlServer.cs:134-135,163`), so upstream's `--split` semantics cannot be met without a
       further host change. Record it as unsupported. [triage: major]
-- [ ] write tests for path, endpoint and registry resolution on Windows
-- [ ] write tests for stale-endpoint cleanup
-- [ ] write tests for each stubbed command reporting unsupported clearly
-- [ ] run tests — must pass before Task 14
+      — recorded, and refused in `takeSplitFlag` **before the direction is validated**, so
+      `--split sideways` on Windows reports that no direction would have worked rather than a typo.
+- [x] write tests for path, endpoint and registry resolution on Windows
+      — `tools/cli/endpoint.test.mjs` (24) drives the built `pixel-store`: pipe-vs-path recognition
+      including the `\\?\pipe\` spelling and the remote `\\host\pipe\` that must *not* count, the
+      separator sanitiser that stops a key nesting a pipe name, both layout columns, and both
+      endpoint resolvers. `tools/cli/registry.test.mjs` (14) drives the real `Registry` against the
+      real `control` client **over a real named pipe** — `state`, `where`, `open-tab`, an unknown
+      command, a browser-side refusal, three concurrent requests — with only `upsertInstance`/
+      `removeInstance` faked, so no database is opened to run a test.
+      `tools/cli/store.test.mjs` (10) covers the migration and the pruning rule.
+- [x] write tests for stale-endpoint cleanup
+      — not against a mock of Win32: a real `net.Server` is opened on a real pipe and probed before
+      and after it closes, the name is shown to free itself and be re-bindable, `reclaimEndpoint` is
+      shown to refuse a name someone still holds *and to leave the owner reachable*, and a stale
+      socket **file** is shown to be unlinked. The dead-row half is driven against a real
+      `node:sqlite` database, including a dead row whose endpoint is a pipe.
+- [x] write tests for each stubbed command reporting unsupported clearly
+      — `tools/cli/unsupported.test.mjs` (18), in two layers, because a refusal has two failure
+      modes. The wording and per-platform behaviour are driven directly; the **call sites** are then
+      asserted by reading them, because a correct message in a function nobody calls is the exact
+      bug this task exists to prevent. The ordering claims — before the direction is validated,
+      before the version lookup, before `daemonPid` — are the ones that would otherwise regress
+      silently.
+      ➕ verified against the built CLI as well as in tests: `shutdown`, `upgrade`, `--split` and
+      `--ssh` each print their own refusal, and `open` outside a pane prints the host refusal.
+- [x] run tests — must pass before Task 14 — **204 node tests** (138 before, **+66**), all passing.
+      Rust is untouched but for one comment: **346 + 57** tests (1 pre-existing ignored benchmark),
+      `cargo check --workspace` clean, clippy at the same **12** warnings as Tasks 8/11/12, and
+      `cargo fmt --all --check`'s residual is **172 hunks, identical**. `pixel-store`,
+      `pixel-terminals` and the CLI build with `tsc`, and `browser/`'s `tsc --noEmit` is clean.
+
+➕ **Scope added: `open` actually opens on Windows.** Not on the plan's list, and without it the CLI
+still only knew how to spawn a daemon — Task 10's milestone had to be driven by a `.cmd` file, whose
+comment says so. `openInForeground` (`cli/src/main.ts`) is the Windows shape decided in Task 2:
+`spawn` with `stdio: "inherit"`, no detach, wait, carry the exit code out — this process is the
+pane's foreground job. It sets `TERMINAL_BROWSER_CONSOLE_PID` to its own pid so the engine's
+`AttachConsole` (`terminal_windows.rs:347`) has an explicit target rather than relying on the process
+tree staying one level deep. The graphics check is **replaced rather than skipped**: `probeGraphics`
+writes an APC escape and waits for a reply, ConPTY strips APC, so on Windows it can only time out and
+would be answering about the wrong channel anyway — `windowsHostRefusal` asks whether this is an
+agwinterm pane, which the pane's own environment states outright. Verified end to end: run from this
+pane, `node cli/dist/main.js open https://example.com` launched a real Electron browser in the
+foreground and set the pane title; with `AGWINTERM_ENABLED` unset it refuses with the reason.
 
 ### Task 14: Verify acceptance criteria
 

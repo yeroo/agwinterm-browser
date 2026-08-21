@@ -1,13 +1,12 @@
 import fs from "node:fs";
 import net from "node:net";
-import path from "node:path";
 
 import { callerTty } from "pixel-terminals";
 import { removeInstance, upsertInstance } from "pixel-store";
 import type { InstanceRow } from "pixel-store";
 
 import type { BrowserState } from "./page/types";
-import { INSTANCES_DIR } from "pixel-store";
+import { INSTANCES_DIR, instanceEndpoint, isPipeEndpoint, removeEndpoint } from "pixel-store";
 
 export interface Where {
   terminal: string | null;
@@ -39,7 +38,7 @@ interface ControlRequest {
 
 export class Registry {
   private readonly host: ControlHost;
-  private readonly socketPath: string;
+  private readonly endpoint: string;
   private readonly tty: string | null;
   private readonly startedAt = Date.now();
   private cdpPort: number | null = null;
@@ -49,12 +48,15 @@ export class Registry {
   constructor(host: ControlHost) {
     this.host = host;
     this.tty = host.tty ?? callerTty().path;
-    this.socketPath = path.join(INSTANCES_DIR, `${host.key}.sock`);
-    fs.mkdirSync(INSTANCES_DIR, { recursive: true });
-    fs.rmSync(this.socketPath, { force: true });
+    this.endpoint = instanceEndpoint(host.key);
+    // A pipe name has no directory to create and nothing to unlink; a socket path
+    // has both. `removeEndpoint` already knows which it was handed, but the mkdir
+    // is meaningful only in the filesystem case, so that one is asked directly.
+    if (!isPipeEndpoint(this.endpoint)) fs.mkdirSync(INSTANCES_DIR, { recursive: true });
+    removeEndpoint(this.endpoint);
     this.server = net.createServer((connection) => this.serve(connection));
     this.server.on("error", () => {});
-    this.server.listen(this.socketPath);
+    this.server.listen(this.endpoint);
     this.write();
   }
 
@@ -77,7 +79,7 @@ export class Registry {
       tty: this.tty,
       splitDir: this.host.splitDir,
       parentTty: this.host.parentTty,
-      socket: this.socketPath,
+      endpoint: this.endpoint,
       cdpPort: this.cdpPort,
       startedAt: this.startedAt,
     };
@@ -89,7 +91,7 @@ export class Registry {
     this.server?.close();
     this.server = null;
     void removeInstance(this.host.key).catch(() => {});
-    fs.rmSync(this.socketPath, { force: true });
+    removeEndpoint(this.endpoint);
   }
 
   private write() {

@@ -19,5 +19,11 @@ export const migrations: { id: string; statements: string[] }[] = [
       "ALTER TABLE `instances` ADD `split_dir` text;",
       "ALTER TABLE `instances` ADD `parent_tty` text;"
     ]
+  },
+  {
+    "id": "0003_windows_named_pipes",
+    "statements": [
+      "ALTER TABLE `instances` RENAME COLUMN `socket` TO `endpoint`;"
+    ]
   }
 ];

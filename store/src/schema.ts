@@ -4,7 +4,9 @@ export const instances = sqliteTable("instances", {
   key: text("key").primaryKey(),
   pid: integer("pid").notNull(),
   tty: text("tty"),
-  socket: text("socket").notNull(),
+  // Named `endpoint`, not `socket`: on Windows this holds a `\\.\pipe\…` name,
+  // which is neither a socket nor a path. See `store/src/endpoint.ts`.
+  endpoint: text("endpoint").notNull(),
   cdpPort: integer("cdp_port"),
   url: text("url").notNull().default(""),
   title: text("title").notNull().default(""),
