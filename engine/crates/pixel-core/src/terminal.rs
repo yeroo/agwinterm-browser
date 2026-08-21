@@ -137,6 +137,10 @@ pub struct Terminal {
 // state with no platform dependency, and the decoder's own chunk-concatenation
 // test builds one. Task 5's Windows clipboard reads accumulate into it too.
 #[derive(Default)]
+// Filled only by the tty backend's clipboard reads, which are gated out on Windows
+// until Task 11. Scoped to the item and to Windows, so the unix build still reports
+// dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 struct ClipRead {
     items: Vec<(String, Vec<u8>)>,
     total: usize,
@@ -1122,7 +1126,7 @@ impl Drop for Terminal {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum RawEvent {
+pub(crate) enum RawEvent {
     Key(KeyEvent),
     Mouse(MouseKind, MouseButton, Mods, u32, u32),
     Paste(String),
@@ -1134,7 +1138,7 @@ enum RawEvent {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ClipStatus {
+pub(crate) enum ClipStatus {
     Ok,
     Data,
     Done,
@@ -1142,7 +1146,7 @@ enum ClipStatus {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct ClipPacket {
+pub(crate) struct ClipPacket {
     status: ClipStatus,
     mime: Option<String>,
     payload: Vec<u8>,
@@ -1203,7 +1207,7 @@ fn parse_event(buf: &[u8]) -> Option<(RawEvent, usize)> {
     parse_event_kitty(buf, false)
 }
 
-fn parse_event_kitty(buf: &[u8], kitty_active: bool) -> Option<(RawEvent, usize)> {
+pub(crate) fn parse_event_kitty(buf: &[u8], kitty_active: bool) -> Option<(RawEvent, usize)> {
     let b0 = *buf.first()?;
     if b0 != 0x1b {
         return parse_plain_bytes(buf, kitty_active);
@@ -1677,6 +1681,10 @@ fn parse_sgr_mouse(params: &[u8], press: bool) -> Option<(MouseKind, MouseButton
     Some((kind, button, mods, x, y))
 }
 
+// Reached only from the tty backend's capability probes, which are gated out on
+// Windows: agwinterm implements none of the protocols they ask about. Scoped to
+// the item and to Windows, so the unix build still reports dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_kitty_keyboard(buf: &[u8]) -> Option<bool> {
     let mut at = 0;
     while let Some(found) = buf[at..].windows(3).position(|w| w == b"\x1b[?") {
@@ -1690,18 +1698,30 @@ fn parse_kitty_keyboard(buf: &[u8]) -> Option<bool> {
     None
 }
 
+// Reached only from the tty backend's capability probes, which are gated out on
+// Windows: agwinterm implements none of the protocols they ask about. Scoped to
+// the item and to Windows, so the unix build still reports dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_decrqm_1016(buf: &[u8]) -> Option<bool> {
     let start = buf.windows(8).position(|w| w == b"\x1b[?1016;")? + 8;
     let ps = *buf.get(start)?;
     Some(ps == b'1' || ps == b'3')
 }
 
+// Reached only from the tty backend's capability probes, which are gated out on
+// Windows: agwinterm implements none of the protocols they ask about. Scoped to
+// the item and to Windows, so the unix build still reports dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_decrqm_5522(buf: &[u8]) -> Option<bool> {
     let start = buf.windows(8).position(|w| w == b"\x1b[?5522;")? + 8;
     let ps = *buf.get(start)?;
     Some(ps == b'1' || ps == b'2' || ps == b'3')
 }
 
+// Reached only from the tty backend's capability probes, which are gated out on
+// Windows: agwinterm implements none of the protocols they ask about. Scoped to
+// the item and to Windows, so the unix build still reports dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_decrqm_2031(buf: &[u8]) -> Option<bool> {
     let start = buf.windows(8).position(|w| w == b"\x1b[?2031;")? + 8;
     let ps = *buf.get(start)?;
@@ -1726,7 +1746,7 @@ fn parse_rgb_spec(spec: &str) -> Option<[u8; 4]> {
     Some([r, g, b, 255])
 }
 
-fn parse_osc_color(buf: &[u8], selector: &str) -> Option<[u8; 4]> {
+pub(crate) fn parse_osc_color(buf: &[u8], selector: &str) -> Option<[u8; 4]> {
     let text = String::from_utf8_lossy(buf);
     let prefix = format!("\x1b]{selector}rgb:");
     let start = text.find(&prefix)? + prefix.len();
@@ -1763,6 +1783,11 @@ fn parse_osc_color_reply(seq: &[u8]) -> Option<(ColorSlot, [u8; 4])> {
     Some((slot, parse_rgb_spec(&spec)?))
 }
 
+// Reached only from `cell_size`'s `\x1b[16t` query, which the Windows backend does
+// not send: agwinterm's `csi_dispatch` has no `t` arm, and where the metrics come
+// from instead is Task 6's decision. Scoped to the item and to Windows, so the unix
+// build still reports dead code here.
+#[cfg_attr(windows, allow(dead_code))]
 fn parse_cell_size_report(buf: &[u8]) -> Option<(u32, u32)> {
     let start = buf.windows(4).position(|w| w == b"\x1b[6;")? + 4;
     let end = start + buf[start..].iter().position(|&b| b == b't')?;

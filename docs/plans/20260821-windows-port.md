@@ -405,18 +405,95 @@ keep-unchanged modules. [triage: major]
 
 ### Task 5: Windows console input
 
-- [ ] implement the input half of the Windows backend, **in the process Task 2 chose**
-- [ ] enable VT input with `SetConsoleMode` (`ENABLE_VIRTUAL_TERMINAL_INPUT`, line and echo input
+- [x] implement the input half of the Windows backend, **in the process Task 2 chose**
+      — `pixel-core/src/terminal_windows.rs` grew from a 24-method stub into the real thing:
+      `AttachConsole` (named pid first, `ATTACH_PARENT_PROCESS` as fallback, `ERROR_ACCESS_DENIED`
+      read as "already attached"), `CONIN$`/`CONOUT$` opened **by name**, the raw-mode pair, the
+      reporting-mode setup and teardown, `read_event`/`poll_event`/`waker`/`watch_resize`/`size`.
+      All four numbered items in [`03-process-model.md`](../design/03-process-model.md)'s Task 5
+      brief are implemented; the doc now records what was built and what Task 9 owes it.
+      ➕ **The env var that carries point 3's process id is named here:
+      `TERMINAL_BROWSER_CONSOLE_PID`**, read through `SessionEnv` rather than `std::env` so it
+      also works in the daemon shape. Task 9's launcher sets it.
+- [x] enable VT input with `SetConsoleMode` (`ENABLE_VIRTUAL_TERMINAL_INPUT`, line and echo input
       off), restoring the prior mode on exit **including on panic**
-- [ ] **reuse the existing decoder at `terminal.rs:1251-1909` — do not write a second one.** It
+      — `raw_input_mode` clears `ENABLE_LINE_INPUT|ENABLE_ECHO_INPUT|ENABLE_PROCESSED_INPUT` and
+      sets `ENABLE_VIRTUAL_TERMINAL_INPUT`, preserving every other bit; that is exactly the set
+      `tools/console-inherit-probe` measured reading an SGR mouse report off a real ConPTY, and it
+      was not widened on a guess. `vt_output_mode` adds `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and
+      `DISABLE_NEWLINE_AUTO_RETURN` to `CONOUT$`. Restoration is a `ModeGuard` whose `Drop` puts
+      back the exact mode it read **and** a process-global registry walked by a `panic` hook, so a
+      panic on another thread — or one that skips a destructor — still leaves the pane usable.
+- [x] **reuse the existing decoder at `terminal.rs:1251-1909` — do not write a second one.** It
       already handles kitty CSI-u, SGR mouse, OSC color and incomplete tails; its
       `parse_event_consumes_one_event_and_reports_incomplete_tails` test (:2144) is exactly the
       split-across-two-reads case
-- [ ] handle resize from the console screen buffer, since there is no `SIGWINCH`
-- [ ] write tests only for what is genuinely new — the Windows read loop, mode set/restore, and
+      — `poll_event` calls `parse_event_kitty` and nothing else parses. The whole cost was
+      **five visibility widenings in `terminal.rs`** (`parse_event_kitty`, `parse_osc_color`,
+      `RawEvent`, `ClipStatus`, `ClipPacket` → `pub(crate)`); no line of decoder logic changed and
+      `terminal_windows.rs` defines no `parse_` function of its own, which a new vendor-check
+      assertion enforces. `terminal.rs` is one of the three modules `UPSTREAM.md` excludes from
+      the divergence list, so this is port subject matter rather than a divergence.
+- [x] handle resize from the console screen buffer, since there is no `SIGWINCH`
+      — `watch_resize` takes a baseline from `GetConsoleScreenBufferInfo` and `poll_event` caps
+      its wait at 100 ms so it can re-read and emit `Event::WindowSize` on a change. **`srWindow`,
+      not `dwSize`**: under a pseudoconsole they are equal, but under a plain conhost `dwSize.Y`
+      is the scrollback height and would report tens of thousands of rows. Pixels are reported as
+      zero rather than guessed, so `WindowSize::cell_size()` answers `None` — Task 6's question,
+      left open on purpose. Mode 2048 in-band reports are decoded for free if the host ever sends
+      them, and share the same baseline so a resize cannot be announced twice.
+- [x] write tests only for what is genuinely new — the Windows read loop, mode set/restore, and
       resize — rather than re-testing the inherited parser
-- [ ] write tests for raw-mode restoration on the normal and panicking exit paths
-- [ ] run tests — must pass before Task 6
+      — 21 tests, and the platform ones drive the real API rather than a mock of it: the read
+      loop runs over a **real anonymous pipe**, and the mode and size calls run against a **real
+      private console screen buffer** (`CreateConsoleScreenBuffer`), which is a genuine console
+      object whose modes can be changed without disturbing the terminal the suite is running in.
+      Covered: bytes → events in arrival order, one per call; an event split across two reads
+      held until whole; timeout honoured; `read_event` blocking; the waker interrupting a
+      deadline-less wait, and not being lost when it arrives first; a reader error surfacing as
+      itself rather than as end of input; resize seen with no input at all; resize silent until
+      asked for; the in-band/screen-buffer double-up; the reporting modes being symmetric; and
+      the palette drain not hanging on a terminal that never answers.
+      ➕ **The obvious read loop is wrong, and wrong on every keypress.** Waiting on the console
+      input handle and then calling `ReadFile` fails because a record that translates to no bytes
+      (key-up, focus, buffer-size) signals the handle and is then consumed silently, so the read
+      blocks past the caller's deadline — and one keypress queues exactly such a record. The
+      blocking read therefore lives on its own thread feeding an `Inbox`. That is also what
+      `Waker` carries on Windows, so `terminal_types.rs`'s `Waker` is now platform-split: same
+      name, same `wake()`, `#[cfg(unix)]` fd or `#[cfg(windows)]` inbox.
+      ➕ **`query_colors` and `request_colors` were implemented too, though the plan did not list
+      them.** `engine/mod.rs:345` calls `query_colors()?` in the constructor and `request_colors`
+      on every focus change, so leaving them `Unsupported` would have made the engine
+      unconstructible on Windows — and both are write-then-read-the-reply operations that only
+      this task's console I/O can provide. They reuse the decoder's `parse_osc_color`.
+      `cell_size` deliberately stays unimplemented: it is Task 6's decision, not this one's.
+- [x] write tests for raw-mode restoration on the normal and panicking exit paths
+      — `entering_and_leaving_a_mode_round_trips_a_real_console_handle` (drop path, asserting the
+      exact prior mode comes back), `the_panic_hook_restores_a_mode_no_drop_would_reach` (the
+      registry walk on its own), `a_panicking_exit_path_leaves_the_console_as_it_was_found`
+      (a real `catch_unwind`, recording from inside that the mode really did change first, so a
+      run that changed nothing cannot pass by doing nothing), and
+      `a_failed_apply_registers_nothing_it_will_never_pair`. ⚠️ **The mode tests hold a shared
+      mutex**: the registry and the panic hook are process-global, so one test's deliberate panic
+      would otherwise restore another test's mode early. ⚠️ **The input half's `SetConsoleMode`
+      is unit-tested as a bitmask, not against a real input handle** — there is one console input
+      buffer per process and it belongs to the terminal running the suite; a private screen
+      buffer is an output handle and rejects input flags with `ERROR_INVALID_PARAMETER`. The real
+      input path was measured end to end by `tools/console-inherit-probe` in Task 2.
+- [x] run tests — must pass before Task 6 — **268 Rust tests pass on Windows** (0 failed; 247
+      before, +21 for this task) and **43 node tests** (37 before, +6 pinning this backend's
+      shape). `cargo clippy -p pixel-core --all-targets` on Windows is back to the **5**
+      pre-existing warnings, and on `x86_64-unknown-linux-gnu` **15**, both matching Task 4's
+      recorded baselines; `cargo check --all-targets` is clean on both, so the gated tty code
+      still compiles. `cargo fmt --all --check`'s residual diff set is **identical to HEAD's,
+      file for file** (173 hunks), with the new file fmt-clean. `cargo check --workspace` still
+      reports exactly the 2 `pixel-node` errors Task 4 handed to Task 8, unchanged.
+      ➕ Removing Task 4's `#[cfg_attr(windows, allow(dead_code))]` from `mod terminal` and
+      `mod terminal_types` exposed 7 items that are genuinely dead on Windows — `ClipRead` and
+      the five capability probes (`parse_kitty_keyboard`, three `parse_decrqm_*`,
+      `parse_cell_size_report`), which ask about protocols agwinterm does not implement. They now
+      carry the suppression per item instead of the whole module, so the rest of `terminal.rs`
+      reports dead code on Windows normally again.
 
 ### Task 6: agwinterm control-pipe client, and where cell metrics come from
 

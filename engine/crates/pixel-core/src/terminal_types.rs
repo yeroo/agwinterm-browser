@@ -162,18 +162,31 @@ impl WindowSize {
     }
 }
 
-// Constructed by the tty backend; the fd it carries is the write end of that
-// backend's self-pipe. The type is part of the vocabulary because `lib.rs` exports
-// it at the crate root, but its body is still tty-shaped — the Windows backend
-// replaces the body, not the name.
+// Constructed by the terminal backend, and the one type in this vocabulary whose
+// *body* is platform-specific: waking a blocked read is the thing the two platforms
+// do least alike. The name and the `wake()` signature are what the eleven importers
+// and `lib.rs`'s crate-root `pub use` depend on, and those are shared.
+//
+// On unix the payload is the write end of the tty backend's self-pipe, which
+// `poll(2)` is already watching. On Windows there is no descriptor to poll: the
+// console reader is a thread filling `terminal_windows::Inbox`, so waking is a
+// flag on that inbox and a `Condvar` notify. Both are cheap, both are safe to call
+// from another thread, and neither can fail — hence the `let _ =`/no-result shape
+// the callers were already written against.
 #[derive(Clone)]
 pub struct Waker {
+    #[cfg(unix)]
     pub(crate) fd: std::sync::Arc<rustix::fd::OwnedFd>,
+    #[cfg(windows)]
+    pub(crate) inbox: std::sync::Arc<crate::terminal_windows::Inbox>,
 }
 
 impl Waker {
     pub fn wake(&self) {
+        #[cfg(unix)]
         let _ = rustix::io::write(&*self.fd, &[1]);
+        #[cfg(windows)]
+        self.inbox.wake();
     }
 }
 

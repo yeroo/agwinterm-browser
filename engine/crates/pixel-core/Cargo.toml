@@ -20,3 +20,11 @@ arboard = { workspace = true }
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+
+# The Windows console backend (`terminal_windows.rs`). Kept to the smallest feature
+# set that compiles it: attaching to the pane's console, opening `CONIN$`/`CONOUT$`
+# by name, the mode pair that VT input needs, and the screen-buffer query that
+# stands in for `SIGWINCH`. `Win32_System_IO` comes with `ReadFile`/`WriteFile`,
+# whose signatures mention `OVERLAPPED` even though this backend never uses it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }

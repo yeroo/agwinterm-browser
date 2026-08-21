@@ -111,7 +111,7 @@ fails loudly rather than at the Task 10 milestone.
 
 1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update this file.
 2. Copy per "What was copied"; do not copy per "What was deliberately not copied".
-3. Re-apply the three divergences above.
+3. Re-apply every divergence listed above.
 4. `pnpm install` and confirm `browser/node_modules/electron/dist/electron.exe`.
 5. `pnpm test` — the vendor-check suite fails if the `pixel-core` inventory drifted
    or a new unix-bound module appeared.

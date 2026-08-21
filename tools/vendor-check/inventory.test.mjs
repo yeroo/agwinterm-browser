@@ -59,11 +59,31 @@ const UNIX_API = /std::os::unix|rustix::|libc::/;
 /**
  * The decoder Task 5 reuses rather than rewriting. It was measured at `terminal.rs`
  * lines 1251-1909 (659 lines) on the vendored tree; Task 3's extraction shifted it
- * up by 178 lines and Task 4's gating will move it again. So it is located by its
- * own anchors — it opens on `enum RawEvent` and closes where `mod tests` begins —
- * and pinned by size and unix-freedom, which are the properties the plan spends.
+ * up by 178 lines and Task 4's gating moved it again. So it is located by its own
+ * anchors — it opens on `enum RawEvent` and closes where `mod tests` begins — and
+ * pinned by size and unix-freedom, which are the properties the plan spends.
+ *
+ * Task 5 widened five of its items to `pub(crate)` so the Windows backend can call
+ * them from a sibling module, hence the optional visibility in the anchor. Those
+ * five widenings are the entire cost of "reuse the decoder, do not write a second
+ * one", and they are pinned by name further down.
  */
+const DECODER_OPENS = /^(?:pub\(crate\) )?enum RawEvent/;
 const DECODER_MIN_LINES = 650;
+
+/**
+ * The decoder items the Windows console backend calls, and therefore the ones a
+ * re-vendor has to re-widen. `parse_event_kitty` is the parser itself; `RawEvent`
+ * and its two clipboard payload types are what it returns; `parse_osc_color` is
+ * what `query_colors` reads the palette out of.
+ */
+const DECODER_REUSED = [
+  ["fn", "parse_event_kitty"],
+  ["fn", "parse_osc_color"],
+  ["enum", "RawEvent"],
+  ["enum", "ClipStatus"],
+  ["struct", "ClipPacket"],
+];
 
 function rustFiles(root) {
   const out = [];
@@ -160,7 +180,7 @@ describe("the VT decoder inside terminal.rs", () => {
   const lines = read("terminal.rs").split(/\r?\n/);
   // The decoder opens on its own event type and closes where terminal.rs's tests
   // begin. Both anchors sit outside the tty code, so gating moves them together.
-  const first = lines.findIndex((line) => /^enum RawEvent/.test(line));
+  const first = lines.findIndex((line) => DECODER_OPENS.test(line));
   const last = lines.findIndex((line, i) => i > first && /^mod tests \{/.test(line));
 
   it("is where the plan says it is", () => {
@@ -266,12 +286,14 @@ describe("the extracted type vocabulary", () => {
     );
   });
 
-  it("confines the vocabulary's remaining unix dependency to Waker", () => {
+  it("confines the vocabulary's remaining unix dependency to Waker, and gates it", () => {
     // `Waker` moved with a tty-shaped body (the write end of a self-pipe). Task 5
-    // replaces the body, not the name; until then this records the one place the
-    // split did not make portable, so it cannot spread quietly.
-    const hits = read("terminal_types.rs")
-      .split(/\r?\n/)
+    // replaced the body without touching the name: the unix field and the `wake`
+    // that writes to it are `#[cfg(unix)]`, and Windows carries an inbox handle
+    // instead. Both halves are asserted, because getting this wrong produces a
+    // crate that builds on exactly one platform.
+    const lines = read("terminal_types.rs").split(/\r?\n/);
+    const hits = lines
       .map((line, i) => [i + 1, line])
       .filter(([, line]) => UNIX_API.test(line));
     assert.equal(
@@ -279,12 +301,22 @@ describe("the extracted type vocabulary", () => {
       2,
       `unix API use in terminal_types.rs: ${JSON.stringify(hits)}`,
     );
-    for (const [, line] of hits) {
+    for (const [at, line] of hits) {
       assert.ok(
         /OwnedFd|rustix::io::write/.test(line),
         `unix API outside Waker in terminal_types.rs: ${line.trim()}`,
       );
+      assert.equal(
+        lines[at - 2].trim(),
+        "#[cfg(unix)]",
+        `Waker's unix half is no longer gated, so Windows cannot build it: ${line.trim()}`,
+      );
     }
+    assert.match(
+      lines.join("\n"),
+      /#\[cfg\(windows\)\]\n\s*pub\(crate\) inbox: std::sync::Arc<crate::terminal_windows::Inbox>/,
+      "Waker has no Windows half, so `waker()` cannot be implemented there",
+    );
   });
 });
 
@@ -329,7 +361,7 @@ describe("the backend seam", () => {
   ];
 
   it("gates the tty code and leaves the decoder unconditional", () => {
-    const first = lines.findIndex((line) => /^enum RawEvent/.test(line));
+    const first = lines.findIndex((line) => DECODER_OPENS.test(line));
     const last = lines.findIndex((line, i) => i > first && /^mod tests \{/.test(line));
     const gated = lines
       .slice(first, last - 1)
@@ -392,6 +424,108 @@ describe("the backend seam", () => {
         lib[at - 1],
         "#[cfg(unix)]",
         `lib.rs no longer gates \`${decl}\` on unix`,
+      );
+    }
+  });
+});
+
+describe("the Windows console input backend", () => {
+  // Task 5. The plan's instruction was "reuse the existing decoder — do not write a
+  // second one", and Task 2's brief added four Win32 requirements that upstream had
+  // no analogue for. Both are structural claims that compile either way, so they are
+  // asserted here rather than left to a code review.
+  const terminal = read("terminal.rs");
+  const windows = read("terminal_windows.rs");
+
+  it("widens the decoder items the backend calls, rather than copying them", () => {
+    for (const [kind, name] of DECODER_REUSED) {
+      assert.match(
+        terminal,
+        new RegExp(`^pub\\(crate\\) ${kind} ${name}\\b`, "m"),
+        `terminal.rs no longer exposes \`${name}\` to the crate, so the Windows ` +
+          "backend cannot reach the decoder and would have to grow its own",
+      );
+    }
+    assert.match(
+      windows,
+      /parse_event_kitty\(&self\.pending, self\.kitty_keyboard\(\)\)/,
+      "terminal_windows.rs no longer feeds the inherited decoder",
+    );
+  });
+
+  it("grows no parser of its own", () => {
+    // The failure this catches is a slow one: a `parse_` helper added here because
+    // it was easier than reaching for the decoder, after which the two disagree
+    // about some escape and only one platform is fixed.
+    const own = [...windows.matchAll(/^(?:pub\(crate\) )?fn (parse_\w+)/gm)].map(
+      (match) => match[1],
+    );
+    assert.deepEqual(
+      own,
+      [],
+      `terminal_windows.rs defines its own parser(s): ${own.join(", ")}`,
+    );
+  });
+
+  it("attaches to the console before opening it, and tolerates already being attached", () => {
+    // Measured in tools/console-inherit-probe: a GUI-subsystem child gets no
+    // console (`conin_err=6`) until it attaches, and an attached one is refused a
+    // second attach with ERROR_ACCESS_DENIED.
+    const attach = windows.indexOf("fn attach_console");
+    const open = windows.indexOf("ConsoleHandle::open(CONIN)");
+    assert.ok(attach > 0, "terminal_windows.rs no longer attaches to a console");
+    assert.ok(
+      windows.indexOf("attach_console(&env)") < open,
+      "CONIN$ is opened before AttachConsole, which is the measured failure",
+    );
+    assert.match(
+      windows.slice(attach),
+      /ERROR_ACCESS_DENIED/,
+      "an already-attached process is treated as a failure to attach",
+    );
+    assert.match(
+      windows.slice(attach),
+      /ATTACH_PARENT_PROCESS/,
+      "there is no fallback for a missing or stale console pid",
+    );
+  });
+
+  it("opens the console devices by name, never through GetStdHandle", () => {
+    // A ConPTY child's std handles can be NUL: FILE_TYPE_CHAR, then
+    // ERROR_INVALID_HANDLE from every console call. Opening by name is the
+    // analogue of upstream opening /dev/tty rather than using fd 0.
+    // The prose in the module docs says why it is not used, so match a call.
+    assert.doesNotMatch(
+      windows,
+      /GetStdHandle\s*\(/,
+      "GetStdHandle is back, and under a pseudoconsole it can hand back NUL",
+    );
+    assert.match(windows, /const CONIN: &\[u16\]/);
+    assert.match(windows, /const CONOUT: &\[u16\]/);
+  });
+
+  it("restores the console mode on the panicking path as well as on drop", () => {
+    assert.match(
+      windows,
+      /std::panic::set_hook/,
+      "nothing restores the console when a panic skips the guard's Drop",
+    );
+    assert.match(
+      windows,
+      /impl Drop for ModeGuard/,
+      "raw mode is no longer tied to a value's lifetime, which is the trait's contract",
+    );
+  });
+
+  it("does not claim capabilities this host does not have", () => {
+    // `kitty_keyboard` decides how the decoder reads every key, and
+    // `reports_pixel_mouse` decides whether a mouse report is a pixel or a cell.
+    // Both are `false` here, and the setup string has to agree with them.
+    for (const capability of ["kitty_keyboard", "reports_pixel_mouse"]) {
+      assert.match(
+        windows,
+        new RegExp(`pub fn ${capability}\\(&self\\) -> bool \\{\\r?\\n\\s*false`),
+        `${capability} no longer answers false, which the setup string assumes`,
       );
     }
   });

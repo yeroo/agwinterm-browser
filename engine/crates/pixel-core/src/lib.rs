@@ -25,16 +25,11 @@ mod selection;
 mod style;
 pub mod surfaces;
 // The VT decoder inside `terminal` stays unconditional on purpose: 659 lines of
-// portable parsing with 27 tests, which Task 5's Windows console backend feeds
-// rather than writing a second one. Until that lands nothing on Windows calls it,
-// so it reads as dead code. Suppressed per-module rather than crate-wide, and only
-// on Windows - the unix build still reports dead code in these files normally.
-#[cfg_attr(windows, allow(dead_code))]
+// portable parsing with 27 tests, which the Windows console backend feeds rather
+// than writing a second one. Since Task 5 it has a caller on both platforms, so
+// the dead-code suppression this declaration used to carry is gone.
 mod terminal;
 mod terminal_backend;
-// Same reason: `KeyEvent::plain`, `TerminalColors::set` and `ColorSlot` are built by
-// the decoder and by the tty backend, neither of which runs on Windows yet.
-#[cfg_attr(windows, allow(dead_code))]
 mod terminal_types;
 #[cfg(windows)]
 mod terminal_windows;

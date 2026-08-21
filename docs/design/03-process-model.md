@@ -197,6 +197,30 @@ This is the brief the decision exists to produce.
    engine may read. Upstream's `attachHere` (`cli/src/main.ts:300-337`) already only
    waits and handles signals, so this is a constraint to preserve, not a change to make.
 
+### What Task 5 actually built, and what Task 9 now owes it
+
+Task 5 implemented all four, in `pixel-core/src/terminal_windows.rs`. Two details
+were settled there and are contracts for the launcher rather than internals:
+
+- **`TERMINAL_BROWSER_CONSOLE_PID` is the name of point 3's process id.** It is read
+  through `SessionEnv`, not `std::env`, so it works in the daemon shape as well as
+  the foreground one — the client already forwards its whole environment. When it is
+  absent, unparseable, or names a process that cannot be attached to, the backend
+  logs and falls back to `ATTACH_PARENT_PROCESS`. **Task 9's launcher sets it to the
+  pid of whatever process holds the pane's console**, which is what buys the freedom
+  to put a wrapper in between.
+- **The console is read on a dedicated thread, not by the caller.** This is not a
+  style choice: under `ENABLE_VIRTUAL_TERMINAL_INPUT` an input record that translates
+  to no bytes (key-up, focus, buffer-size) still signals the handle but is consumed
+  silently, so "wait, then `ReadFile`" blocks past the caller's deadline — and every
+  keypress queues exactly such a record. The blocking read therefore lives on its own
+  thread and `poll_event` waits on a condvar. The consequence Task 9 should know
+  about is that the thread can outlive a clean shutdown while parked in `ReadFile`;
+  there is one engine per process, so it ends with the process.
+
+Point 4 is unchanged and still a constraint on the launcher: one console, one input
+buffer, and only the engine may read it.
+
 ## Risks this decision accepts
 
 - **Parent lifetime is unmeasured.** `AttachConsole` needs the console owner to still be
