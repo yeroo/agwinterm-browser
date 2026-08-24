@@ -1000,6 +1000,34 @@ fn unimplemented<T>(what: &str, task: &str) -> io::Result<T> {
     ))
 }
 
+/// The development-instance guard, applied before the console is touched.
+///
+/// [`crate::agwinterm::pipe_refusal`] settles whether this build may address this
+/// pane's instance, and until now the answer was only asked for on the first frame —
+/// by which time [`Terminal::new`] had already attached the pane's console, put it on
+/// the alternate screen, hidden the cursor and turned on any-motion mouse reporting.
+/// A refused engine therefore still held the developer's terminal in exactly the
+/// state the guard exists to prevent, and a `taskkill /F` on it — which runs no
+/// `ModeGuard::drop` — left it there: the frame half of the wreck was guarded and the
+/// console half was not. The engine-direct path (`tools/milestone/run-milestone.cmd`,
+/// no CLI in front of it) is where that is reachable.
+///
+/// Only [`io::ErrorKind::PermissionDenied`] stops the run. Every other failure out of
+/// `HostTarget::from_env` means "there is no pane to draw into", which a browser must
+/// go on degrading quietly through — see [`Terminal::host`] and `host_absent`.
+///
+/// Failing here is also the only way the message is *read*. `crate::logging::warn`
+/// goes to an in-memory ring drained as `EngineEvent::Log` into the browser UI, which
+/// on this path is the thing not being drawn; an error out of construction comes back
+/// through `pixel-node`'s startup path to the terminal the developer is standing in,
+/// naming [`crate::agwinterm::ALLOW_PIPE_VAR`] and the way out.
+fn refuse_unlisted_instance(env: &SessionEnv) -> io::Result<()> {
+    match crate::agwinterm::HostTarget::from_env(env) {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Err(err),
+        _ => Ok(()),
+    }
+}
+
 fn no_console<T>(what: &str) -> io::Result<T> {
     Err(io::Error::new(
         io::ErrorKind::NotConnected,
@@ -1029,6 +1057,7 @@ impl Terminal {
     /// on `AttachConsole` — so the error names what was required rather than
     /// leaving the caller with a terminal that answers nothing.
     pub fn new(wrapper: Wrapper, env: SessionEnv) -> io::Result<Self> {
+        refuse_unlisted_instance(&env)?;
         attach_console(&env).map_err(|err| {
             io::Error::new(
                 err.kind(),
@@ -2585,6 +2614,47 @@ mod tests {
         );
         // And with the host unreachable, the metrics question still gets an answer.
         assert_eq!(term.cell_size().unwrap(), Some(agwinterm::FALLBACK_CELL));
+    }
+
+    /// A pane environment, with whatever this test wants said about the instance.
+    fn pane_env(pipe: Option<&str>, allow: Option<&str>) -> SessionEnv {
+        let mut vars = std::collections::HashMap::from([
+            (agwinterm::ENABLED_VAR.to_owned(), "1".to_owned()),
+            (agwinterm::SESSION_VAR.to_owned(), "w1:p2".to_owned()),
+        ]);
+        if let Some(pipe) = pipe {
+            vars.insert(agwinterm::PIPE_VAR.to_owned(), pipe.to_owned());
+        }
+        if let Some(allow) = allow {
+            vars.insert(agwinterm::ALLOW_PIPE_VAR.to_owned(), allow.to_owned());
+        }
+        SessionEnv::of_session(vars)
+    }
+
+    #[test]
+    fn a_refused_instance_stops_the_engine_before_it_takes_the_console() {
+        // The order is the whole finding: `Terminal::new` asks this *before*
+        // `attach_console`, so a dev build pointed at an instance it was not named at
+        // never puts the pane on the alternate screen, never hides its cursor and
+        // never turns any-motion mouse reporting on. Guarding only the frame left the
+        // console half of the wreck reachable on the engine-direct path, where a
+        // `taskkill /F` runs no `ModeGuard::drop` and the pane stays that way.
+        let err = refuse_unlisted_instance(&pane_env(Some("agwinterm"), Some("agwinterm-dev")))
+            .expect_err("a dev build started against an unlisted instance");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            err.to_string().contains(agwinterm::ALLOW_PIPE_VAR),
+            "the refusal has to name the way out, and this is the only place it is read: {err}",
+        );
+
+        // Everything else `from_env` says no to means "there is no pane to draw
+        // into", which a browser degrades quietly through rather than dying of.
+        refuse_unlisted_instance(&SessionEnv::of_session(std::collections::HashMap::new()))
+            .expect("a browser outside agwinterm still has a terminal to run in");
+        refuse_unlisted_instance(&pane_env(Some("agwinterm-dev"), Some("agwinterm-dev")))
+            .expect("the instance this build was named at");
+        refuse_unlisted_instance(&pane_env(Some("agwinterm"), None))
+            .expect("the guard is off unless asked for");
     }
 
     #[test]

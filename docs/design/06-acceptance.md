@@ -205,9 +205,9 @@ the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **446 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 389 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **353 passed**, 87 suites, 8.3 s wall clock |
+| `cargo nextest run --workspace` | **447 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 390 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **355 passed**, 87 suites, 8.4 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -271,7 +271,7 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 64 |
+| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 66 |
 | `agwinterm.rs` | 46 | | `vendor-check/inventory.test.mjs` | 37 |
 | `frame_file.rs` | 36 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
@@ -280,7 +280,7 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 121 |
 
-Counted on 2026-08-24; the node column sums to the 353 above. The three biggest
+Counted on 2026-08-24; the node column sums to the 355 above. The three biggest
 movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 64),
 `agwinterm.rs` (29 → 46, the exchange deadline) and `terminal_windows.rs` (38 → 53).
 The last five of each are the review round that followed the plan: the frame roots the
@@ -305,6 +305,15 @@ a user away from a console that still does not echo. The same round raised the W
 wait slack in `agwinterm.rs` from 2 ms to one system timer tick, which is what the
 deadline test was actually losing to; it needed no new test, only the one it already had
 passing forty times out of forty instead of thirty-eight.
+
+A fourth round moved three, and both are about a guard that was asked too late.
+`pane-clear.test.mjs` (64 → 66) gained the recycled pid: a directory named after the
+process the CLI just spawned, whose `PANE_FILE` marker names a *different* pane, is no
+longer adopted by the exit path — a pid is unique among live processes and nothing
+more, and `sweep_stale` leaves a wreck standing for an hour. `terminal_windows.rs`
+(53 → 54) gained the ordering the dev-instance guard needs: `Terminal::new` asks
+`HostTarget::from_env` before `attach_console`, so a refused engine no longer takes the
+pane's console, alternate screen and mouse reporting on the way to declining to publish.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

@@ -462,8 +462,16 @@ export interface OwnedFramesOptions {
    * browser drew there. A live browser in another pane is worse still: its directory
    * gains a file every frame, so it is always the newest match.
    *
-   * Ignored when `pid` is given: the pid *is* the attribution there, and the exit
-   * path knows it first-hand.
+   * Narrowed, not replaced, when `pid` is given. The pid is the attribution on that
+   * path and a directory with no marker is still adopted — an engine predating
+   * `PANE_FILE` has to stay recoverable by the process that spawned it. What the
+   * marker adds there is the one thing the pid cannot settle on its own: a pid names
+   * a *live* process and nothing more, `frame_file.rs` burns a counter precisely
+   * because Windows recycles them, and `sweep_stale` leaves a wreck standing for an
+   * hour. So a pid handed out twice inside that hour would let the exit path of the
+   * second browser adopt the first's directory — clearing the pane that one is still
+   * painted on, and deleting the only evidence that it is. A marker naming *another*
+   * pane is therefore disqualifying on both paths.
    *
    * Required for the broad question — a caller that names no pane owns nothing —
    * because "any pane" is the machine-wide search under a different name.
@@ -567,7 +575,7 @@ export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | nul
   // broad question. See [`OwnedFramesOptions.pid`].
   if ("pid" in options && options.pid === undefined) return null;
   // And neither is a pane the caller could not resolve.
-  const pane = options.pid === undefined ? (options.pane ?? null) : null;
+  const pane = options.pane ?? null;
   if (options.pid === undefined && !pane) return null;
   // The trailing `-` matters: without it a pid of 123 would adopt 1234's frames.
   const wanted =
@@ -597,9 +605,15 @@ export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | nul
       if (frames === 0) continue;
       // The marker is written with the first frame the host took, so a directory with
       // frames in it and no marker for this pane belongs to another one.
+      //
+      // The two questions read a *missing* marker differently, and only that. The
+      // broad question has nothing else to go on, so an unattributed wreck is not
+      // ours. The pid question has the pid, so it adopts one — but a marker naming
+      // some other pane outranks a pid that Windows may have handed out twice inside
+      // the hour `sweep_stale` waits. See [`OwnedFramesOptions.pane`].
       if (pane && pane !== "any") {
         const mark = frameMark(dir);
-        if (!mark || !sameMark(mark, pane)) continue;
+        if (mark ? !sameMark(mark, pane) : options.pid === undefined) continue;
       }
       if (at <= bestAt) continue;
       const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
@@ -644,13 +658,14 @@ export async function clearOwnedPaneFrame(
   // `request` because the marker records the bare pipe name the engine read out of
   // the environment, not the `\\.\pipe\` path a client dials.
   const address = paneAddress(env);
+  const here = request && address ? { pipe: address.pipe, target: address.target } : null;
   const owned = ownedFrames(
     "pid" in options
-      ? options
-      : {
-          ...options,
-          pane: request && address ? { pipe: address.pipe, target: address.target } : "any",
-        },
+      ? // The pid still decides ownership; the pane only rules out a directory whose
+        // marker names a different one, which a recycled pid cannot. A pane this
+        // environment does not resolve leaves the pid question exactly as it was.
+        { ...options, pane: here }
+      : { ...options, pane: here ?? "any" },
   );
   if (!request || !owned) return { request, owned, cleared: false, refused: null, searched };
   const { cleared, refused } = await clearPaneFrame(env, options.timeoutMs ?? 1_000);

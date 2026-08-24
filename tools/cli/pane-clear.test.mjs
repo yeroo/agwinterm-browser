@@ -608,6 +608,27 @@ describe("whose placement it is", () => {
     assert.equal(pane.ownedFrames({ root, pid: 1234 }), null);
   });
 
+  it("refuses a pid's own directory when the marker names another pane", (t) => {
+    // A pid is unique among *live* processes and nothing more -- `frame_file.rs`
+    // burns a counter because Windows recycles them, and `sweep_stale` leaves a
+    // wreck standing for an hour. So the pid of a browser that died before drawing
+    // can be the pid of one that drew on a different pane earlier the same hour, and
+    // the exit path would clear that pane and delete the evidence it is still
+    // painted. The marker outranks the pid on exactly that case.
+    const root = freshRoot(t, "bypid-other");
+    const theirs = leftoverFrames(root, 4242, 1, { pipe: "agwinterm", target: "pane-2" });
+    assert.equal(pane.ownedFrames({ root, pid: 4242, pane: MINE }), null);
+    assert.equal(fs.existsSync(theirs), true);
+    // And the pid still owns its own, marked or not: an engine predating `PANE_FILE`
+    // has to stay recoverable by the process that spawned it.
+    const unmarked = freshRoot(t, "bypid-unmarked");
+    leftoverFrames(unmarked, 4242, 1, null);
+    assert.ok(
+      pane.ownedFrames({ root: unmarked, pid: 4242, pane: MINE }),
+      "the exit path lost frames no marker disowned",
+    );
+  });
+
   it("owns nothing when the caller asked about a pid it does not have", (t) => {
     // `spawn` leaves `child.pid` undefined when it could not start the process at
     // all, and `openInForeground` passes `{ pid: child.pid }` regardless. Reading
@@ -636,6 +657,27 @@ describe("whose placement it is", () => {
     assert.equal(outcome.owned, null);
     assert.equal(outcome.cleared, false);
     assert.deepEqual(host.lines, [], "a failed spawn cleared a placement it never made");
+  });
+
+  it("sends no clear when the pid's directory was drawn on another pane", async (t) => {
+    // A recycled pid, end to end: the exit path asks about the process it spawned and
+    // the only directory named after it belongs to a browser that drew somewhere else
+    // and is still there. Nothing is sent, and the evidence is not deleted.
+    const host = hostOn(`winterm-owned-${process.pid}-recycled`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "recycled");
+    const theirs = leftoverFrames(root, 4242, 1, { pipe: host.name, target: "pane-2" });
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, pid: 4242, timeoutMs: 500 },
+    );
+
+    assert.equal(outcome.owned, null);
+    assert.equal(outcome.cleared, false);
+    assert.deepEqual(host.lines, [], "a recycled pid cleared another pane's placement");
+    assert.equal(fs.existsSync(theirs), true, "it deleted another pane's only evidence");
   });
 
   it("looks in every temp directory the engine could have chosen", (t) => {

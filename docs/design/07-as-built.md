@@ -340,9 +340,22 @@ is worth stating —
 
 | reader | what it withholds | build-gated |
 |---|---|---|
-| `agwinterm.rs` `HostTarget::from_env` | the frame — the engine refuses to start against the instance | yes, `debug_assertions` |
+| `agwinterm.rs` `HostTarget::from_env` | the **run** — `Terminal::new` asks before `attach_console`, so a refused engine never takes the pane's console either | yes, `debug_assertions` |
 | `cli/src/unsupported.ts` `inAgwintermPane` | the **launch** — `open` fails before Electron is spawned | no |
 | `cli/src/pane.ts` `paneClearRequest` | the `image.clear` on the way out, and `pane-clear`'s | no |
+
+The engine's copy is asked at construction rather than at the first frame, and that
+ordering is load-bearing. A frame is only half of what a browser does to a pane: the
+other half is `Terminal::new` attaching the pane's console, putting it on the alternate
+screen, hiding the cursor and turning on any-motion mouse reporting. Resolved lazily —
+on the first `draw`, which is where the target used to be needed — a refused engine had
+already done all of that, and a `taskkill /F` on it runs no `ModeGuard::drop`. That is
+the wreck this guard exists for, minus the picture. So `refuse_unlisted_instance`
+(`terminal_windows.rs`) runs before `attach_console`, and only on
+`PermissionDenied`: every other refusal out of `from_env` means "there is no pane here",
+which a browser has to go on running through. It is also the only placement where the
+message is read — `logging::warn` goes to the ring the browser UI drains, and on the
+engine-direct path that UI is the thing not being drawn.
 
 The ungated launch refusal is the one with a user-visible edge: a value left behind in a
 shell profile stops `open` in a shipped build. It is mitigated by the same fact that made
