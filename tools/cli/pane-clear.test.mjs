@@ -171,6 +171,81 @@ describe("where the clear is addressed", () => {
       null,
     );
   });
+
+  it("refuses everything outside the engine's pipe-name set, not just separators", () => {
+    // This module rejected only `[\\/]` while the engine allowed `[A-Za-z0-9._-]`,
+    // so a pane spelling the pipe with a space was addressed here and refused there.
+    for (const name of ["agwinterm 2", "agwintérm", "agwinterm:1", "agwinterm|evil"]) {
+      assert.equal(
+        pane.paneClearRequest(inPane({ AGWINTERM_PIPE: name, AGWINTERM_SESSION_ID: "a" })),
+        null,
+        `${name} is not a pipe name`,
+      );
+    }
+  });
+});
+
+// The other copy of the engine's `pipe_refusal`. `pane.ts` cannot import a guard
+// added to the engine — it imports nothing from the workspace by construction — so
+// the CLI had its own unguarded fallback to the production instance: with the
+// engine refusing to publish, `openInForeground` would still dial `\\.\pipe\agwinterm`
+// on the way out and clear a placement it had no part in.
+describe("the development-instance guard", () => {
+  const dev = (extra) => inPane({ AGWINTERM_SESSION_ID: "s1", ...extra });
+
+  it("refuses the fallback to the real instance, which is the case that wrecked a pane", () => {
+    assert.equal(pane.paneClearRequest(dev({ TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev" })), null);
+    const why = pane.pipeRefusal(dev({ TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev" }));
+    assert.match(why, /TERMINAL_BROWSER_ALLOW_PIPE/, "the refusal must name the way out");
+    assert.match(why, /AGWINTERM_PIPE is unset/);
+  });
+
+  it("addresses the instance it was told to use", () => {
+    const env = dev({
+      AGWINTERM_PIPE: "agwinterm-dev",
+      TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+    });
+    assert.equal(pane.pipeRefusal(env), null);
+    assert.equal(pane.paneClearRequest(env).endpoint, `${PIPE_PREFIX}agwinterm-dev`);
+  });
+
+  it("is off until the variable is set, because on Windows the product is a checkout", () => {
+    // `pnpm -r build` runs `cargo build -p pixel-node` with no `--release`, so a
+    // guard that refused an unlisted pipe by default would refuse every ordinary run.
+    assert.equal(pane.pipeRefusal(dev({})), null);
+    assert.equal(pane.pipeRefusal(dev({ TERMINAL_BROWSER_ALLOW_PIPE: "" })), null);
+    assert.equal(pane.pipeRefusal(dev({ TERMINAL_BROWSER_ALLOW_PIPE: " , " })), null);
+    assert.ok(pane.paneClearRequest(dev({})), "an ordinary pane still gets its clear");
+  });
+
+  it("reads a list the way a shell hands one over", () => {
+    for (const list of ["a,agwinterm-dev", "a;agwinterm-dev", " a , agwinterm-dev ", "*"]) {
+      assert.equal(pane.pipeAllowed(list, "agwinterm-dev"), true, list);
+    }
+    assert.equal(pane.pipeAllowed("a,b", "agwinterm-dev"), false);
+    assert.equal(pane.pipeAllowed(null, "anything"), true);
+  });
+
+  it("says the clear was withheld rather than reporting no pane at all", async () => {
+    // The pane exists and holds frames; what stopped the clear is a variable the
+    // user set, and "no agwinterm pane in this environment" would send them looking
+    // at the wrong thing entirely.
+    const root = fs.mkdtempSync(path.join(scratch, "guarded-"));
+    const dir = path.join(root, `${pane.FRAME_DIR_PREFIX}4242-1`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "frame-00000000.png"), "not really a png");
+
+    const env = dev({ TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev" });
+    const outcome = await pane.clearOwnedPaneFrame(env, { root });
+    assert.equal(outcome.request, null, "no clear may be sent to a refused instance");
+    assert.equal(outcome.cleared, false);
+
+    const report = pane.paneClearReport(env, outcome, true).join("\n");
+    assert.match(report, /not addressable/);
+    assert.match(report, /TERMINAL_BROWSER_ALLOW_PIPE/);
+    assert.match(report, /1 frame\(s\) left in/, "it still says what was found");
+    assert.ok(!report.includes("no agwinterm pane in this environment"));
+  });
 });
 
 describe("sending the clear", () => {

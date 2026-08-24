@@ -85,6 +85,17 @@ export function windowsHostRefusal(
 ): string | null {
   if (platform !== "win32") return null;
   if (inAgwintermPane(env)) return null;
+  // A pane that is a pane, and is refused on the pipe, gets the refusal it earned.
+  // The generic "run this from inside a pane" would be a lie to someone who is.
+  const refusal = paneNamed(env) ? pipeRefusal(env) : null;
+  if (refusal) {
+    return [
+      "terminal-browser will not address this pane's agwinterm instance:",
+      `${refusal}.`,
+      "Frames and the clear that takes them back both go to that instance, so a",
+      "browser started here would draw somewhere this build was told not to.",
+    ].join(" ");
+  }
   return [
     "terminal-browser on Windows draws into an agwinterm pane and there is no other host.",
     "Frames leave over agwinterm's control pipe rather than through the terminal's own",
@@ -107,16 +118,77 @@ export function windowsHostRefusal(
  * rather than accepted -- taking it would have let the CLI launch a browser that
  * then refused every frame, which is a browser that starts and shows nothing.
  *
+ * The pipe is the engine's too, and was the axis on which "one rule" was still
+ * three. `HostTarget::from_env` refuses a pane whose `AGWINTERM_PIPE` is not a pipe
+ * name, `paneClearRequest` rejected only `[\\/]`, and this function did not look at
+ * the variable at all — so a pane spelling it `agwinterm 2` passed here, launched a
+ * browser, and the engine then had nowhere to draw. All three now apply
+ * [`PIPE_NAME`] and the `TERMINAL_BROWSER_ALLOW_PIPE` guard, and
+ * `tools/cli/unsupported.test.mjs`'s `HOST_CASES` carries `AGWINTERM_PIPE` rows so
+ * they cannot drift apart again.
+ *
  * `pane.ts` deliberately repeats this instead of importing it: that module is kept
  * free of workspace imports so it can run after the browser has gone. What is
  * shared is the rule, and `tools/cli/unsupported.test.mjs` drives the same table
  * through both.
  */
 export function inAgwintermPane(env: Record<string, string | undefined>): boolean {
+  return paneNamed(env) !== null && pipeRefusal(env) === null;
+}
+
+/** The pane this environment addresses, before the pipe is considered. */
+function paneNamed(env: Record<string, string | undefined>): string | null {
   const enabled = env.AGWINTERM_ENABLED?.trim();
-  if (!enabled || enabled === "0") return false;
+  if (!enabled || enabled === "0") return null;
   const target = env.AGWINTERM_SESSION_ID?.trim() || env.AGWINTERM_PANE_ID?.trim();
-  return !!target && target !== "active";
+  if (!target || target === "active") return null;
+  return target;
+}
+
+/** `agwinterm.rs`'s `valid_pipe_name`, and `pane.ts`'s `PIPE_NAME`. */
+const PIPE_NAME = /^[A-Za-z0-9._-]+$/;
+
+/** `agwinterm.rs`'s `DEFAULT_PIPE`, and `pane.ts`'s. */
+const DEFAULT_PIPE = "agwinterm";
+
+/** `agwinterm.rs`'s `ALLOW_PIPE_VAR`, and `pane.ts`'s. */
+export const ALLOW_PIPE_VAR = "TERMINAL_BROWSER_ALLOW_PIPE";
+
+/**
+ * Why this pane's instance may not be addressed, or `null`.
+ *
+ * The third copy of `pane.ts`'s `pipeRefusal`, which is the third copy of the
+ * engine's `valid_pipe_name` + `pipe_refusal`. Repeated rather than imported for the
+ * same reason as everything else here: this module imports nothing, so the CLI's
+ * refusals can be transpiled and driven on their own.
+ *
+ * Assumes a pane — the caller has already established one. See `pane.ts`'s copy for
+ * why the CLI honours `TERMINAL_BROWSER_ALLOW_PIPE` whenever it is set while the
+ * engine consults it only under `debug_assertions`.
+ */
+function pipeRefusal(env: Record<string, string | undefined>): string | null {
+  const pipe = env.AGWINTERM_PIPE?.trim() || DEFAULT_PIPE;
+  if (!PIPE_NAME.test(pipe)) {
+    return (
+      `AGWINTERM_PIPE=${JSON.stringify(pipe)} is not a pipe name — it may contain ` +
+      "only letters, digits, `.`, `_` and `-`"
+    );
+  }
+  const allow = env[ALLOW_PIPE_VAR]?.trim();
+  const entries = (allow ?? "")
+    .split(/[,;]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) return null;
+  if (entries.some((entry) => entry === "*" || entry === pipe)) return null;
+  const source = env.AGWINTERM_PIPE?.trim()
+    ? `AGWINTERM_PIPE names ${JSON.stringify(pipe)}`
+    : `AGWINTERM_PIPE is unset, so this pane resolves to ${JSON.stringify(pipe)}`;
+  return (
+    `${source}, and ${ALLOW_PIPE_VAR}=${JSON.stringify(allow)} does not list it — ` +
+    `add ${JSON.stringify(pipe)} to ${ALLOW_PIPE_VAR}, or set it to \`*\` to allow ` +
+    "any instance, or unset it to turn the guard off"
+  );
 }
 
 /**

@@ -113,28 +113,28 @@ launched from any pane publishes into whatever instance that pane belongs to. Du
 development that is the machine's real terminal, which is how a stale frame and live
 mouse reporting ended up in a working pane for 18 hours.
 
-- [ ] determine which run actually did it. `docs/design/06-acceptance.md` states the
+- [x] determine which run actually did it. `docs/design/06-acceptance.md` states the
       live checks ran against a Debug instance on `--app-id agwinterm-dev` and that
       "none of this touched" the real one. The observed pane contradicts that for *some*
       run. Correct whichever document is wrong — do not leave both standing
-- [ ] add an opt-in env guard (e.g. `TERMINAL_BROWSER_ALLOW_PIPE`) consulted only when
+- [x] add an opt-in env guard (e.g. `TERMINAL_BROWSER_ALLOW_PIPE`) consulted only when
       a development/debug build is detected, so a dev build refuses to publish into an
       instance it was not told to use, and names the variable in the error
-- [ ] **route `cli/src/pane.ts` through the same guard.** Its no-workspace-imports
+- [x] **route `cli/src/pane.ts` through the same guard.** Its no-workspace-imports
       constraint means the rule has to be duplicated there the way the addressing rules
       already are — a guard on the engine alone leaves the CLI publishing into
       production, which is the case that actually wrecked a pane
-- [ ] give `inAgwintermPane` the engine's pipe-name check and tighten `paneClearRequest`'s
+- [x] give `inAgwintermPane` the engine's pipe-name check and tighten `paneClearRequest`'s
       `[\/]` test to the same character set, so the "one rule" comment becomes true
-- [ ] leave release behaviour unchanged — a shipped browser publishes where the pane says
-- [ ] document the dev workflow in one place: build Debug agwinterm, `--app-id
+- [x] leave release behaviour unchanged — a shipped browser publishes where the pane says
+- [x] document the dev workflow in one place: build Debug agwinterm, `--app-id
       agwinterm-dev`, verify with `agwintermctl --pipe agwinterm-dev tree`, then run
-- [ ] write tests for the guard refusing an unlisted pipe under a dev build
-- [ ] write tests for release builds being unaffected
-- [ ] write tests for the CLI's own fallback refusing the same way
-- [ ] add `AGWINTERM_PIPE` rows to `HOST_CASES` so all three readers are pinned on that
+- [x] write tests for the guard refusing an unlisted pipe under a dev build
+- [x] write tests for release builds being unaffected
+- [x] write tests for the CLI's own fallback refusing the same way
+- [x] add `AGWINTERM_PIPE` rows to `HOST_CASES` so all three readers are pinned on that
       axis and cannot drift apart again
-- [ ] run tests — must pass before Task 3
+- [x] run tests — must pass before Task 3
 
 ### Task 3: A hung test must not wedge the suite
 

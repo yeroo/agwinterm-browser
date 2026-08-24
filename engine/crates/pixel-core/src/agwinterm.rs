@@ -75,6 +75,11 @@ pub(crate) const PANE_VAR: &str = "AGWINTERM_PANE_ID";
 pub(crate) const WINDOW_VAR: &str = "AGWINTERM_WINDOW_ID";
 /// `<width>x<height>` in pixels, overriding whatever the host says (or does not).
 pub(crate) const CELL_PX_VAR: &str = "TERMINAL_BROWSER_CELL_PX";
+/// The agwinterm instances a development build is allowed to publish into.
+///
+/// A comma- or semicolon-separated list of bare pipe names, or `*` for "anywhere".
+/// See [`pipe_refusal`] for what it is for and why it is off unless set.
+pub(crate) const ALLOW_PIPE_VAR: &str = "TERMINAL_BROWSER_ALLOW_PIPE";
 
 /// What `agwintermctl` falls back to when `AGWINTERM_PIPE` is unset
 /// (`Agwinterm.Ctl/Program.cs:371`), matched here so the two agree.
@@ -152,12 +157,22 @@ impl HostTarget {
                  front rather than this one"
             )));
         }
-        let pipe = nonempty(env, PIPE_VAR).unwrap_or_else(|| DEFAULT_PIPE.to_owned());
+        let named = nonempty(env, PIPE_VAR);
+        let pipe = named.clone().unwrap_or_else(|| DEFAULT_PIPE.to_owned());
         if !valid_pipe_name(&pipe) {
             return Err(not_hosted(&format!(
                 "{PIPE_VAR}={pipe:?} is not a pipe name — it may contain only \
                  letters, digits, `.`, `_` and `-`"
             )));
+        }
+        let allow = nonempty(env, ALLOW_PIPE_VAR);
+        if let Some(refusal) = pipe_refusal(
+            allow.as_deref(),
+            &pipe,
+            named.is_some(),
+            cfg!(debug_assertions),
+        ) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, refusal));
         }
         Ok(Self {
             pipe,
@@ -196,6 +211,83 @@ fn valid_pipe_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// Why a development build may not address this pipe, or `None` when it may.
+///
+/// ## The failure this exists for
+///
+/// A pane's `AGWINTERM_PIPE` names whichever agwinterm the pane belongs to, and with
+/// the variable unset it is [`DEFAULT_PIPE`] — the machine's real instance. So a
+/// browser built and launched from a checkout, in the terminal the developer is
+/// working in, publishes into *that* terminal. A frame is a placement agwinterm holds
+/// until something replaces it, and an exit that runs no destructor leaves it there:
+/// a pane of the real instance was found holding a dead browser's page with mouse
+/// reporting still on, eighteen hours after the run that drew it. Nothing in the code
+/// distinguished "the pane I meant to draw in" from "the pane I happen to be running
+/// in", because at the level of the environment they are the same thing.
+///
+/// ## Why it is off unless asked for
+///
+/// The dev workflow is the one in the README: a Debug agwinterm on `--app-id
+/// agwinterm-dev`, and `TERMINAL_BROWSER_ALLOW_PIPE=agwinterm-dev` in the shell that
+/// launches the browser. Once set, publishing anywhere else is refused by name.
+///
+/// It cannot default to on. On Windows the shipped product *is* a checkout —
+/// `pnpm -r build` runs `cargo build -p pixel-node` with no `--release`, so the
+/// binary a user runs has `debug_assertions` on — and a guard that refused an
+/// unlisted pipe by default would refuse every ordinary run. `dev_build` narrows the
+/// variable rather than arming it: a release build ignores the variable outright, so
+/// a stray value inherited from a shell profile can never stop a shipped browser
+/// drawing.
+///
+/// `explicit` distinguishes a pipe the pane named from one that came from the
+/// fallback, because the two need different advice and the fallback is the case that
+/// actually wrecked a pane.
+fn pipe_refusal(
+    allow: Option<&str>,
+    pipe: &str,
+    explicit: bool,
+    dev_build: bool,
+) -> Option<String> {
+    if !dev_build {
+        return None;
+    }
+    let allow = allow?;
+    // A list with nothing in it is an unset variable, not a list that allows
+    // nothing: `set TERMINAL_BROWSER_ALLOW_PIPE=` and a value of spaces are both how
+    // a shell spells "off", and reading either as "refuse everything" would turn the
+    // guard on for someone trying to turn it off.
+    if allow.split([',', ';']).all(|entry| entry.trim().is_empty()) {
+        return None;
+    }
+    if allows_pipe(allow, pipe) {
+        return None;
+    }
+    let source = if explicit {
+        format!("{PIPE_VAR} names {pipe:?}")
+    } else {
+        format!("{PIPE_VAR} is unset, so this pane resolves to {pipe:?}")
+    };
+    Some(format!(
+        "{source}, and {ALLOW_PIPE_VAR}={allow:?} does not list it. This is a \
+         development build, which publishes only into an instance it was told to \
+         use — a frame sent to the wrong one is a placement left in a terminal \
+         somebody is working in. Add {pipe:?} to {ALLOW_PIPE_VAR}, or set it to `*` \
+         to allow any instance, or unset it to turn the guard off"
+    ))
+}
+
+/// Whether an [`ALLOW_PIPE_VAR`] list names this pipe. `*` names every pipe.
+///
+/// Separators are `,` and `;` because both are what a shell hands over without
+/// quoting — `set` on `cmd.exe` treats a comma as an argument separator, and a
+/// developer who writes one means it as a list.
+fn allows_pipe(list: &str, pipe: &str) -> bool {
+    list.split([',', ';'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| entry == "*" || entry == pipe)
+}
+
 /// Whether this process is inside an agwinterm pane at all.
 fn hosted(env: &SessionEnv) -> bool {
     match nonempty(env, ENABLED_VAR) {
@@ -204,8 +296,18 @@ fn hosted(env: &SessionEnv) -> bool {
     }
 }
 
+/// A variable's value with the shell's padding taken off, or `None` when there is
+/// nothing left.
+///
+/// Trimmed, because the CLI's copies of these rules trim (`pane.ts`'s `nonempty` is
+/// `env[key]?.trim()`) and a reader that does not is a reader that disagrees: a pane
+/// whose `AGWINTERM_SESSION_ID` arrived as `" s3 "` had the CLI clearing `s3` and the
+/// engine drawing into `" s3 "`, and a padded `AGWINTERM_PIPE` failed
+/// [`valid_pipe_name`] here while the CLI addressed it happily.
 fn nonempty(env: &SessionEnv, key: &str) -> Option<String> {
-    env.var(key).filter(|value| !value.is_empty())
+    env.var(key)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 /// One message, naming everything that has to be true rather than reporting the
@@ -1039,6 +1141,22 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_that_padded_the_values_still_names_the_same_pane() {
+        // The CLI's copies of these rules trim (`pane.ts`'s `nonempty`), so a reader
+        // here that did not was a reader that disagreed: the clear went to `s3` and
+        // the frame to `" s3 "`, and a padded pipe name failed `valid_pipe_name`
+        // here while `paneClearRequest` addressed it.
+        let target = HostTarget::from_env(&env_of(&[
+            (ENABLED_VAR, " 1 "),
+            (SESSION_VAR, " s3 "),
+            (PIPE_VAR, " agwinterm-dev "),
+        ]))
+        .expect("padding is not part of the value");
+        assert_eq!(target.session(), "s3");
+        assert_eq!(target.path(), r"\\.\pipe\agwinterm-dev");
+    }
+
+    #[test]
     fn the_pane_id_stands_in_when_only_it_is_set() {
         let target = HostTarget::from_env(&env_of(&[(ENABLED_VAR, "1"), (PANE_VAR, "w1:p2")]))
             .expect("a pane id addresses a pane");
@@ -1088,6 +1206,102 @@ mod tests {
                 "{ENABLED_VAR}={value:?} claims a host that is not there",
             );
         }
+    }
+
+    // -- the development-instance guard -----------------------------------
+
+    #[test]
+    fn a_dev_build_refuses_a_pipe_the_allow_list_does_not_name() {
+        let refusal = pipe_refusal(Some("agwinterm-dev"), DEFAULT_PIPE, false, true)
+            .expect("a dev build must not publish into the instance it is running in");
+        // The variable has to be in the message: a refusal that does not name the
+        // way out is a browser that will not start for a reason the user cannot see.
+        assert!(refusal.contains(ALLOW_PIPE_VAR), "{refusal}");
+        assert!(refusal.contains(DEFAULT_PIPE), "{refusal}");
+        // The fallback is the case that actually wrecked a pane, so it says so
+        // rather than reporting a value nobody set.
+        let unset = format!("{PIPE_VAR} is unset");
+        assert!(refusal.contains(&unset), "{refusal}");
+    }
+
+    #[test]
+    fn a_dev_build_publishes_into_the_instance_it_was_told_to_use() {
+        assert_eq!(
+            pipe_refusal(Some("agwinterm-dev"), "agwinterm-dev", true, true),
+            None,
+        );
+        // A list, spelled either way a shell hands one over, and padded.
+        for list in [
+            "agwinterm-dev,other",
+            "other;agwinterm-dev",
+            " other , agwinterm-dev ",
+            "*",
+        ] {
+            assert_eq!(
+                pipe_refusal(Some(list), "agwinterm-dev", true, true),
+                None,
+                "{list:?} names the pipe and was refused anyway",
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_is_off_until_the_variable_is_set() {
+        // The constraint the port ships under: on Windows the product *is* a
+        // checkout, so a guard that refused by default would refuse every ordinary
+        // run. Unset means unchanged.
+        assert_eq!(pipe_refusal(None, DEFAULT_PIPE, false, true), None);
+        assert_eq!(pipe_refusal(Some("   "), DEFAULT_PIPE, false, true), None);
+    }
+
+    #[test]
+    fn a_release_build_ignores_the_variable_entirely() {
+        // A shipped browser publishes where the pane says. Otherwise a value left in
+        // a shell profile would stop a browser somebody paid no attention to it in.
+        assert_eq!(
+            pipe_refusal(Some("agwinterm-dev"), DEFAULT_PIPE, false, false),
+            None,
+        );
+        assert_eq!(pipe_refusal(Some(""), "anything", true, false), None);
+    }
+
+    #[test]
+    fn the_refusal_reaches_from_env_as_a_permission_error() {
+        // `NotFound` is "there is no pane"; this pane exists and is being refused,
+        // and `Terminal::host` reports the message either way.
+        let env = env_of(&[
+            (ENABLED_VAR, "1"),
+            (SESSION_VAR, "s3"),
+            (PIPE_VAR, DEFAULT_PIPE),
+            (ALLOW_PIPE_VAR, "agwinterm-dev"),
+        ]);
+        let result = HostTarget::from_env(&env);
+        if cfg!(debug_assertions) {
+            let err = result.expect_err("a debug build must refuse an unlisted instance");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert!(err.to_string().contains(ALLOW_PIPE_VAR), "{err}");
+        } else {
+            // `cargo test --release` reaches here, and it is the shipped behaviour:
+            // the variable is not consulted at all.
+            assert!(
+                result.is_ok(),
+                "a release build publishes where the pane says"
+            );
+        }
+
+        // And the instance it was told to use is reached as before.
+        let allowed = env_of(&[
+            (ENABLED_VAR, "1"),
+            (SESSION_VAR, "s3"),
+            (PIPE_VAR, "agwinterm-dev"),
+            (ALLOW_PIPE_VAR, "agwinterm-dev"),
+        ]);
+        assert_eq!(
+            HostTarget::from_env(&allowed)
+                .expect("the listed instance")
+                .path(),
+            r"\\.\pipe\agwinterm-dev",
+        );
     }
 
     // -- the envelope -----------------------------------------------------

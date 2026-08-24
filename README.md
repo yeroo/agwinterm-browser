@@ -112,6 +112,42 @@ $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
 | `TERMINAL_BROWSER_CELL_PX` | `<width>x<height>` in device pixels. Consulted before the host, so it also corrects a host that answers wrongly. |
 | `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
 | `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
+| `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances a **debug** build may draw into: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard. See [Working on the browser](#working-on-the-browser). |
+
+### Working on the browser
+
+Everything above is how you *use* it. This is the one rule for developing it, and it exists because
+breaking it is silent: a pane's `AGWINTERM_PIPE` names whichever agwinterm that pane belongs to, and
+with the variable unset it is `agwinterm` — the instance you are reading this in. A browser launched
+from your own terminal publishes into your own terminal, and a frame is a *placement* agwinterm holds
+until something replaces it, so a crash or a `taskkill /F` leaves the page painted over your shell
+with mouse reporting still on. That happened, and the pane stayed that way for eighteen hours.
+
+```powershell
+# 1. a Debug agwinterm of your own, on its own pipe and data dir (built from
+#    agwinterm's own tree, src/Agwinterm.Win32)
+<agwinterm-debug-build> --app-id agwinterm-dev
+
+# 2. confirm you are talking to it and not to the real one — a fresh tree, not your sessions
+agwintermctl --pipe agwinterm-dev tree
+
+# 3. open a pane on it, and run the browser from inside that pane
+agwintermctl --pipe agwinterm-dev session new --command "powershell"
+
+# 4. in that pane, name the instance you meant. A debug build refuses every other one.
+$env:TERMINAL_BROWSER_ALLOW_PIPE = "agwinterm-dev"
+node cli\dist\main.js https://example.com
+```
+
+Step 4 is the guard, and it is opt-in for a reason: on Windows the shipped product *is* a checkout —
+`pnpm -r build` runs `cargo build -p pixel-node` with no `--release` — so a guard that refused an
+unlisted instance by default would refuse every ordinary run. Setting the variable arms it; a release
+build ignores it entirely, so a value left in a shell profile can never stop a shipped browser
+drawing. `tools/milestone/run-milestone.cmd` defaults it to `agwinterm-dev` on your behalf.
+
+If a pane does end up wrecked, `terminal-browser pane-clear` in that pane is the recovery — it takes
+back a frame this browser left and puts the console modes back, and reports rather than clears when
+the placement is not ours.
 
 ### What this port refuses
 

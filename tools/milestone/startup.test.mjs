@@ -125,6 +125,21 @@ describe("the shape a pane starts in", () => {
     assert.match(runner, /TERMINAL_BROWSER_FRAME_BUDGET/);
     assert.match(runner, /TERMINAL_BROWSER_CELL_PX/);
   });
+
+  it("aims the debug engine at the dev instance rather than the pane it was started in", () => {
+    // This script launches the engine straight into whatever pane runs it, with no
+    // CLI in the way and no check of which agwinterm that pane belongs to. Started
+    // in a pane of the real instance it publishes there, and an exit that runs no
+    // destructor leaves the frame on it. The engine's guard reads this variable; the
+    // runner is where the dev workflow's answer to it lives.
+    assert.match(runner, /if not defined TERMINAL_BROWSER_ALLOW_PIPE/);
+    assert.match(runner, /TERMINAL_BROWSER_ALLOW_PIPE=agwinterm-dev/);
+    const engine = fs.readFileSync(
+      path.join(REPO, "engine", "crates", "pixel-core", "src", "agwinterm.rs"),
+      "utf8",
+    );
+    assert.match(engine, /ALLOW_PIPE_VAR: &str = "TERMINAL_BROWSER_ALLOW_PIPE"/);
+  });
 });
 
 describe("the frame budget stays measurable", () => {

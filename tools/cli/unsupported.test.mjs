@@ -188,6 +188,76 @@ describe("the host refusal", () => {
       "`active` names whichever pane is in front, which is not a pane",
     ],
     [{}, false, "no agwinterm at all"],
+
+    // The axis the eleven rows above could not see. `AGWINTERM_PIPE` decides which
+    // agwinterm the frame and the clear both go to, and until the corrections plan's
+    // Task 2 the three readers disagreed about it completely: the engine allowed
+    // `[A-Za-z0-9._-]`, `paneClearRequest` rejected only `[\\/]`, and
+    // `inAgwintermPane` did not look. A pane spelling the pipe `agwinterm 2` passed
+    // both CLI readers, launched a browser, and the engine then refused every frame.
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "agwinterm-dev" }, true, "a named instance"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "agwinterm.boris" }, true, "a dot in the name"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: " agwinterm-dev " }, true, "padded by a shell"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "" }, true, "empty is unset, which is the fallback"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "agwinterm 2" }, false, "a space is not in the engine's set"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "agwinterm/evil" }, false, "a separator names something else"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "..\\..\\Users\\me\\.ssh\\config" }, false, "`\\\\.\\` is normalised, so `..` leaves the pipe namespace"],
+    [{ AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "agwintérm" }, false, "non-ASCII is outside the set too"],
+
+    // And the development guard on the same axis.
+    [
+      { AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev" },
+      false,
+      "the fallback to the real instance is what the guard exists to refuse",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "agwinterm",
+        TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+      },
+      false,
+      "and naming it explicitly does not make it allowed",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "agwinterm-dev",
+        TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+      },
+      true,
+      "the instance the developer named",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "agwinterm-dev",
+        TERMINAL_BROWSER_ALLOW_PIPE: "other, agwinterm-dev",
+      },
+      true,
+      "a list, padded",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        TERMINAL_BROWSER_ALLOW_PIPE: "*",
+      },
+      true,
+      "`*` is the escape hatch",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        TERMINAL_BROWSER_ALLOW_PIPE: "  ",
+      },
+      true,
+      "a blank list is an unset variable, not a list that allows nothing",
+    ],
   ];
 
   it("uses the engine's rule for what counts as a pane", () => {
@@ -200,6 +270,77 @@ describe("the host refusal", () => {
     for (const [env, accepted, why] of HOST_CASES) {
       assert.equal(paneClearRequest(env) !== null, accepted, `pane.ts: ${why}`);
     }
+  });
+
+  it("spells the guard's variable and character set the way the engine does", () => {
+    // The third reader is in Rust and cannot be driven from here, so the two things
+    // that would silently split the rule are read out of it instead.
+    const engine = readSource("engine", "crates", "pixel-core", "src", "agwinterm.rs");
+    const declared = /ALLOW_PIPE_VAR: &str = "([A-Z_]+)"/.exec(engine);
+    assert.ok(declared, "agwinterm.rs no longer declares the allow-pipe variable");
+    for (const relative of ["cli/src/pane.ts", "cli/src/unsupported.ts"]) {
+      assert.ok(
+        readSource(...relative.split("/")).includes(`"${declared[1]}"`),
+        `${relative} does not name ${declared[1]}`,
+      );
+    }
+    // `[A-Za-z0-9._-]` on the Rust side is spelled as a byte test, so the two are
+    // compared by behaviour above and by intent here.
+    assert.match(engine, /is_ascii_alphanumeric\(\) \|\| matches!\(byte, b'\.' \| b'_' \| b'-'\)/);
+    for (const relative of ["cli/src/pane.ts", "cli/src/unsupported.ts"]) {
+      assert.ok(
+        readSource(...relative.split("/")).includes("/^[A-Za-z0-9._-]+$/"),
+        `${relative} does not use the engine's pipe-name set`,
+      );
+    }
+  });
+
+  it("gates the engine's half on the build, so a release browser is unaffected", () => {
+    // The CLI cannot tell its own build kind and so honours the variable whenever it
+    // is set; the engine can, and must, because a value inherited from a shell
+    // profile would otherwise stop a shipped browser drawing anything at all.
+    const engine = readSource("engine", "crates", "pixel-core", "src", "agwinterm.rs");
+    const at = engine.indexOf("let allow = nonempty(env, ALLOW_PIPE_VAR)");
+    assert.ok(at > 0, "from_env no longer reads the allow list");
+    const call = engine.slice(at, engine.indexOf(");", engine.indexOf("pipe_refusal(", at)));
+    assert.match(call, /cfg!\(debug_assertions\)/, "the guard is armed in release builds");
+  });
+
+  it("names the variable when the development guard is what refused", () => {
+    // The whole point of the guard is that the browser does not start; a refusal
+    // that did not name the way out would be a browser that fails for no visible
+    // reason. This is the environment the 18-hour incident ran in: a checkout
+    // build, launched from a pane of the real instance, with AGWINTERM_PIPE unset.
+    const reason = windowsHostRefusal("win32", {
+      AGWINTERM_ENABLED: "1",
+      AGWINTERM_SESSION_ID: "s1",
+      TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+    });
+    assert.match(reason, /TERMINAL_BROWSER_ALLOW_PIPE/);
+    assert.match(reason, /AGWINTERM_PIPE is unset/, "the fallback is the case that wrecked a pane");
+    assert.match(reason, /"agwinterm"/, "the instance it would have drawn into");
+    assert.ok(
+      !reason.includes("Run this from inside an agwinterm pane"),
+      "this shell *is* a pane; telling the user to find one is a lie",
+    );
+  });
+
+  it("names the variable when the pipe is not a pipe name", () => {
+    const reason = windowsHostRefusal("win32", {
+      AGWINTERM_ENABLED: "1",
+      AGWINTERM_SESSION_ID: "s1",
+      AGWINTERM_PIPE: "agwinterm 2",
+    });
+    assert.match(reason, /AGWINTERM_PIPE="agwinterm 2"/);
+    assert.match(reason, /letters, digits/);
+  });
+
+  it("leaves the guard out of it when there is no pane to guard", () => {
+    // Otherwise a TERMINAL_BROWSER_ALLOW_PIPE left in the environment would turn
+    // "you are not in a pane" into a message about an instance that is not involved.
+    const reason = windowsHostRefusal("win32", { TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev" });
+    assert.match(reason, /Run this from inside an agwinterm pane/);
+    assert.ok(!reason.includes("TERMINAL_BROWSER_ALLOW_PIPE"));
   });
 
   it("refuses anywhere else on Windows, and says why the usual probe is not used", () => {

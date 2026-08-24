@@ -7,7 +7,33 @@ only after a change is not a criterion that passed.
 
 The live checks ran against a **Debug agwinterm on its own pipe** (`--app-id
 agwinterm-dev`), built from `src/Agwinterm.Win32` and stopped afterwards. The
-Constraints forbid testing against the real instance and none of this touched it.
+Constraints forbid testing against the real instance, and every check recorded below
+was driven through a pane of the Debug one — created with `agwintermctl --pipe
+agwinterm-dev session new` and typed into with `session.type`.
+
+**That is a claim about the checks below, and it was written as a claim about the
+run.** It is not one. The morning after, a pane of the *real* instance was found
+holding a stale browser frame with SGR mouse reports streaming into its shell prompt,
+about eighteen hours after the run ended — so some run during the port did publish
+into the real instance, and it is not any of the ones recorded here.
+
+What the state itself narrows it to: mouse reporting is turned on by `ModeGuard`
+against the console the engine *attached* to, and the frame was placed on that same
+pane, so the engine ran with the real pane's console and inherited its `AGWINTERM_*`
+— that is, it was launched from the run's own shell rather than from a pane of the
+Debug instance. Nothing else in the port has that shape. The best-supported candidate
+in the run log is Task 10's ad-hoc probing between 18:20 and 18:38 on 2026-08-21
+("Probe electron env and cell override", "Re-run with correct cell metrics override"),
+which ran `electron.exe` through `cmd /c set …` rather than through the dev pane and
+ended at "Kill electron and rebuild native" — a force-kill runs no `Drop`, which is
+exactly a frame left placed and the reporting modes left on. The log records the
+invocation but not its environment, so that last step is a reconstruction; the part
+that is not is that a run outside the dev instance happened at all.
+
+The correction is the guard, not the sentence: `TERMINAL_BROWSER_ALLOW_PIPE` (the
+corrections plan's Task 2) makes a debug build refuse an instance it was not named
+at, so "which pane did that go to" stops depending on remembering. The dev workflow
+it belongs to is in [the README](../../README.md#working-on-the-browser).
 
 ---
 

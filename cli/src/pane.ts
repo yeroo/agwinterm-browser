@@ -63,6 +63,29 @@ const PIPE_PREFIX = "\\\\.\\pipe\\";
  */
 const DEFAULT_PIPE = "agwinterm";
 
+/**
+ * The characters a pipe name may carry — `agwinterm.rs`'s `valid_pipe_name`, and
+ * `store/src/endpoint.ts`'s `pipeSegment` before it.
+ *
+ * This module used to reject only `[\\/]`, on the narrower reasoning that a
+ * separator makes `\\.\pipe\a\b` name something else. That is true and not enough:
+ * the engine refuses the wider set, so a pane whose `AGWINTERM_PIPE` held a space
+ * passed here and failed there — a browser the CLI launched and the engine then had
+ * nowhere to draw into.
+ */
+const PIPE_NAME = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * The agwinterm instances a development build may address.
+ *
+ * `agwinterm.rs`'s `ALLOW_PIPE_VAR`, repeated for the reason everything else in this
+ * module is repeated. The engine's copy stops a dev build *publishing* into the
+ * terminal the developer is working in; without this one the CLI would still send
+ * that instance an `image.clear` on the way out, which is the half of the mechanism
+ * that runs when the other half has already refused.
+ */
+export const ALLOW_PIPE_VAR = "TERMINAL_BROWSER_ALLOW_PIPE";
+
 export type PaneEnv = Record<string, string | undefined>;
 
 export interface ClearRequest {
@@ -93,22 +116,100 @@ export interface ClearRequest {
  *     stays on the pane — the exact failure this module exists to prevent. Hosts
  *     predating multi-window set nothing, and the field is left out.
  *
+ *   - `TERMINAL_BROWSER_ALLOW_PIPE`, when set, is the development guard: this pane's
+ *     instance has to be one of the ones it names. See [`pipeRefusal`].
+ *
  * Pure, so the addressing is testable without a pipe on the other end.
  */
 export function paneClearRequest(env: PaneEnv): ClearRequest | null {
-  const enabled = nonempty(env, "AGWINTERM_ENABLED");
-  if (!enabled || enabled === "0") return null;
-  const target = nonempty(env, "AGWINTERM_SESSION_ID") ?? nonempty(env, "AGWINTERM_PANE_ID");
-  if (!target || target === "active") return null;
-  const pipe = nonempty(env, "AGWINTERM_PIPE") ?? DEFAULT_PIPE;
-  // A pipe name may not contain a separator: `\\.\pipe\a\b` names something else.
-  if (/[\\/]/.test(pipe)) return null;
-  const window = nonempty(env, "AGWINTERM_WINDOW_ID");
+  const address = paneAddress(env);
+  if (!address || pipeRefusal(env)) return null;
+  const { target, pipe, window } = address;
   const request = window ? { cmd: CLEAR_CMD, target, window } : { cmd: CLEAR_CMD, target };
   return {
     endpoint: PIPE_PREFIX + pipe,
     line: `${JSON.stringify(request)}\n`,
   };
+}
+
+interface PaneAddress {
+  target: string;
+  pipe: string;
+  window: string | null;
+}
+
+/** The pane this environment names, before any guard is applied. */
+function paneAddress(env: PaneEnv): PaneAddress | null {
+  const enabled = nonempty(env, "AGWINTERM_ENABLED");
+  if (!enabled || enabled === "0") return null;
+  const target = nonempty(env, "AGWINTERM_SESSION_ID") ?? nonempty(env, "AGWINTERM_PANE_ID");
+  if (!target || target === "active") return null;
+  const pipe = nonempty(env, "AGWINTERM_PIPE") ?? DEFAULT_PIPE;
+  return { target, pipe, window: nonempty(env, "AGWINTERM_WINDOW_ID") };
+}
+
+/**
+ * Whether an allow-list names this pipe. `*` names every pipe, and a list with
+ * nothing in it is an unset variable rather than a list that allows nothing —
+ * `set TERMINAL_BROWSER_ALLOW_PIPE=` is how a shell spells "off".
+ *
+ * `allows_pipe` in `agwinterm.rs`, character for character, including the two
+ * separators: a `cmd.exe` `set` treats a comma as an argument separator, so a
+ * developer who writes one means a list.
+ */
+export function pipeAllowed(list: string | null | undefined, pipe: string): boolean {
+  if (!list) return true;
+  const entries = list
+    .split(/[,;]/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) return true;
+  return entries.some((entry) => entry === "*" || entry === pipe);
+}
+
+/**
+ * Why this pane's pipe may not be addressed, or `null` when it may.
+ *
+ * Two refusals, both of them the engine's. The name has to be a name
+ * (`valid_pipe_name`), and under `TERMINAL_BROWSER_ALLOW_PIPE` the instance has to be
+ * one the developer named (`pipe_refusal`). The second is what stops a browser built
+ * in a checkout from publishing into the terminal that checkout is being edited in —
+ * a pane of the real instance was found holding a dead browser's page, mouse
+ * reporting still on, eighteen hours later.
+ *
+ * One asymmetry with the engine, deliberately. `agwinterm.rs` consults the variable
+ * only under `debug_assertions`, so a value inherited from a shell profile cannot
+ * stop a shipped browser drawing. The CLI has no build kind to consult — `tsc`
+ * produces the same JavaScript either way — so it honours the variable whenever it is
+ * set. That is the safe direction: the only thing the CLI withholds is an
+ * `image.clear` against an instance the guard says is not ours, and the report says
+ * so rather than staying quiet.
+ *
+ * Returns `null` when there is no pane at all; "nowhere to send" is a different
+ * report line from "somewhere, and refused".
+ */
+export function pipeRefusal(env: PaneEnv): string | null {
+  const address = paneAddress(env);
+  if (!address) return null;
+  const { pipe } = address;
+  if (!PIPE_NAME.test(pipe)) {
+    return (
+      `AGWINTERM_PIPE=${JSON.stringify(pipe)} is not a pipe name — it may contain ` +
+      "only letters, digits, `.`, `_` and `-`"
+    );
+  }
+  const allow = nonempty(env, ALLOW_PIPE_VAR);
+  if (!pipeAllowed(allow, pipe)) {
+    const source = nonempty(env, "AGWINTERM_PIPE")
+      ? `AGWINTERM_PIPE names ${JSON.stringify(pipe)}`
+      : `AGWINTERM_PIPE is unset, so this pane resolves to ${JSON.stringify(pipe)}`;
+    return (
+      `${source}, and ${ALLOW_PIPE_VAR}=${JSON.stringify(allow)} does not list it — ` +
+      `add ${JSON.stringify(pipe)} to ${ALLOW_PIPE_VAR}, or set it to \`*\` to allow ` +
+      "any instance, or unset it to turn the guard off"
+    );
+  }
+  return null;
 }
 
 function nonempty(env: PaneEnv, key: string): string | null {
@@ -383,11 +484,17 @@ export function paneClearReport(
   consoleRestored: boolean,
 ): string[] {
   const lines: string[] = [];
+  // A pane that exists and is being refused is not the same report as no pane, and
+  // the difference is a variable the user set — so it is named rather than folded
+  // into "no agwinterm pane here", which would read as a shell problem.
+  const refusal = outcome.request ? null : pipeRefusal(env);
   if (outcome.request) {
     const pipe = nonempty(env, "AGWINTERM_PIPE");
     const where = pipe ? `pipe ${pipe}` : `pipe ${DEFAULT_PIPE} (AGWINTERM_PIPE unset)`;
     const target = (JSON.parse(outcome.request.line) as { target: string }).target;
     lines.push(`pane-clear: ${where}, session ${target}`);
+  } else if (refusal) {
+    lines.push(`pane-clear: this pane's instance is not addressable — ${refusal}`);
   } else {
     lines.push("pane-clear: no agwinterm pane in this environment");
   }
@@ -400,6 +507,13 @@ export function paneClearReport(
           "something else and was left alone"
         : "  frame:   nothing to clear — no frames of ours were left behind, and there " +
           "is no pane here to address anyway",
+    );
+  } else if (refusal) {
+    lines.push(
+      `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, and no ` +
+        "image.clear was sent — the guard above says this instance is not one this " +
+        "build addresses, and clearing it anyway is how a placement someone else owns " +
+        "gets taken down",
     );
   } else if (!outcome.request) {
     lines.push(
