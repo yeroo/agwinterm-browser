@@ -225,37 +225,91 @@ function nonempty(env: PaneEnv, key: string): string | null {
   return value ? value : null;
 }
 
+/** What the host said about the clear. */
+export interface ClearReply {
+  /** True only for `{"ok":true,…}` — the host says the placement is off the pane. */
+  cleared: boolean;
+  /**
+   * Why the host said no, when it said no. `null` when it agreed, and `null` when it
+   * never spoke at all — a refusal is a host that is there and disagrees, which is a
+   * different thing to report than a pipe with nobody on it.
+   */
+  refused: string | null;
+}
+
+/** The most a single-line reply may grow to. Matches `MAX_REPLY_BYTES` in `control.ts`. */
+const MAX_REPLY_BYTES = 4 * 1024 * 1024;
+
+/** No answer at all: the timeout, a dead pipe, a peer that hung up. */
+const UNANSWERED: ClearReply = { cleared: false, refused: null };
+
 /**
  * Sends the clear, and never throws.
  *
  * Best-effort by design: this runs after the browser has already gone, often
- * because something went wrong, and every failure here means the same thing as
+ * because something went wrong, and most failures here mean the same thing as
  * success — there is no placement of ours left on that pane. A host that has closed
  * the window, a pipe that is gone and a reply that never comes are all "nothing to
  * clean up", and none of them should turn a browser's exit code into a CLI error.
  *
+ * The one failure that does **not** mean that is a host which answered
+ * `{"ok":false,…}`. `no session "s-abc"` — the pane is gone, or another window is in
+ * front and this one names none — is a pane that is still painted and a clear that
+ * did not happen. Reading the reply is what tells the two apart: the protocol is the
+ * `{"ok":…}` envelope the engine's `Reply::parse` and `control.ts` both read, and
+ * taking the arrival of *bytes* as success reports "cleared" for the exact case the
+ * verb exists to catch — and, worse, throws away the evidence that would let a second
+ * run try again.
+ *
  * Resolves once the host has answered or `timeoutMs` has passed, so the process does
  * not exit with the write still in flight.
  */
-export function clearPaneFrame(env: PaneEnv, timeoutMs = 1_000): Promise<boolean> {
+export function clearPaneFrame(env: PaneEnv, timeoutMs = 1_000): Promise<ClearReply> {
   const request = paneClearRequest(env);
-  if (!request) return Promise.resolve(false);
+  if (!request) return Promise.resolve(UNANSWERED);
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (cleared: boolean) => {
+    let buffer = "";
+    const finish = (reply: ClearReply) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       socket.destroy();
-      resolve(cleared);
+      resolve(reply);
     };
     const socket = net.connect(request.endpoint);
-    const timer = setTimeout(() => finish(false), timeoutMs);
+    const timer = setTimeout(() => finish(UNANSWERED), timeoutMs);
+    socket.setEncoding("utf8");
     socket.once("connect", () => socket.write(request.line));
-    socket.once("data", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("close", () => finish(false));
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      // A reply is one line. A peer that streams without ever sending a newline would
+      // otherwise grow this until the timeout, and on Windows the pipe name is one any
+      // local process can take.
+      if (buffer.length > MAX_REPLY_BYTES) {
+        const refused = `the reply passed ${MAX_REPLY_BYTES} bytes with no newline`;
+        finish({ cleared: false, refused });
+        return;
+      }
+      const newline = buffer.indexOf("\n");
+      if (newline >= 0) finish(readClearReply(buffer.slice(0, newline)));
+    });
+    socket.once("error", () => finish(UNANSWERED));
+    socket.once("close", () => finish(UNANSWERED));
   });
+}
+
+/** One `{"ok":…}` envelope, read the way `Reply::parse` reads it. */
+function readClearReply(line: string): ClearReply {
+  let reply: { ok?: unknown; error?: unknown };
+  try {
+    reply = JSON.parse(line) as { ok?: unknown; error?: unknown };
+  } catch {
+    return { cleared: false, refused: `the reply was not JSON: ${line.slice(0, 200)}` };
+  }
+  if (reply.ok === true) return { cleared: true, refused: null };
+  const error = typeof reply.error === "string" ? reply.error.trim() : "";
+  return { cleared: false, refused: error || `the host said no: ${line.slice(0, 200)}` };
 }
 
 /** Just enough of `process.stdout` to write the escape string, so tests need no tty. */
@@ -342,6 +396,9 @@ export const FRAME_DIR_PREFIX = "terminal-browser-frames-";
 /** Mirrors `FramePublisher::path_for`'s `frame-{seq:08}.png`. */
 const FRAME_FILE = /^frame-\d{8}\.png$/;
 
+/** Mirrors `PANE_FILE` in `frame_file.rs`: the pipe, then the session id. */
+export const FRAME_PANE_FILE = "pane";
+
 /** Evidence that a browser placed a frame and never took it back. */
 export interface OwnedFrames {
   /** The frame directory it was left in. */
@@ -375,6 +432,69 @@ export interface OwnedFramesOptions {
    * its first frame.
    */
   pid?: number;
+  /**
+   * Only accept a directory whose `pane` marker names this pane.
+   *
+   * This is what makes the broad question a question about *this* pane rather than
+   * about the machine. Without it the newest directory anywhere wins, and two panes
+   * wrecked at once means `pane-clear` in one of them repairs it on the other's
+   * evidence, names the other's pid in the report, and then deletes the other's
+   * directory — leaving the second pane painted with nothing left that knows a
+   * browser drew there. A live browser in another pane is worse still: its directory
+   * gains a file every frame, so it is always the newest match.
+   *
+   * Ignored when `pid` is given: the pid *is* the attribution there, and the exit
+   * path knows it first-hand.
+   *
+   * Required for the broad question — a caller that names no pane owns nothing —
+   * because "any pane" is the machine-wide search under a different name.
+   *
+   * `"any"` asks that machine-wide question deliberately, and is only correct where
+   * the answer cannot authorise a clear: run outside a pane, or with the pipe guard
+   * refusing this instance, there is nowhere to send an `image.clear` and the only
+   * thing left to do with a wreck is name it so the user knows where to go.
+   */
+  pane?: PaneMark | "any" | null;
+}
+
+/** The pane a frame directory was placed on, as `PANE_FILE` records it. */
+export interface PaneMark {
+  /** The bare pipe name, as `AGWINTERM_PIPE` spells it. */
+  pipe: string;
+  /** The session id the frame was addressed to. */
+  target: string;
+}
+
+/**
+ * The pane a publisher's directory says it drew on, or `null` when it says nothing.
+ *
+ * A directory with no marker is one this build did not write — an engine predating
+ * `PANE_FILE`, or a marker that could not be written. It is deliberately *not* read
+ * as "mine": the whole point of the file is that an unattributed wreck cannot be
+ * told apart from another pane's.
+ */
+function frameMark(dir: string): PaneMark | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(dir, FRAME_PANE_FILE), "utf8");
+  } catch {
+    return null;
+  }
+  const [pipe, target] = text.split("\n").map((line) => line.trim());
+  if (!pipe || !target) return null;
+  return { pipe, target };
+}
+
+/**
+ * Whether a marker names the pane the caller is standing in.
+ *
+ * The pipe compares case-insensitively because the object manager does: a pane whose
+ * `AGWINTERM_PIPE` is `Agwinterm-Dev` and an engine that recorded `agwinterm-dev`
+ * addressed the same instance. The session id is agwinterm's own opaque string and
+ * is compared as given.
+ */
+function sameMark(mark: PaneMark, pane: PaneMark): boolean {
+  return mark.pipe.toLowerCase() === pane.pipe.toLowerCase() && mark.target === pane.target;
 }
 
 /**
@@ -416,11 +536,20 @@ export function searchedRoots(options: OwnedFramesOptions = {}): string[] {
  *
  * Returns the *newest* match, so a pane wrecked twice reports the wreck the user is
  * actually looking at.
+ *
+ * Two questions, and both of them narrow. `pid` is the exit path's: the engine names
+ * the directory after the process this CLI spawned, so the pid settles ownership on
+ * its own. `pane` is the recovery verb's: the process is gone, so what is left is the
+ * marker the engine wrote naming the pane it drew on. Neither is "the newest frame
+ * directory on this machine" — see [`OwnedFramesOptions.pane`] for what that costs.
  */
 export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | null {
   // A pid the caller asked about and does not have is not a licence to ask the
   // broad question. See [`OwnedFramesOptions.pid`].
   if ("pid" in options && options.pid === undefined) return null;
+  // And neither is a pane the caller could not resolve.
+  const pane = options.pid === undefined ? (options.pane ?? null) : null;
+  if (options.pid === undefined && !pane) return null;
   // The trailing `-` matters: without it a pid of 123 would adopt 1234's frames.
   const wanted =
     options.pid === undefined ? FRAME_DIR_PREFIX : `${FRAME_DIR_PREFIX}${options.pid}-`;
@@ -447,6 +576,12 @@ export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | nul
       // An empty directory is a browser that died before it drew anything, which is
       // the engine's `written.is_empty()` case: nothing was placed, so nothing is ours.
       if (frames === 0) continue;
+      // The marker is written with the first frame the host took, so a directory with
+      // frames in it and no marker for this pane belongs to another one.
+      if (pane && pane !== "any") {
+        const mark = frameMark(dir);
+        if (!mark || !sameMark(mark, pane)) continue;
+      }
       if (at <= bestAt) continue;
       const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
       best = { dir, pid: Number.isFinite(pid) ? pid : null, frames };
@@ -462,8 +597,10 @@ export interface PaneClearOutcome {
   request: ClearRequest | null;
   /** The frames a dead browser left behind, or `null` when it owns nothing here. */
   owned: OwnedFrames | null;
-  /** True only when the host answered the clear. */
+  /** True only when the host answered `{"ok":true}`. */
   cleared: boolean;
+  /** Why the host refused, when it refused. See [`ClearReply.refused`]. */
+  refused: string | null;
   /** The temp directories that were actually read, so the report can name them. */
   searched: string[];
 }
@@ -482,9 +619,22 @@ export async function clearOwnedPaneFrame(
 ): Promise<PaneClearOutcome> {
   const searched = searchedRoots(options);
   const request = paneClearRequest(env);
-  const owned = ownedFrames(options);
-  if (!request || !owned) return { request, owned, cleared: false, searched };
-  const cleared = await clearPaneFrame(env, options.timeoutMs ?? 1_000);
+  // The broad question is asked *of this pane*, not of the machine — except where no
+  // clear can follow from the answer, and then the machine-wide one is what lets the
+  // report say "these frames exist, but not from here". `paneAddress` rather than
+  // `request` because the marker records the bare pipe name the engine read out of
+  // the environment, not the `\\.\pipe\` path a client dials.
+  const address = paneAddress(env);
+  const owned = ownedFrames(
+    "pid" in options
+      ? options
+      : {
+          ...options,
+          pane: request && address ? { pipe: address.pipe, target: address.target } : "any",
+        },
+  );
+  if (!request || !owned) return { request, owned, cleared: false, refused: null, searched };
+  const { cleared, refused } = await clearPaneFrame(env, options.timeoutMs ?? 1_000);
   // The evidence goes with the placement it authorised. `FrameDir`'s `Drop` is what
   // removes this directory on an ordinary exit, so one still standing is a browser
   // that ran no destructor — and once the host has answered the clear, that is no
@@ -494,12 +644,17 @@ export async function clearOwnedPaneFrame(
   // reaches it an hour later. Best-effort, because this runs on paths that must not
   // fail: a directory that will not delete is `sweep_stale`'s problem, not the
   // recovery's.
+  //
+  // Only on `cleared`, and `cleared` is now the host's own `ok:true` rather than the
+  // arrival of bytes. A refusal leaves the directory exactly where it is: the pane is
+  // still painted, and the evidence is what a later run — after the window that was
+  // in front has moved, say — needs in order to try again.
   if (cleared) {
     try {
       fs.rmSync(owned.dir, { recursive: true, force: true });
     } catch {}
   }
-  return { request, owned, cleared, searched };
+  return { request, owned, cleared, refused, searched };
 }
 
 // -- the recovery verb ---------------------------------------------------------
@@ -578,8 +733,8 @@ export function paneClearReport(
     if (outcome.request) {
       lines.push(
         `  frame:   nothing of ours to clear — no ${FRAME_DIR_PREFIX}* directory under ` +
-          `${roots} holds a frame, so any picture on this pane was placed by ` +
-          "something else and was left alone",
+          `${roots} holds a frame placed on this pane, so any picture on it was put ` +
+          "there by something else and was left alone",
       );
     } else if (refusal) {
       // "There is no pane here" would be a lie to someone standing in one. The pane
@@ -612,6 +767,18 @@ export function paneClearReport(
     lines.push(
       `  frame:   cleared — a browser${owner(outcome.owned)} left ${outcome.owned.frames} ` +
         `frame(s) in ${outcome.owned.dir} and never took the picture back`,
+    );
+  } else if (outcome.refused) {
+    // The host is there and said no, which is neither "cleared" nor "nobody home".
+    // Most often `no session`: the pane closed, or this build named no window and
+    // another one is in front. The pane is still painted and the frames are still on
+    // disk, so the next run has something to try again with — which is why this
+    // branch says so rather than reporting a repair that did not happen.
+    lines.push(
+      `  frame:   the host refused the image.clear — ${outcome.refused}. A browser` +
+        `${owner(outcome.owned)} left ${outcome.owned.frames} frame(s) in ` +
+        `${outcome.owned.dir}; they were left in place, so run this again from the ` +
+        "pane that was drawn on, with that pane's window in front",
     );
   } else {
     lines.push(

@@ -205,9 +205,9 @@ the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **441 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 384 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **349 passed**, 87 suites, 8.4 s wall clock |
+| `cargo nextest run --workspace` | **445 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 388 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **352 passed**, 87 suites, 8.3 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -271,22 +271,29 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 60 |
+| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 63 |
 | `agwinterm.rs` | 46 | | `vendor-check/inventory.test.mjs` | 37 |
-| `frame_file.rs` | 32 | | `cli/endpoint.test.mjs` | 32 |
+| `frame_file.rs` | 36 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 121 |
 
-Counted on 2026-08-24; the node column sums to the 349 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 60),
+Counted on 2026-08-24; the node column sums to the 352 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 63),
 `agwinterm.rs` (29 → 46, the exchange deadline) and `terminal_windows.rs` (38 → 53).
 The last five of each are the review round that followed the plan: the frame roots the
 engine could have chosen, a pid the caller asked about and does not have, the evidence
 consumed with the placement it authorised, and the two ends of the `u32` a Win32 wait
 must never be given.
+
+A second review round moved seven more, and all seven are about the same seam — which
+of two panes a wreck on disk belongs to. `frame_file.rs` (32 → 36) gained the pane
+marker the engine now writes beside the first frame a host accepts, and the rule that a
+*failed* clear leaves its directory standing for the CLI to find; `pane-clear.test.mjs`
+(60 → 63) gained the host that answers `ok:false` — bytes on the pipe that are not a
+repair — and the wreck belonging to the pane next door.
 Two suites in the table did not exist then — `tools/lib/deadline.test.mjs` and
 `tools/acceptance/pane-clear.test.mjs` — and are inside "the rest".
 

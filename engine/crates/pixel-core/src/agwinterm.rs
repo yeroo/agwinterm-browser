@@ -230,6 +230,13 @@ impl HostTarget {
     pub(crate) fn session(&self) -> &str {
         &self.session
     }
+
+    /// The bare pipe name, as `AGWINTERM_PIPE` spells it. Paired with
+    /// [`session`](Self::session) it names the pane a frame was placed on, which is
+    /// what `frame_file::PANE_FILE` records.
+    pub(crate) fn pipe(&self) -> &str {
+        &self.pipe
+    }
 }
 
 /// The characters a pipe name may carry, which is `store/src/endpoint.ts`'s
@@ -700,11 +707,33 @@ fn still_pending(err: &io::Error) -> bool {
 ///     least `EXCHANGE_DEADLINE`" true rather than nearly true.
 fn millis_until(deadline: Instant) -> u32 {
     let left = deadline.saturating_duration_since(Instant::now());
-    let ms = left.as_millis() + u128::from(!left.subsec_nanos().is_multiple_of(1_000_000));
+    // An expired deadline is a wait long enough to take the timeout path and no
+    // longer; there is nothing left to be short of.
+    if left.is_zero() {
+        return 1;
+    }
+    let ms = left.as_millis()
+        + u128::from(!left.subsec_nanos().is_multiple_of(1_000_000))
+        + WAIT_SLACK_MS;
     u32::try_from(ms)
         .unwrap_or(u32::MAX - 1)
         .clamp(1, u32::MAX - 1)
 }
+
+/// How much longer than the arithmetic says each wait asks for.
+///
+/// The rounding above makes the *requested* milliseconds no fewer than what is left
+/// of the deadline. It does not make the wait that long: `GetOverlappedResultEx`
+/// measures its interval against the system timer, `Instant` against the performance
+/// counter, and the two disagree by a fraction of a millisecond — a 1040 ms wait was
+/// measured here returning after 1039.6 ms of `Instant` time, on about one run in
+/// five. Without this the "at least [`EXCHANGE_DEADLINE`]" above is a near-floor
+/// rather than a floor, and the test that asserts it is flaky rather than wrong.
+///
+/// Two rather than one so the margin is not itself borderline. It is charged once
+/// per wait against a deadline of a second, which is nothing, and never against an
+/// expired one.
+const WAIT_SLACK_MS: u128 = 2;
 
 /// Whether a failed exchange is worth re-dialling for, as opposed to reporting.
 ///

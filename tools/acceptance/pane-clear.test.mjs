@@ -52,7 +52,7 @@ requireBuilt(REPO, "store/dist/index.js", "store/src", "corepack pnpm -r build")
 // The escapes the verb owes the console, taken from the same build the children run
 // rather than copied — `cli/dist/pane.js` imports only node builtins, so it loads
 // here as-is. `tools/cli/pane-clear.test.mjs` is what pins it to the Rust.
-const { DISABLE_REPORTING, FRAME_DIR_PREFIX } = createRequire(import.meta.url)(
+const { DISABLE_REPORTING, FRAME_DIR_PREFIX, FRAME_PANE_FILE } = createRequire(import.meta.url)(
   path.join(REPO, "cli", "dist", "pane.js"),
 );
 
@@ -178,6 +178,13 @@ const BROWSER = `
   const dir = path.join(process.env.TEMP, "${FRAME_DIR_PREFIX}" + process.pid + "-0");
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "frame-00000000.png"), "");
+  // FrameDir::mark_pane: the pipe, then the session id. The engine writes it with the
+  // first frame the host takes, and it is what tells this pane's wreck from another
+  // pane's — without it pane-clear rightly declines to adopt these frames at all.
+  fs.writeFileSync(
+    path.join(dir, "${FRAME_PANE_FILE}"),
+    (process.env.AGWINTERM_PIPE || "agwinterm") + "\\n" + process.env.AGWINTERM_SESSION_ID + "\\n",
+  );
   process.stdout.write("drew " + process.pid + "\\n");
   setInterval(() => {}, 1000);
 `;

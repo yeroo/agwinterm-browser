@@ -101,6 +101,23 @@ const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 /// Shared by every publisher's directory, so [`sweep_stale`] can recognise one.
 const DIR_PREFIX: &str = "terminal-browser-frames-";
 
+/// Names the pane this publisher's frames were placed on: the pipe on the first
+/// line, the session id on the second.
+///
+/// The directory name carries a pid and a sequence and nothing else, so a wreck on
+/// disk says *that* a browser drew and never says *where*. `terminal-browser
+/// pane-clear` runs with no pid to go on — the process it would name is gone, and
+/// often so is the CLI that spawned it — so without this it can only take the newest
+/// directory on the machine and hope. Two panes wrecked at once is then a pane
+/// repaired on another pane's evidence, which is the clear-what-you-did-not-place
+/// rule (see [`FramePublisher::clear`]) broken from the other side.
+///
+/// Written once, after the first frame the host accepted, for the same reason
+/// `written` is the test there: a publisher that never placed anything has no pane
+/// to name. The name has no `frame-` prefix, so `ownedFrames` never counts it as a
+/// frame.
+const PANE_FILE: &str = "pane";
+
 /// Names a file to append one line per frame to, breaking the cost down by stage.
 ///
 /// Off unless set, and it names a path rather than being a boolean because the
@@ -210,6 +227,9 @@ pub(crate) fn encode_png(canvas: &Canvas, out: &mut Vec<u8>) -> io::Result<()> {
 /// A private directory under the temp dir, removed when the publisher goes.
 struct FrameDir {
     path: PathBuf,
+    /// Set when the clear this directory authorises did not happen, so `Drop` leaves
+    /// it standing. See [`FramePublisher::clear`].
+    keep: bool,
 }
 
 impl FrameDir {
@@ -249,7 +269,7 @@ impl FrameDir {
                 SEQ.fetch_add(1, Ordering::Relaxed)
             ));
             match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
+                Ok(()) => return Ok(Self { path, keep: false }),
                 // A directory that already exists is a dead browser's, not ours.
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = Some(err),
                 // The temp directory itself may not exist yet on a fresh profile.
@@ -272,8 +292,32 @@ impl FrameDir {
 /// How many names [`FrameDir::create`] will try before giving up.
 const ATTEMPTS: u32 = 64;
 
+impl FrameDir {
+    /// Records which pane the frames in here went to. Best-effort: a marker that
+    /// could not be written costs `pane-clear` a recovery it would otherwise make,
+    /// which is not worth failing a frame over.
+    fn mark_pane(&self, target: &crate::agwinterm::HostTarget) {
+        let _ = fs::write(
+            self.path.join(PANE_FILE),
+            format!("{}\n{}\n", target.pipe(), target.session()),
+        );
+    }
+}
+
 impl Drop for FrameDir {
+    /// Removes the directory — unless a clear was attempted here and failed.
+    ///
+    /// The directory's *survival* is what the CLI reads as "a browser published on
+    /// this pane and never took the picture back" (`ownedFrames`, `cli/src/pane.ts`),
+    /// and that is exactly true of a browser whose own clear did not land. Removing
+    /// it on the way out of a failed clear would delete the evidence the second half
+    /// of the recovery runs on, leaving the page painted with nothing left that knows
+    /// it is there — the two-layer guarantee collapsed to one layer precisely in the
+    /// case where the first layer failed. [`sweep_stale`] reclaims what is left.
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
         let _ = fs::remove_dir_all(&self.path);
     }
 }
@@ -482,12 +526,24 @@ impl FramePublisher {
     /// pane was already showing. `written` is pushed only in the `Ok` arm of
     /// [`publish_encoded`](Self::publish_encoded), and [`reap`](Self::reap) keeps at
     /// least [`RETAINED`] entries, so it is empty exactly when nothing was placed.
+    ///
+    /// A clear that did not land keeps the directory alive past [`FrameDir`]'s
+    /// `Drop`. `Terminal::clear_frame` swallows this error on purpose — nothing on an
+    /// exit path is worth a message — and the CLI's own clear is what covers it, but
+    /// the CLI decides whether to send one by looking for this directory. Deleting it
+    /// here would answer "nothing was ever placed" to a pane that is still holding a
+    /// page.
     pub(crate) fn clear(&mut self, client: &mut ControlClient) -> io::Result<()> {
         if self.written.is_empty() {
             return Ok(());
         }
-        client.send(CLEAR_CMD, None).and_then(Reply::result)?;
-        Ok(())
+        match client.send(CLEAR_CMD, None).and_then(Reply::result) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                self.dir.keep = true;
+                Err(err)
+            }
+        }
     }
 
     /// Encodes, writes and publishes one frame. Returns the bytes written, which is
@@ -563,6 +619,12 @@ impl FramePublisher {
                 cost.publish = started.elapsed();
                 self.budget.record(cost);
                 self.check_transmitted(result, &path);
+                // The first frame the host took is what makes this directory a
+                // placement on a named pane rather than a pid on disk. See
+                // [`PANE_FILE`].
+                if self.written.is_empty() {
+                    self.dir.mark_pane(client.target());
+                }
                 self.written.push(path);
                 self.reap();
                 Ok(png.len())
@@ -732,10 +794,14 @@ mod tests {
         r#"{"ok":true,"result":"frame:1/1"}"#.to_owned()
     }
 
+    /// The *frames* in a publisher's directory, which is what retention is about.
+    /// [`PANE_FILE`] sits beside them and is not one; the tests that care about the
+    /// marker name it directly.
     fn files_in(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
             .expect("the publisher's directory exists")
             .flatten()
+            .filter(|entry| entry.file_name() != PANE_FILE)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
@@ -1238,6 +1304,99 @@ mod tests {
         publisher
             .clear(&mut client)
             .expect_err("and says so rather than pretending");
+    }
+
+    #[test]
+    fn a_refused_clear_leaves_the_evidence_the_cli_recovers_from() {
+        // The two layers of the guarantee, and the case where they overlap.
+        // `Terminal::clear_frame` swallows the error above on purpose, and the CLI's
+        // own `image.clear` is what covers it — but the CLI decides whether to send
+        // one by looking for this directory (`ownedFrames`, `cli/src/pane.ts`).
+        // Removing it here would answer "nothing was ever placed" about a pane that
+        // is still holding a page, so the second layer would fail on exactly the exit
+        // where the first one already had.
+        let server = PipeServer::scripted(vec![
+            Turn::Reply(ok_frame()),
+            Turn::Reply(r#"{"ok":false,"error":"no session"}"#.to_owned()),
+        ]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let dir = publisher.dir().to_owned();
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the frame");
+        publisher
+            .clear(&mut client)
+            .expect_err("the host will not take it back");
+        drop(publisher);
+
+        assert!(
+            dir.is_dir(),
+            "the only record that the pane is still painted was deleted on the way out",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ordinary_exit_still_takes_its_directory_with_it() {
+        // The other side of the rule above: a clear the host answered leaves nothing
+        // for `pane-clear` to find, which is what makes "nothing of ours to clear"
+        // and "cleared" different reports rather than the same one twice.
+        let server = PipeServer::answering(&ok_frame(), 2);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let dir = publisher.dir().to_owned();
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the frame goes out");
+        publisher.clear(&mut client).expect("and comes back off");
+        drop(publisher);
+
+        assert!(!dir.exists(), "a repaired pane left a wreck behind it");
+    }
+
+    #[test]
+    fn the_first_accepted_frame_names_the_pane_it_landed_on() {
+        // What `pane-clear` has instead of a pid. The verb runs when the process is
+        // gone and the CLI that spawned it usually with it, so without this the only
+        // question it can ask is "which frame directory on this machine is newest" —
+        // and two panes wrecked at once means one of them repaired on the other's
+        // evidence. See [`PANE_FILE`].
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+        let expected = format!(
+            "{}\n{}\n",
+            client.target().pipe(),
+            client.target().session()
+        );
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the frame");
+
+        let written = fs::read_to_string(&marker).expect("a marker beside the first frame");
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn a_frame_the_host_refused_names_no_pane() {
+        // Same rule as `clear`'s `written.is_empty()`: nothing was placed, so there is
+        // no pane to claim. A marker here would let `pane-clear` adopt — and delete —
+        // a directory whose frames never reached a pane at all.
+        let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect_err("the host refuses the frame");
+
+        assert!(!marker.exists(), "a refused frame claimed a pane anyway");
     }
 
     #[test]

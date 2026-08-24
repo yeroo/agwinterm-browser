@@ -223,11 +223,11 @@ describe("sending the clear", () => {
     await host.listening;
     t.after(() => host.close());
 
-    const cleared = await pane.clearPaneFrame(
+    const reply = await pane.clearPaneFrame(
       inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-under-test" }),
     );
 
-    assert.equal(cleared, true);
+    assert.deepEqual(reply, { cleared: true, refused: null });
     assert.equal(host.lines.length, 1);
     assert.deepEqual(JSON.parse(host.lines[0]), {
       cmd: "image.clear",
@@ -241,12 +241,13 @@ describe("sending the clear", () => {
     t.after(() => host.close());
 
     const started = Date.now();
-    const cleared = await pane.clearPaneFrame(
+    const reply = await pane.clearPaneFrame(
       inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane" }),
       150,
     );
 
-    assert.equal(cleared, false, "an unanswered clear is not a cleared pane");
+    assert.equal(reply.cleared, false, "an unanswered clear is not a cleared pane");
+    assert.equal(reply.refused, null, "a host that never spoke did not refuse anything");
     assert.ok(Date.now() - started < 3_000, "it waited past its own timeout");
     assert.equal(host.lines.length, 1, "it still said it before giving up");
   });
@@ -254,15 +255,15 @@ describe("sending the clear", () => {
   it("treats a pipe nobody is listening on as nothing to clean up", async () => {
     // The host closed the window, or the whole instance went away. There is no
     // placement left either way, and this runs on an exit path that must not throw.
-    const cleared = await pane.clearPaneFrame(
+    const reply = await pane.clearPaneFrame(
       inPane({ AGWINTERM_PIPE: `winterm-clear-${process.pid}-absent`, AGWINTERM_SESSION_ID: "pane" }),
       500,
     );
-    assert.equal(cleared, false);
+    assert.deepEqual(reply, { cleared: false, refused: null });
   });
 
   it("says nothing at all when there is no pane in the environment", async () => {
-    assert.equal(await pane.clearPaneFrame({}), false);
+    assert.deepEqual(await pane.clearPaneFrame({}), { cleared: false, refused: null });
   });
 });
 
@@ -469,20 +470,35 @@ function rustFrameNaming() {
   assert.ok(prefix, "DIR_PREFIX is no longer where this test looks for it");
   const file = /join\(format!\("frame-\{seq:(\d+)\}\.png"\)\)/.exec(source);
   assert.ok(file, "the frame file name is no longer where this test looks for it");
-  return { prefix: prefix[1], width: Number(file[1]) };
+  const marker = /const PANE_FILE: &str = "([^"]+)";/.exec(source);
+  assert.ok(marker, "PANE_FILE is no longer where this test looks for it");
+  const written = /format!\("\{\}\\n\{\}\\n", target\.pipe\(\), target\.session\(\)\)/.exec(source);
+  assert.ok(written, "the marker's two lines are no longer written where this test looks");
+  return { prefix: prefix[1], width: Number(file[1]), marker: marker[1] };
 }
+
+/** The pane every fixture below was drawn on, unless it says otherwise. */
+const MINE = { pipe: "agwinterm", target: "pane-1" };
 
 /**
  * A frame directory the way a killed browser leaves one.
  *
  * `frames: 0` is the browser that died before drawing anything, which is the
  * engine's `written.is_empty()` — a directory exists, nothing was ever placed.
+ *
+ * `mark` is `FrameDir::mark_pane`'s file: the pipe, then the session id. The engine
+ * writes it with the first frame the host accepts, so a directory holding frames
+ * with no marker beside them is one this engine did not write — which is why
+ * `mark: null` below is a fixture rather than an omission.
  */
-function leftoverFrames(root, pid, frames = 1) {
+function leftoverFrames(root, pid, frames = 1, mark = MINE) {
   const dir = path.join(root, `${pane.FRAME_DIR_PREFIX}${pid}-0`);
   fs.mkdirSync(dir, { recursive: true });
   for (let seq = 0; seq < frames; seq += 1) {
     fs.writeFileSync(path.join(dir, `frame-${String(seq).padStart(8, "0")}.png`), "");
+  }
+  if (mark && frames > 0) {
+    fs.writeFileSync(path.join(dir, pane.FRAME_PANE_FILE), `${mark.pipe}\n${mark.target}\n`);
   }
   return dir;
 }
@@ -525,25 +541,30 @@ describe("whose placement it is", () => {
     // `pane-clear` refusing to clear the pane it was called to fix.
     const naming = rustFrameNaming();
     assert.equal(pane.FRAME_DIR_PREFIX, naming.prefix);
+    assert.equal(pane.FRAME_PANE_FILE, naming.marker);
     const root = fs.mkdtempSync(path.join(scratch, "naming-"));
     const dir = path.join(root, `${naming.prefix}4242-0`);
     fs.mkdirSync(dir);
     fs.writeFileSync(path.join(dir, `frame-${"0".repeat(naming.width)}.png`), "");
-    assert.ok(pane.ownedFrames({ root }), "the engine's own frame file is not recognised");
+    fs.writeFileSync(path.join(dir, naming.marker), `${MINE.pipe}\n${MINE.target}\n`);
+    assert.ok(
+      pane.ownedFrames({ root, pane: MINE }),
+      "the engine's own frame file is not recognised",
+    );
     fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("finds the frames a killed browser left behind", (t) => {
     const root = freshRoot(t, "owned");
     const dir = leftoverFrames(root, 4242, 3);
-    assert.deepEqual(pane.ownedFrames({ root }), { dir, pid: 4242, frames: 3 });
+    assert.deepEqual(pane.ownedFrames({ root, pane: MINE }), { dir, pid: 4242, frames: 3 });
   });
 
   it("owns nothing when the browser exited cleanly", (t) => {
     // `FrameDir`'s `Drop` removes the directory, and the engine has already sent
     // the clear. Nothing on this pane is ours to take down.
     const root = freshRoot(t, "clean");
-    assert.equal(pane.ownedFrames({ root }), null);
+    assert.equal(pane.ownedFrames({ root, pane: MINE }), null);
   });
 
   it("owns nothing when a browser died before it drew anything", (t) => {
@@ -552,7 +573,7 @@ describe("whose placement it is", () => {
     // crash. `written` would be empty; so is this.
     const root = freshRoot(t, "undrawn");
     leftoverFrames(root, 4242, 0);
-    assert.equal(pane.ownedFrames({ root }), null);
+    assert.equal(pane.ownedFrames({ root, pane: MINE }), null);
   });
 
   it("ignores directories that are not a publisher's", (t) => {
@@ -560,7 +581,7 @@ describe("whose placement it is", () => {
     const other = path.join(root, "some-other-tool-4242");
     fs.mkdirSync(other);
     fs.writeFileSync(path.join(other, "frame-00000000.png"), "");
-    assert.equal(pane.ownedFrames({ root }), null);
+    assert.equal(pane.ownedFrames({ root, pane: MINE }), null);
   });
 
   it("asks about one pid when the caller knows which process it spawned", (t) => {
@@ -583,7 +604,7 @@ describe("whose placement it is", () => {
     // was showing before it started.
     const root = freshRoot(t, "nopid");
     leftoverFrames(root, 4242, 1);
-    assert.ok(pane.ownedFrames({ root }), "the broad question still finds it");
+    assert.ok(pane.ownedFrames({ root, pane: MINE }), "the broad question still finds it");
     assert.equal(pane.ownedFrames({ root, pid: undefined }), null);
   });
 
@@ -641,11 +662,11 @@ describe("whose placement it is", () => {
     leftoverFrames(root, 1111, 1);
     const newer = leftoverFrames(root, 2222, 1);
     fs.utimesSync(newer, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
-    assert.equal(pane.ownedFrames({ root }).pid, 2222);
+    assert.equal(pane.ownedFrames({ root, pane: MINE }).pid, 2222);
   });
 
   it("never throws on a temp directory it cannot read", () => {
-    assert.equal(pane.ownedFrames({ root: path.join(scratch, "nothing-here") }), null);
+    assert.equal(pane.ownedFrames({ root: path.join(scratch, "nothing-here"), pane: MINE }), null);
   });
 
   it("sends no clear at all when nothing is owned", async (t) => {
@@ -672,7 +693,7 @@ describe("whose placement it is", () => {
     await host.listening;
     t.after(() => host.close());
     const root = freshRoot(t, "doclear");
-    leftoverFrames(root, 4242, 2);
+    leftoverFrames(root, 4242, 2, { pipe: host.name, target: "pane-1" });
 
     const outcome = await pane.clearOwnedPaneFrame(
       inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
@@ -695,7 +716,7 @@ describe("whose placement it is", () => {
     await host.listening;
     t.after(() => host.close());
     const root = freshRoot(t, "consume");
-    const dir = leftoverFrames(root, 4242, 2);
+    const dir = leftoverFrames(root, 4242, 2, { pipe: host.name, target: "pane-1" });
     const env = inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" });
 
     const first = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 1_000 });
@@ -712,15 +733,87 @@ describe("whose placement it is", () => {
     // Nothing was confirmed taken back, so nothing has been repaired. Deleting the
     // directory here would throw away the only record that the pane is still wrong.
     const root = freshRoot(t, "unanswered");
-    const dir = leftoverFrames(root, 4242, 1);
+    const pipe = `winterm-nobody-${process.pid}`;
+    const dir = leftoverFrames(root, 4242, 1, { pipe, target: "pane-1" });
 
     const outcome = await pane.clearOwnedPaneFrame(
-      inPane({ AGWINTERM_PIPE: `winterm-nobody-${process.pid}`, AGWINTERM_SESSION_ID: "pane-1" }),
+      inPane({ AGWINTERM_PIPE: pipe, AGWINTERM_SESSION_ID: "pane-1" }),
       { root, timeoutMs: 300 },
     );
 
     assert.equal(outcome.cleared, false);
     assert.equal(fs.existsSync(dir), true, "the only record of the wreck was deleted");
+  });
+
+  it("reads the host's answer rather than treating any byte as a repair", async (t) => {
+    // `{"ok":false,"error":"no session"}` is the failure the whole module exists for:
+    // the pane closed, or this build named no window and another one is in front. It
+    // arrives as bytes on the pipe exactly as a success does, so a client that
+    // settles on `data` reports "cleared" at a pane that is still painted — and then
+    // deletes the frames, so the next run reports nothing left to fix.
+    const host = hostOn(
+      `winterm-owned-${process.pid}-refused`,
+      '{"ok":false,"error":"no session \\"pane-1\\""}',
+    );
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "refused");
+    const dir = leftoverFrames(root, 4242, 2, { pipe: host.name, target: "pane-1" });
+    const env = inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" });
+
+    const outcome = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 1_000 });
+
+    assert.equal(outcome.cleared, false, "a refusal was read as a cleared pane");
+    assert.match(outcome.refused, /no session/);
+    assert.equal(fs.existsSync(dir), true, "the evidence was consumed by a clear that failed");
+
+    // And the report says so, rather than announcing a repair that did not happen.
+    const report = pane.paneClearReport(env, outcome, true).join("\n");
+    assert.match(report, /the host refused the image\.clear/);
+    assert.match(report, /no session/);
+    assert.ok(!/frame: +cleared/.test(report), report);
+  });
+
+  it("leaves another pane's wreck to that pane", async (t) => {
+    // Frame directories are named after a pid, never a pane, so the newest one on
+    // the machine has nothing to do with the pane the verb was run in. Two browsers
+    // wrecked in two panes used to mean the first `pane-clear` repaired its own pane
+    // on the *other* pane's evidence -- naming the wrong pid, and then deleting the
+    // directory the second pane's own run needed. A live browser elsewhere is worse:
+    // its directory gains a file every frame, so it is always the newest match.
+    const host = hostOn(`winterm-owned-${process.pid}-mine`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "otherpane");
+    const mine = leftoverFrames(root, 4242, 1, { pipe: host.name, target: "pane-1" });
+    const theirs = leftoverFrames(root, 9999, 3, { pipe: host.name, target: "pane-2" });
+    // Newer, so the machine-wide question would pick it every time.
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(theirs, later, later);
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, timeoutMs: 1_000 },
+    );
+
+    assert.equal(outcome.owned.dir, mine, "it adopted a wreck from another pane");
+    assert.equal(outcome.owned.pid, 4242);
+    assert.equal(fs.existsSync(theirs), true, "it deleted another pane's only evidence");
+    assert.equal(fs.existsSync(mine), false, "its own evidence outlived the clear");
+  });
+
+  it("adopts nothing from a directory that names no pane at all", async (t) => {
+    // An engine predating the marker, or one whose marker could not be written. The
+    // safe reading is "not mine": an unattributed wreck is indistinguishable from
+    // another pane's, and clearing on it is the guess the rule forbids.
+    const root = freshRoot(t, "unmarked");
+    leftoverFrames(root, 4242, 2, null);
+    assert.equal(pane.ownedFrames({ root, pane: MINE }), null);
+    // The pid question is unaffected: `openInForeground` knows first-hand which
+    // process it spawned, and the directory is named after it.
+    assert.ok(pane.ownedFrames({ root, pid: 4242 }), "the exit path lost its own frames");
+    // And so is the question asked where no clear can follow from the answer.
+    assert.ok(pane.ownedFrames({ root, pane: "any" }), "nothing could be reported at all");
   });
 });
 
@@ -733,7 +826,7 @@ describe("the pane-clear verb", () => {
     await host.listening;
     t.after(() => host.close());
     const root = freshRoot(t, "verb-both");
-    const dir = leftoverFrames(root, 4242, 5);
+    const dir = leftoverFrames(root, 4242, 5, { pipe: host.name, target: "pane-1" });
     const rec = recorder();
 
     const code = await pane.paneClearCommand({
@@ -793,14 +886,12 @@ describe("the pane-clear verb", () => {
     // Which is the whole point: the pane it repairs is one where all three are gone.
     // Nothing is listening on this pipe and there is no registry anywhere in reach.
     const root = freshRoot(t, "verb-alone");
-    leftoverFrames(root, 4242, 1);
+    const absent = `winterm-verb-${process.pid}-absent`;
+    leftoverFrames(root, 4242, 1, { pipe: absent, target: "pane-1" });
     const rec = recorder();
 
     const code = await pane.paneClearCommand({
-      env: inPane({
-        AGWINTERM_PIPE: `winterm-verb-${process.pid}-absent`,
-        AGWINTERM_SESSION_ID: "pane-1",
-      }),
+      env: inPane({ AGWINTERM_PIPE: absent, AGWINTERM_SESSION_ID: "pane-1" }),
       out: rec.out,
       input: rec.input,
       root,
