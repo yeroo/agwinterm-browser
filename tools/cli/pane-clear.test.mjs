@@ -15,7 +15,6 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
@@ -23,7 +22,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import esbuild from "esbuild";
 
-import { closeServer, listen } from "../lib/deadline.mjs";
+import { hostOn, PIPE_PREFIX } from "../lib/control-host.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -43,38 +42,6 @@ async function loadModule(relative) {
 const pane = await loadModule("cli/src/pane.ts");
 const help = await loadModule("cli/src/help.ts");
 const mainSource = fs.readFileSync(path.join(REPO, "cli", "src", "main.ts"), "utf8");
-
-const PIPE_PREFIX = "\\\\.\\pipe\\";
-
-/**
- * A control server on a real pipe, recording the lines it is sent.
- *
- * `answer: null` accepts the line and never replies, which is the host that has
- * stopped answering — the case the client's timeout exists for.
- */
-function hostOn(name, answer = '{"ok":true,"result":"cleared"}') {
-  const endpoint = PIPE_PREFIX + name;
-  const lines = [];
-  const server = net.createServer((socket) => {
-    let buffer = "";
-    socket.on("data", (chunk) => {
-      buffer += chunk.toString("utf8");
-      let at;
-      while ((at = buffer.indexOf("\n")) >= 0) {
-        lines.push(buffer.slice(0, at));
-        buffer = buffer.slice(at + 1);
-        if (answer !== null) socket.write(`${answer}\n`);
-      }
-    });
-    socket.on("error", () => {});
-  });
-  // Both halves are bounded. The bind can fail (a name a previous run left held),
-  // and the close waits on every connection the client opened — the `answer: null`
-  // host below never ends one, so an unawaited `close()` would leave the pipe up
-  // for the rest of the run.
-  const listening = listen(server, endpoint);
-  return { endpoint, name, lines, server, listening, close: () => closeServer(server) };
-}
 
 /** A pane environment, with the three variables agwinterm sets. */
 const inPane = (extra) => ({ AGWINTERM_ENABLED: "1", ...extra });

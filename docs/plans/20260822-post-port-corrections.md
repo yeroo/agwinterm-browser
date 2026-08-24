@@ -277,18 +277,72 @@ against the real pipe; the suite is 44 tests in `agwinterm` and runs in 1.05s.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
+- [x] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
       restores the pane fully — no frame, cursor visible, no mouse bytes on move
-- [ ] kill the **CLI** rather than the browser and confirm the same, since that is the
+- [x] kill the **CLI** rather than the browser and confirm the same, since that is the
       case the current code does not cover
-- [ ] confirm a dev build refuses to publish into the production instance, **from the CLI
+- [x] confirm a dev build refuses to publish into the production instance, **from the CLI
       as well as the engine** — the two have separate copies of the fallback
-- [ ] confirm `pane-clear` reports rather than clears when the pane holds a placement this
+- [x] confirm `pane-clear` reports rather than clears when the pane holds a placement this
       browser never made
-- [ ] confirm `pnpm test` cannot hang
-- [ ] confirm a stalled control-pipe host does not wedge rendering or block shutdown
-- [ ] run the full suite: `cargo nextest run --workspace`, `node --test`
-- [ ] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
+- [x] confirm `pnpm test` cannot hang
+- [x] confirm a stalled control-pipe host does not wedge rendering or block shutdown
+- [x] run the full suite: `cargo nextest run --workspace`, `node --test`
+- [x] run `cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --all --check`
+
+Done 2026-08-24. The criteria were not eyeballed once and ticked: they are
+`tools/acceptance/pane-clear.test.mjs`, seven tests that spawn `node cli/dist/main.js
+pane-clear` as a process against a real named pipe and read what came back. The
+browser it recovers from is a real process that plants a publisher's frame directory
+and is then ended with `taskkill /F`, which is what `Stop-Process -Force` does and what
+runs no destructor. Only the eye is left over — whether the pane *looks* right — and the
+bytes that make it look right are asserted against `DISABLE_REPORTING` as loaded from
+the same build the child ran.
+
+| criterion | how it is now checked |
+|---|---|
+| killed browser, one `pane-clear` | one `image.clear` for this pane reaches the host, the report says `cleared`, and the escape string is on stdout |
+| killed **CLI** | the frames survive, nothing cleared them, and the verb still recovers |
+| dev guard, CLI **and** engine | CLI: a bound wrong-instance host receives nothing and the report names the variable; the unset fallback to `agwinterm` is refused by name; the named instance still works. Engine: `a_dev_build_refuses_a_pipe_the_allow_list_does_not_name` and three beside it |
+| a placement not ours | zero bytes to the host, `nothing of ours to clear`, console restored anyway |
+| `pnpm test` cannot hang | `--test-timeout=120000` plus Task 3's helpers; 340 tests in 8.9s wall clock |
+| a stalled host | engine: `a_thread_blocked_on_a_stalling_host_can_still_be_joined` (1.08s) and `a_timed_out_request_is_not_replayed_onto_a_pipe_of_unknown_state`. CLI: the verb exits 0 in under a second against a host that accepts and never answers |
+
+Three things the work turned up:
+
+- **Killing the CLI kills the browser, on Windows.** The test was written expecting the
+  browser to outlive its parent and asserted so; it failed. libuv puts a child spawned
+  without `detached` into a job object that terminates when the parent does, and
+  `openInForeground` documents spawning exactly that way — "Not detached, and not
+  unref'd: this process is the pane's foreground job". So one `taskkill /F` on the CLI
+  takes down *both* halves of the mechanism at once: `ModeGuard::drop` never runs in the
+  browser and the CLI's clear never runs either. That makes this case worse than the
+  killed-browser one, not a variant of it, and it is the strongest argument for the verb
+  existing. Measured, not reasoned about: the probe is in the test's comment.
+- **A test suite that spawns a browser is one `AGWINTERM_PIPE` away from being the bug.**
+  Every child here gets an environment with every inherited `AGWINTERM_*` and
+  `TERMINAL_BROWSER_*` variable stripped and a pipe this file bound itself, with
+  `TERMINAL_BROWSER_ALLOW_PIPE` set on top so a leak is refused rather than delivered —
+  and `TEMP`/`TMP`/`LOCALAPPDATA` redirected, which is also how "no instance registered"
+  is established rather than assumed. The fallback test deliberately binds *nothing* for
+  the production name: the claim is that no socket is opened at all, and binding
+  `\\.\pipe\agwinterm` to prove it would be the thing being guarded against.
+- **The two literal lint commands cannot be green in this tree and never could.** The
+  vendored tree is not rustfmt-clean (298 complaints) and carries 12 clippy warnings;
+  reformatting it is the silent edit the port's Constraints forbid. The enforced form is
+  `tools/vendor-check/fmt-scope.py` and `clippy-scope.py`, which run the real check and
+  `git blame` every complaint against `45b5e43` — both report **0 on a line this port
+  wrote**, which is the claim `docs/design/06-acceptance.md` §6 records.
+
+For Task 7: the results table at `docs/design/06-acceptance.md:174-180` is stale by this
+round. Today's numbers are `cargo nextest run --workspace` **439 passed**, 1 skipped;
+`node --test` **340 passed**, 87 suites; clippy 12 warnings / 0 port lines; fmt 298
+complaints / 0 port lines.
+
+`hostOn` moved out of `tools/cli/pane-clear.test.mjs` into `tools/lib/control-host.mjs`
+rather than being copied, for the reason `deadline.mjs` exists: two suites now make the
+same claim about bytes on a pipe, and a second copy is a second place for "what the host
+does when it stops answering" to drift.
 
 ### Task 7: [Final] Update documentation
 
