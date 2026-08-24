@@ -492,6 +492,9 @@ impl Connection {
     fn write_all(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
         let mut sent = 0;
         while sent < bytes.len() {
+            if sent > 0 {
+                expired(deadline, "writing a request")?;
+            }
             let chunk = &bytes[sent..];
             let io = self.io.as_mut().expect("a live connection has its buffers");
             io.scratch.clear();
@@ -510,6 +513,7 @@ impl Connection {
 
     /// Reads until a newline, the cap, the deadline, or the host hanging up.
     fn read_line(&mut self, deadline: Instant) -> io::Result<String> {
+        let mut asked = false;
         loop {
             if let Some(at) = self.carry.iter().position(|byte| *byte == b'\n') {
                 let rest = self.carry.split_off(at + 1);
@@ -530,6 +534,18 @@ impl Connection {
                 ));
             }
             let want = room.min(READ_CHUNK as u64) as usize;
+            // The deadline bounds the *exchange*, and a read that returned bytes is
+            // not a reply — it is a reason to go round again. Without this test the
+            // going round is what has no bound: [`millis_until`] answers an expired
+            // deadline with one millisecond, so that the collection of an in-flight
+            // operation still takes the timeout path, and a peer that hands over a
+            // byte inside each of those milliseconds and never a newline stretches
+            // one exchange to [`MAX_REPLY_BYTES`] worth of them — with the render
+            // thread and `PixelEngine::stop`'s join waiting behind it.
+            if asked {
+                expired(deadline, "waiting for a reply")?;
+            }
+            asked = true;
             let io = self.io.as_mut().expect("a live connection has its buffers");
             io.scratch.clear();
             io.scratch.resize(want, 0);
@@ -688,6 +704,25 @@ fn still_pending(err: &io::Error) -> bool {
         err.raw_os_error(),
         Some(code) if code == WAIT_TIMEOUT as i32 || code == ERROR_IO_INCOMPLETE
     )
+}
+
+/// `TimedOut` when there is nothing left of `deadline`, phrased as [`Connection::run`]
+/// phrases it — the caller cannot tell the two apart and should not have to.
+///
+/// Asked before *starting* an operation, never before collecting one: an operation
+/// already in the kernel has to be waited out and cancelled, which is the whole
+/// reason [`millis_until`] never answers zero.
+fn expired(deadline: Instant, what: &str) -> io::Result<()> {
+    if Instant::now() < deadline {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "agwinterm did not respond within {} ms while {what}",
+            EXCHANGE_DEADLINE.as_millis()
+        ),
+    ))
 }
 
 /// The deadline as the `dwMilliseconds` a Win32 wait takes.
@@ -1205,6 +1240,12 @@ pub(crate) mod fixture {
         /// Answer, but only after this long. A host that is slow rather than stuck,
         /// which is the case [`EXCHANGE_DEADLINE`] must *not* fail.
         ReplyAfter(Duration, String),
+        /// Answer forever without ever answering: one byte every interval, and no
+        /// newline. A well-behaved host cannot do this, which is the point — the
+        /// deadline is a promise about the exchange, and a promise that only holds
+        /// against peers that were going to keep it anyway is not one. It ends with
+        /// the [`PipeServer`], or at [`STALL_CAP`].
+        Drip(Duration),
         /// Read the request and then answer nothing at all, holding the connection
         /// open. This is the failure the deadline exists for: not a pipe that died,
         /// which the client already recovers from, but a live one nobody is going to
@@ -1412,6 +1453,16 @@ pub(crate) mod fixture {
                         {
                             return;
                         }
+                    }
+                    Some(Turn::Drip(every)) => {
+                        let cap = Instant::now() + STALL_CAP;
+                        while !closing.load(Ordering::Relaxed) && Instant::now() < cap {
+                            if reader.get_mut().write_all(b"x").is_err() {
+                                return;
+                            }
+                            std::thread::sleep(every);
+                        }
+                        return;
                     }
                     // Hold the connection open and say nothing. Returning would close
                     // it, which is the *other* failure — the one the client already
@@ -1946,6 +1997,38 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_drips_bytes_and_no_newline_still_stops_at_the_deadline() {
+        // The stalling host is the easy shape: one read, one wait, one timeout. This
+        // is the shape that used to escape, because every drip made the read *return*
+        // and `read_line` went round for another one — and past the deadline
+        // `millis_until` hands out a fresh millisecond rather than refusing, so the
+        // loop's only remaining bound was `MAX_REPLY_BYTES`. Four MiB of bytes at one
+        // every two milliseconds is a render thread parked for most of a day.
+        let server = PipeServer::scripted(vec![Turn::Drip(Duration::from_millis(2))]);
+        let mut client = server.client();
+
+        let started = Instant::now();
+        let err = client
+            .ping()
+            .expect_err("a reply with no newline is not a reply");
+        let waited = started.elapsed();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            err.to_string().contains("waiting for a reply"),
+            "the message should say which half of the exchange stalled: {err}",
+        );
+        assert!(
+            waited >= EXCHANGE_DEADLINE,
+            "gave up after {waited:?}, before the deadline it promised",
+        );
+        assert!(
+            waited < EXCHANGE_DEADLINE * 3,
+            "{waited:?} is not the bound the module documents",
+        );
+    }
+
+    #[test]
     fn a_wait_is_never_zero_and_never_infinite() {
         // The two values that break the give-up path, at opposite ends of the same
         // `u32`. A zero wait does not time out — `GetOverlappedResultEx` answers
@@ -1973,6 +2056,34 @@ mod tests {
             "{ahead} ms is less than the {} ms remaining",
             EXCHANGE_DEADLINE.as_millis(),
         );
+    }
+
+    #[test]
+    fn the_bound_on_the_loop_is_asked_of_both_halves_of_an_exchange() {
+        // `expired` is what turns "each wait is bounded" into "the exchange is", and
+        // it guards a write loop as well as a read one. The read side has a fixture —
+        // `Turn::Drip` — because a peer can be made to dribble bytes; the write side
+        // cannot be provoked from here, since every request this client sends fits in
+        // the pipe buffer and goes out in one move. So the guard itself is asserted:
+        // both phrasings, and the kind `recoverable` deliberately excludes so a
+        // timed-out request is never replayed onto a pipe of unknown state.
+        let past = Instant::now() - Duration::from_secs(1);
+        for what in ["writing a request", "reading a reply"] {
+            let err = expired(past, what).expect_err("nothing is left of the deadline");
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            assert!(!recoverable(&err), "a timed-out exchange would be replayed");
+            let said = err.to_string();
+            assert!(
+                said.contains(what),
+                "the timeout does not say what it was doing: {said}"
+            );
+            assert!(
+                said.contains(&EXCHANGE_DEADLINE.as_millis().to_string()),
+                "the timeout does not name the deadline it spent: {said}",
+            );
+        }
+        expired(Instant::now() + EXCHANGE_DEADLINE, "writing a request")
+            .expect("a deadline with time left is not a timeout");
     }
 
     #[test]

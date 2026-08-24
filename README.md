@@ -28,7 +28,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 447 Rust tests and 355 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 452 Rust tests and 364 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -118,8 +118,9 @@ its whole purpose, since it runs when things are already broken — and it **pri
 so "it worked" and "there was nothing wrong here" do not look identical on a pane that was already
 fine. It will not take down a picture this browser never drew: with no frame directory of ours on
 disk it reports that the placement is someone else's and leaves it alone, restoring the console
-either way. Having cleared one, it deletes the directory that proved it, so a second run reports an
-already-repaired pane as the nothing-to-do it is.
+either way. Having cleared one, it deletes every directory that proved it — a pane holds one
+placement, so a pane wrecked twice is repaired by one clear and both wrecks are spent — and a second
+run reports an already-repaired pane as the nothing-to-do it is.
 
 Two cases it deliberately leaves painted, both reported rather than silent: a pane holding a
 placement no frame directory of ours accounts for, and a pane whose instance
@@ -240,7 +241,7 @@ apply to lines this port wrote, and that scope is enforced rather than asserted.
 | [`02-frame-budget.md`](docs/design/02-frame-budget.md) | what a frame costs, measured per stage, and how to re-measure |
 | [`03-process-model.md`](docs/design/03-process-model.md) | why the engine runs in the foreground process, measured with real consoles |
 | [`04-cell-metrics.md`](docs/design/04-cell-metrics.md) | where a cell's pixel size comes from, and the verb that would settle it |
-| [`05-cli-and-endpoints.md`](docs/design/05-cli-and-endpoints.md) | two control protocols on named pipes, `%LOCALAPPDATA%`, and five refusals |
+| [`05-cli-and-endpoints.md`](docs/design/05-cli-and-endpoints.md) | two control protocols on named pipes, `%LOCALAPPDATA%`, and the commands Windows cannot honour |
 | [`06-acceptance.md`](docs/design/06-acceptance.md) | every acceptance criterion, how it was checked, and the two defects it found |
 | [`07-as-built.md`](docs/design/07-as-built.md) | the two frame transports, what was dropped, and the accepted ceilings |
 | [`UPSTREAM.md`](docs/design/UPSTREAM.md) | what was vendored, every deliberate divergence, and the re-vendoring checklist |

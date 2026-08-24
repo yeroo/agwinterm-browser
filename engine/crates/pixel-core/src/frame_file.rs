@@ -648,7 +648,19 @@ impl FramePublisher {
             Ok(result) => {
                 cost.publish = started.elapsed();
                 self.budget.record(cost);
-                self.check_transmitted(result, &path);
+                // `frame:0/0` is "nothing was placed" wearing an `ok:true` envelope,
+                // and ownership is a claim about placements rather than about
+                // protocol success. Marking the directory would tell `pane-clear`
+                // this browser left a picture on the pane, and pushing the path would
+                // let [`clear`] send an `image.clear` at whatever *is* on it — both
+                // of them the "clear a placement some other process owns" this
+                // publisher declines to do when `written` is empty. So it is treated
+                // exactly as a refusal is; `a_frame_the_host_refused_names_no_pane`
+                // already pins that for the `ok:false` spelling of the same state.
+                if !self.check_transmitted(result, &path) {
+                    let _ = fs::remove_file(&path);
+                    return Ok(png.len());
+                }
                 // The first frame the host took is what makes this directory a
                 // placement on a named pane rather than a pid on disk. See
                 // [`PANE_FILE`].
@@ -715,12 +727,23 @@ impl FramePublisher {
     /// phase has already run. A redirected `TEMP`, a pane hosted by another user or
     /// an antivirus quarantine all put the frame directory out of the host's reach,
     /// so this is a state rather than a hypothetical.
-    fn check_transmitted(&mut self, result: String, path: &Path) {
+    ///
+    /// Returns whether the host actually placed something, which is what the caller
+    /// turns into ownership. A reply this build cannot parse counts as a placement:
+    /// the alternative is a publisher that silently stops owning its frames the day
+    /// the host's reply format grows a field.
+    fn check_transmitted(&mut self, result: String, path: &Path) -> bool {
         let Some((placed, transmitted)) = frame_counts(&result) else {
-            return;
+            return true;
         };
-        if (placed > 0 && transmitted >= placed) || self.warned_untransmitted {
-            return;
+        if placed > 0 && transmitted >= placed {
+            return true;
+        }
+        // Said once per publisher, but decided every frame — the warning is for the
+        // user and the answer is for the caller, and latching the first must not
+        // latch the second.
+        if self.warned_untransmitted {
+            return placed > 0;
         }
         self.warned_untransmitted = true;
         let why = if placed == 0 {
@@ -739,6 +762,7 @@ impl FramePublisher {
             )
         };
         crate::logging::warn("agwinterm", why);
+        placed > 0
     }
 }
 
@@ -1204,6 +1228,9 @@ mod tests {
 
     #[test]
     fn a_frame_the_host_placed_but_did_not_read_is_complained_about_once() {
+        // Reads the log, so it takes the lock like every other reader. See
+        // [`SHARED_LOG`].
+        let _alone = alone_with_the_log();
         // `frame:1/0` is the silent-stale-image failure: the host placed an image
         // but never read our bytes. It cannot happen through a unique path unless
         // the read itself failed, so it is worth saying out loud.
@@ -1211,12 +1238,24 @@ mod tests {
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:1/0"}"#);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
 
         for _ in 0..3 {
             publisher
                 .publish(&mut client, &canvas(16, 16), (1, 1))
                 .expect("a placed frame is still a delivered frame");
         }
+        // Complained about, and still ours. `placed > 0` is a placement whatever the
+        // host then read, so the pane is marked and the frames stay on disk — a
+        // warning that also quietly dropped ownership would leave the stale picture
+        // on the pane after this publisher exits, which is worse than the staleness
+        // it is warning about.
+        assert!(marker.exists(), "a placed frame claimed no pane");
+        assert_eq!(
+            frame_files(publisher.dir()),
+            3,
+            "the placed frames were deleted as litter",
+        );
         // Counted, not latched. `warned_untransmitted == true` shows "at least
         // once", which is the half of the claim that was never in doubt; the half
         // worth testing is that three stale frames do not produce three lines in a
@@ -1234,7 +1273,58 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_this_build_cannot_parse_still_counts_as_a_placement() {
+        // The other end of the `frame:0/0` rule, and the reason `check_transmitted`
+        // defaults to *yes*: a reply `frame_counts` cannot read is a host whose reply
+        // format grew a field, not a host that placed nothing. Reading it as "nothing
+        // was placed" would make this publisher silently stop owning its frames that
+        // day — and a publisher that owns nothing sends no `image.clear`, so the page
+        // it drew stays on the pane after it exits.
+        //
+        // Writes no warning and reads no log, so it needs no lock: the unparseable
+        // arm returns before the complaint. See [`SHARED_LOG`].
+        let server = PipeServer::always(r#"{"ok":true,"result":"shown"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host answered");
+
+        assert!(marker.exists(), "a placed frame claimed no pane");
+        assert_eq!(
+            frame_files(publisher.dir()),
+            1,
+            "the placed frame was deleted as litter",
+        );
+
+        publisher
+            .clear(&mut client)
+            .expect("the placement is ours to take back");
+        let spoken = server.requests();
+        assert_eq!(spoken.len(), 2, "one frame and one clear: {spoken:?}");
+        assert!(
+            spoken[1].contains(CLEAR_CMD),
+            "the publisher left its own picture on the pane: {spoken:?}",
+        );
+    }
+
+    /// The frames in a publisher's directory, which is everything in it but the
+    /// marker — [`PANE_FILE`] is deliberately exempt from the retention reaping.
+    fn frame_files(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .expect("the directory outlives the frames")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name() != PANE_FILE)
+            .count()
+    }
+
+    #[test]
     fn a_frame_the_host_could_not_open_at_all_is_complained_about_too() {
+        // Two other tests below publish to a host that places nothing, so they write
+        // the very line this one counts. See [`SHARED_LOG`].
+        let _alone = alone_with_the_log();
         // `frame:0/0` is the *other* silent failure, and the one a
         // `transmitted < placed` test steps straight over because `0 < 0` is false.
         // agwinterm skips an image whose file it cannot open before it counts it, so
@@ -1493,6 +1583,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_frame_the_host_placed_none_of_names_no_pane_either() {
+        // This writes the warning the "complained about too" test above counts, so
+        // the two do not run at once. See [`SHARED_LOG`].
+        let _alone = alone_with_the_log();
+        // `frame:0/0` is the same state as a refusal — nothing reached the pane —
+        // wearing an `ok:true` envelope, which is exactly why it needs its own test:
+        // the refusal path is an `Err` and this one is not. A marker here would let
+        // `pane-clear` claim a pane this browser never painted, and delete the
+        // directory of whoever did.
+        let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host answered, so the write itself succeeded");
+
+        assert!(!marker.exists(), "a frame nobody placed claimed a pane");
+        let left: Vec<_> = fs::read_dir(publisher.dir())
+            .expect("the directory outlives the frame")
+            .map(|entry| entry.expect("a readable entry").file_name())
+            .collect();
+        assert!(
+            left.is_empty(),
+            "the unplaced frame is litter, not history: {left:?}",
+        );
+    }
+
+    #[test]
+    fn a_publisher_the_host_placed_nothing_for_clears_nothing() {
+        // This writes the warning the "complained about too" test above counts, so
+        // the two do not run at once. See [`SHARED_LOG`].
+        let _alone = alone_with_the_log();
+        // The `written` half of the same rule. Three `ok:true` replies that placed
+        // nothing must leave the publisher as empty-handed as three refusals do, or
+        // its exit takes down the placement whoever *can* reach the directory made.
+        let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+
+        for _ in 0..3 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("the host answered, so the write itself succeeded");
+        }
+        publisher.clear(&mut client).expect("nothing to take back");
+
+        let spoken = server.requests();
+        assert!(
+            spoken.iter().all(|request| request.contains(FRAME_CMD)),
+            "it asked for a clear it had never earned: {spoken:?}",
+        );
+    }
+
     // -- the frame budget -------------------------------------------------
     //
     // Task 10 had to measure this path before Task 12 could argue against it, and
@@ -1648,14 +1794,19 @@ mod tests {
     }
 
     /// The log store is one per process and `cargo test` runs these in threads, so
-    /// two transport tests reading it at once would each count the other's line.
-    /// Held for the whole of each such test — the window being guarded is
-    /// "publish, then read the log", not either half. Every test that publishes
-    /// under `shm` takes it, reader or not: publishing is the half that writes.
-    static TRANSPORT_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// two tests reading it at once would each count the other's line. Held for the
+    /// whole of each such test — the window being guarded is "publish, then read the
+    /// log", not either half.
+    ///
+    /// Every test that *writes* a line one of these readers would match takes it too,
+    /// reader or not: publishing is the half that writes, and a warning is a warning
+    /// whichever test provoked it. That is the whole of the discipline — a new test
+    /// that publishes under `shm`, or to a host that places nothing, and does not take
+    /// this lock makes a *different* test flaky.
+    static SHARED_LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn alone_with_the_log() -> std::sync::MutexGuard<'static, ()> {
-        TRANSPORT_LOG.lock().unwrap_or_else(|err| err.into_inner())
+        SHARED_LOG.lock().unwrap_or_else(|err| err.into_inner())
     }
 
     /// The next log sequence, so a test reads only its own lines.

@@ -28,7 +28,6 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { once } from "node:events";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -38,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 import { requireBuilt } from "../lib/built.mjs";
 import { hostOn } from "../lib/control-host.mjs";
-import { teardown, withDeadline } from "../lib/deadline.mjs";
+import { onceWithin, teardown, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -200,8 +199,8 @@ const CLI_WRAPPER = `
 `;
 
 /** Runs the built CLI's recovery verb, and never waits on it forever. */
-async function paneClear(env) {
-  const child = spawn(process.execPath, [CLI, "pane-clear"], {
+async function paneClear(env, ...args) {
+  const child = spawn(process.execPath, [CLI, "pane-clear", ...args], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
@@ -215,7 +214,7 @@ async function paneClear(env) {
   const started = Date.now();
   let code;
   try {
-    [code] = await withDeadline(once(child, "exit"), "pane-clear to exit", CHILD_MS);
+    code = await onceWithin(child, "exit", "pane-clear to exit", CHILD_MS);
   } catch (error) {
     // A recovery command that hangs is the defect, not a slow machine: leave nothing
     // running behind the failure.
@@ -238,7 +237,7 @@ describe("a browser killed with Stop-Process -Force", () => {
 
     const { child } = await launch(t, BROWSER, { env, ready: "drew " });
     forceKill(child.pid);
-    await withDeadline(once(child, "exit"), "the killed browser to be reaped", CHILD_MS);
+    await onceWithin(child, "exit", "the killed browser to be reaped", CHILD_MS);
 
     // The precondition, asserted rather than assumed: a force-kill runs no
     // destructor, so the frame directory is still there with a frame in it. If this
@@ -286,7 +285,7 @@ describe("a CLI killed rather than the browser", () => {
     const browser = Number.parseInt(out.match(/drew (\d+)/)[1], 10);
     strays.push(browser);
     forceKill(cli.pid); // no /T: whatever dies here dies because the CLI did
-    await withDeadline(once(cli, "exit"), "the killed CLI to be reaped", CHILD_MS);
+    await onceWithin(cli, "exit", "the killed CLI to be reaped", CHILD_MS);
     await settles(() => !alive(browser), "the browser to go down with the CLI's job object");
     const left = fs.readdirSync(root).filter((name) => name.startsWith(FRAME_DIR_PREFIX));
     assert.equal(left.length, 1, "no frame directory survived, so nothing was left to recover");
@@ -340,7 +339,7 @@ describe("the development-instance guard, from the shipped CLI", () => {
 
     const { child } = await launch(t, BROWSER, { env, ready: "drew " });
     forceKill(child.pid);
-    await withDeadline(once(child, "exit"), "the killed browser to be reaped", CHILD_MS);
+    await onceWithin(child, "exit", "the killed browser to be reaped", CHILD_MS);
 
     const run = await paneClear(env);
     assert.equal(run.code, 0, `pane-clear exited ${run.code}: ${run.stderr}`);
@@ -363,7 +362,7 @@ describe("the development-instance guard, from the shipped CLI", () => {
     const env = paneEnv({ root, pipe: null, allow: `winterm-accept-${process.pid}-dev` });
     const { child } = await launch(t, BROWSER, { env, ready: "drew " });
     forceKill(child.pid);
-    await withDeadline(once(child, "exit"), "the killed browser to be reaped", CHILD_MS);
+    await onceWithin(child, "exit", "the killed browser to be reaped", CHILD_MS);
 
     const run = await paneClear(env);
     assert.equal(run.code, 0, `pane-clear exited ${run.code}: ${run.stderr}`);
@@ -382,7 +381,7 @@ describe("the development-instance guard, from the shipped CLI", () => {
 
     const { child } = await launch(t, BROWSER, { env, ready: "drew " });
     forceKill(child.pid);
-    await withDeadline(once(child, "exit"), "the killed browser to be reaped", CHILD_MS);
+    await onceWithin(child, "exit", "the killed browser to be reaped", CHILD_MS);
 
     const run = await paneClear(env);
     assert.equal(run.code, 0, `pane-clear exited ${run.code}: ${run.stderr}`);
@@ -405,7 +404,7 @@ describe("a control-pipe host that accepts and never answers", () => {
 
     const { child } = await launch(t, BROWSER, { env, ready: "drew " });
     forceKill(child.pid);
-    await withDeadline(once(child, "exit"), "the killed browser to be reaped", CHILD_MS);
+    await onceWithin(child, "exit", "the killed browser to be reaped", CHILD_MS);
 
     const run = await paneClear(env);
     assert.equal(run.code, 0, `pane-clear exited ${run.code}: ${run.stderr}`);
@@ -418,5 +417,27 @@ describe("a control-pipe host that accepts and never answers", () => {
     // an answer to, and the console is restored either way — that half needs no host.
     assert.match(run.stdout, /image\.clear went unanswered/, run.stdout);
     assert.ok(run.stdout.includes(DISABLE_REPORTING), "a stalled host cost the user the console");
+  });
+});
+
+describe("pane-clear's own argument list", () => {
+  it("refuses a stray argument rather than repairing something else", async (t) => {
+    // "Always exits 0" is a claim about the repair, not about a command line this
+    // verb does not have. `pane-clear` takes nothing: a user who typed `--force` out
+    // of habit has to be told the flag does not exist, because a run that ignored it
+    // and exited 0 reads as "the flag did what it said". Dispatch is the only place
+    // this can be checked -- the verb is reached before terminal detection, so a
+    // wrong argument must not fall through into a search for a pane.
+    const root = freshRoot(t, "stray-arg");
+    const env = paneEnv({ root, pipe: `winterm-accept-${process.pid}-stray` });
+    const host = hostOn(env.AGWINTERM_PIPE);
+    t.after(() => host.close());
+    await host.listening;
+
+    const run = await paneClear(env, "--force");
+    assert.equal(run.code, 1, `a stray argument exited ${run.code}: ${run.stdout}`);
+    assert.match(`${run.stdout}${run.stderr}`, /--force/);
+    assert.match(`${run.stdout}${run.stderr}`, /takes no arguments/);
+    assert.deepEqual(host.lines, [], "a rejected command line still spoke to the host");
   });
 });

@@ -36,18 +36,26 @@ function docFiles() {
 
 /**
  * GitHub's heading slug, for the subset of punctuation these docs use: lower-case,
- * drop everything that is not a letter, digit, space or hyphen (so backticks, dots,
- * em dashes and `⚠️` all go), then spaces become hyphens.
+ * drop everything that is not a letter, digit, underscore, space or hyphen (so
+ * backticks, dots, em dashes and `⚠️` all go), then spaces become hyphens.
  *
  * The doubled hyphens that leaves are not a bug — `## 1. Rust — \`cargo check\`` really
  * does anchor at `1-rust--cargo-check`, because the dropped em dash leaves its two
  * spaces behind.
+ *
+ * The underscore is kept because github-slugger keeps it: `_` sits between the `[-^`
+ * and `` ` `` ranges of the class it strips, so it is matched by neither.
+ * `### \`TERMINAL_BROWSER_ALLOW_PIPE\` — …` really does anchor at
+ * `terminal_browser_allow_pipe--…`. Stripping it here was stricter than GitHub in
+ * the one direction that matters: this test computed the same slug for the heading
+ * and for a link that spelled the anchor without the underscores, and certified a
+ * link that lands at the top of the file.
  */
 export function slug(heading) {
   return heading
     .trim()
     .toLowerCase()
-    .replace(/[^\p{L}\p{N} -]/gu, "")
+    .replace(/[^\p{L}\p{N}_ -]/gu, "")
     .replace(/ /g, "-");
 }
 
@@ -80,6 +88,20 @@ test("every relative link in the documentation resolves to a file that exists", 
     }
   }
   assert.deepEqual(broken, [], "documentation links to files that are not there");
+});
+
+test("the slug this file computes is the one GitHub computes", () => {
+  // The anchor test below is only as good as this function, and a slugger *stricter*
+  // than GitHub's does not fail loudly — it agrees with a broken link, because it
+  // strips the same character out of the heading and out of the anchor. That is how
+  // `05-cli-and-endpoints.md`'s link to the `TERMINAL_BROWSER_ALLOW_PIPE` section
+  // passed while landing at the top of the file.
+  assert.equal(
+    slug("`TERMINAL_BROWSER_ALLOW_PIPE` — a dev build refuses an instance"),
+    "terminal_browser_allow_pipe--a-dev-build-refuses-an-instance",
+    "github-slugger keeps underscores; this must too",
+  );
+  assert.equal(slug("1. Rust — `cargo check`"), "1-rust--cargo-check");
 });
 
 test("every anchor in the documentation names a heading that exists", () => {
@@ -377,7 +399,13 @@ test("the three documented paths that send image.clear all still exist", () => {
  */
 test("the control-pipe deadline the docs derive is the one the engine uses", () => {
   const doc = read("docs/design/07-as-built.md");
-  const stated = doc.match(/\*\*(\d+) ms\*\*/);
+  // Scoped to the section that derives it, not to the first bold duration in the
+  // file: a bolded number added anywhere above would silently retarget this check at
+  // something that has nothing to do with the deadline, and it would still pass.
+  const at = doc.indexOf("### A control-pipe exchange has a deadline");
+  assert.ok(at > 0, "the as-built doc lost the section that derives the deadline");
+  const section = doc.slice(at).split(/^### /m)[1] ?? "";
+  const stated = section.match(/\*\*(\d+) ms\*\*/);
   assert.ok(stated, "the as-built doc should still state the exchange deadline");
 
   const engine = read("engine/crates/pixel-core/src/agwinterm.rs");
@@ -432,8 +460,16 @@ test("the dev-build pipe guard is enforced in all three readers, not just the en
     read("engine/crates/pixel-core/src/agwinterm.rs").includes("cfg!(debug_assertions)"),
     "the engine's copy is the build-gated one",
   );
+  // The positive claim, so a rewording that reintroduces the same error under
+  // different words is caught rather than only the one sentence that was wrong.
+  const readme = read("README.md");
+  assert.match(
+    readme,
+    /the CLI's cannot be[^.]*`tsc` emits the same JavaScript either way/,
+    "the README should still say the CLI's copy honours the variable in every build",
+  );
   assert.doesNotMatch(
-    read("README.md"),
+    readme,
     /a release\s+build ignores it entirely/,
     "the README still claims the whole guard is release-inert; the CLI's copy is not",
   );

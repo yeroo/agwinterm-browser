@@ -175,7 +175,7 @@ Three things the work turned up:
 - **`execFileSync` cannot be raced against a promise**, so the three `git` calls in
   `unchanged.test.mjs` take `timeout: 30_000` instead.
 
-Wall clock, this machine: `pnpm test` 4s, 333 tests in 17 files. A checkout with no
+Wall clock when Task 3 measured it: `pnpm test` 4s, 333 tests in 17 files. `06-acceptance.md` §6 carries the current count; it has moved every review round since. A checkout with no
 `store/dist` fails in 2s — three suites report `requireBuilt`'s build command — rather
 than hanging, which is the behaviour `tools/lib/built.mjs` documents.
 
@@ -273,7 +273,8 @@ Four things the work turned up:
 The fixture grew `Turn::Stall` — read the request, answer nothing, hold the connection
 open until the server is dropped — which is the case a `Turn::Hangup` never covered, and
 `Turn::ReplyAfter` so that "slow" is tested as distinct from "stuck". Five new tests
-against the real pipe; the suite is 44 tests in `agwinterm` and runs in 1.05s.
+against the real pipe; the suite was 44 tests in `agwinterm` at 1.05s when this task
+landed, and `06-acceptance.md` §6 is where that count is kept current.
 
 ### Task 6: Verify acceptance criteria
 
@@ -305,7 +306,7 @@ the same build the child ran.
 | killed **CLI** | the frames survive, nothing cleared them, and the verb still recovers |
 | dev guard, CLI **and** engine | CLI: a bound wrong-instance host receives nothing and the report names the variable; the unset fallback to `agwinterm` is refused by name; the named instance still works. Engine: `a_dev_build_refuses_a_pipe_the_allow_list_does_not_name` and three beside it |
 | a placement not ours | zero bytes to the host, `nothing of ours to clear`, console restored anyway |
-| `pnpm test` cannot hang | `--test-timeout=120000` plus Task 3's helpers; 340 tests in 8.9s wall clock |
+| `pnpm test` cannot hang | `--test-timeout=120000` plus Task 3's helpers; 340 tests in 8.9s wall clock when Task 6 measured it. `06-acceptance.md` §6 is where that count is kept current — it has moved every review round since |
 | a stalled host | engine: `a_thread_blocked_on_a_stalling_host_can_still_be_joined` (1.08s) and `a_timed_out_request_is_not_replayed_onto_a_pipe_of_unknown_state`. CLI: the verb exits 0 in under a second against a host that accepts and never answers |
 
 Three things the work turned up:
@@ -334,10 +335,12 @@ Three things the work turned up:
   `git blame` every complaint against `45b5e43` — both report **0 on a line this port
   wrote**, which is the claim `docs/design/06-acceptance.md` §6 records.
 
-For Task 7: the results table at `docs/design/06-acceptance.md:174-180` is stale by this
-round. Today's numbers are `cargo nextest run --workspace` **439 passed**, 1 skipped;
-`node --test` **340 passed**, 87 suites; clippy 12 warnings / 0 port lines; fmt 298
-complaints / 0 port lines.
+For Task 7: the results table in `docs/design/06-acceptance.md` §6 was stale by this
+round — as measured on 2026-08-24 it wanted `cargo nextest run --workspace` **439
+passed**, 1 skipped; `node --test` **340 passed**, 87 suites; clippy 12 warnings / 0
+port lines; fmt 298 complaints / 0 port lines. Those four are a measurement with a date
+on it, not a standing claim: every review round since has moved two of them, and §6 is
+the one place that carries the current pair.
 
 `hostOn` moved out of `tools/cli/pane-clear.test.mjs` into `tools/lib/control-host.mjs`
 rather than being copied, for the reason `deadline.mjs` exists: two suites now make the
@@ -369,10 +372,12 @@ opposite of what Task 6 measured** — "the CLI is the pane's foreground job, so
 outlives the browser by construction" — which is true only when the browser is what
 died. That sentence is now the thing the warning beside it corrects, since a criterion
 whose write-up contradicts the test that checks it is worse than one that says nothing.
-§6's results table was stale by three rows and its coverage table by nine, so both carry
-today's numbers and the date they were counted: **439** Rust (`nextest`), 382+57
-(`cargo test`), **344** node in 87 suites, clippy 12 / 0 port lines, fmt 298 / 0 port
-lines.
+§6's results table was stale by three rows and its coverage table by nine, so both now
+carry the date they were counted alongside the numbers. The numbers themselves are
+deliberately not repeated here: every review round after this one moved them again, and
+a plan that restates a table it does not own is the same failure this task was fixing.
+§6 is the copy that is kept current; the two lint rows (12 / 0 port lines and 298 / 0
+port lines) are the ones that have not moved.
 
 `07-as-built.md` grew a §4 rather than absorbing the changes into §1-3, because the
 three things Tasks 1-5 added are not what the port decided — they are what it got wrong

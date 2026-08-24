@@ -143,10 +143,13 @@ Both paths verified live:
 | ![after a taskkill /F](img/14-killed-browser-pane-recovers.png) | `taskkill /F` on the browser started by `terminal-browser open`. The picture is gone and the shell echoes. |
 | ![after ctrl+q](img/14-clean-quit-pane-recovers.png) | Ctrl+Q, with no CLI in the chain — so this is `Drop` doing it. `[milestone] exit=0` and the scrollback is readable. |
 
-Tests: four in `frame_file.rs` (the verb goes out last; a publisher that never drew
-clears nothing; one whose first frame was *refused* clears nothing either; a refused
-clear is still an exit) and 55 in `tools/cli/pane-clear.test.mjs`, driving a real
-`net.Server` on a real named pipe.
+Tests: the ownership rule in `frame_file.rs` — the verb goes out last; a publisher
+that never drew clears nothing; one whose first frame was *refused*, or that the host
+answered `frame:0/0` for, clears nothing either; a refused clear is still an exit; a
+frame nobody placed names no pane — and the whole of `tools/cli/pane-clear.test.mjs`,
+driving a real `net.Server` on a real named pipe. The counts live in §6's coverage
+table and nowhere else: a second copy here is a second thing to go stale, which is
+exactly what happened to the first one.
 
 ➕ **Re-checked, harder, on 2026-08-24 — and the first check had the wrong half.**
 Force-killing the *browser* is the mild case: the CLI is still there and clears the
@@ -205,9 +208,9 @@ the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **447 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 390 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **355 passed**, 87 suites, 8.4 s wall clock |
+| `cargo nextest run --workspace` | **452 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 395 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **364 passed**, 88 suites, 8.7 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -271,22 +274,23 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 66 |
-| `agwinterm.rs` | 46 | | `vendor-check/inventory.test.mjs` | 37 |
-| `frame_file.rs` | 36 | | `cli/endpoint.test.mjs` | 32 |
+| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 73 |
+| `agwinterm.rs` | 48 | | `vendor-check/inventory.test.mjs` | 37 |
+| `frame_file.rs` | 40 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
-| | | | the rest | 121 |
+| | | | the rest | 123 |
 
-Counted on 2026-08-24; the node column sums to the 355 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 64),
-`agwinterm.rs` (29 → 46, the exchange deadline) and `terminal_windows.rs` (38 → 53).
-The last five of each are the review round that followed the plan: the frame roots the
-engine could have chosen, a pid the caller asked about and does not have, the evidence
-consumed with the placement it authorised, and the two ends of the `u32` a Win32 wait
-must never be given.
+Counted on 2026-08-24; the node column sums to the 364 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 73),
+`agwinterm.rs` (29 → 48, the exchange deadline) and `terminal_windows.rs` (38 → 54).
+The plan and the first review round after it took them to 60, 46 and 53, and the last
+five of each are that round's: the frame roots the engine could have chosen, a pid the
+caller asked about and does not have, the evidence consumed with the placement it
+authorised, and the two ends of the `u32` a Win32 wait must never be given. The five
+rounds below carry them the rest of the way.
 
 A second review round moved seven more, and all seven are about the same seam — which
 of two panes a wreck on disk belongs to. `frame_file.rs` (32 → 36) gained the pane
@@ -314,6 +318,39 @@ more, and `sweep_stale` leaves a wreck standing for an hour. `terminal_windows.r
 (53 → 54) gained the ordering the dev-instance guard needs: `Terminal::new` asks
 `HostTarget::from_env` before `attach_console`, so a refused engine no longer takes the
 pane's console, alternate screen and mouse reporting on the way to declining to publish.
+
+A fifth round moved seven, and each is a claim that was true of a narrower case than
+the code applied it to. `pane-clear.test.mjs` (66 → 69) gained the pane wrecked
+twice — a successful clear now retires *every* directory it would have accepted, because
+a pane holds one placement and the older wreck's was replaced long before the run, while
+an older marker left standing reads as fresh ownership to the next run — and the two
+halves of `clearOwnedPaneFrame` now read the same environment, so a caller that hands
+one over is not told "nothing of ours to clear" over roots it never named.
+`frame_file.rs` (37 → 39, and the table said 36 for a round) gained `frame:0/0`: an
+`ok:true` reply that placed nothing is not a placement, so it neither marks the pane nor
+enters `written`. `agwinterm.rs` (46 → 47) gained the peer that drips a byte and never a
+newline — past the deadline `millis_until` hands out a fresh millisecond so an in-flight
+read can still be cancelled, and `read_line` was going round for another one, so the
+only remaining bound on an exchange was `MAX_REPLY_BYTES`. `tools/docs-check` gained the
+slug: a heading slugger *stricter* than GitHub's agrees with a broken anchor instead of
+failing on it, which is how `05-cli-and-endpoints.md`'s link to the
+`TERMINAL_BROWSER_ALLOW_PIPE` section of `07-as-built.md` passed while landing at the
+top of the file.
+
+A sixth round moved five, and each is a claim the code makes that nothing was
+watching. `pane-clear.test.mjs` (69 → 73) gained the three report branches no test
+constructed — the guard refusing a pane that *does* hold a wreck, the same guard with
+nothing found, and the escapes that failed while the input modes went back — and
+`retire`'s fallback, reached by standing a working directory inside the wreck so
+`fs.rmSync` says no: the directory stays, its claim on this pane does not. `frame_file.rs`
+(39 → 40) gained the other end of `frame:0/0`, a reply this build cannot parse, which
+counts as a placement precisely so a host that grows a field does not quietly cost the
+publisher its frames. `agwinterm.rs` (47 → 48) gained `expired` itself, because the
+write half of the loop bound has no fixture — a request never fills the pipe buffer —
+and `tools/acceptance/pane-clear.test.mjs` gained the stray argument, which is the one
+command line the verb does not exit 0 for. The same round scoped the frame roots to the
+environment the caller handed over: `os.tmpdir()` answers for this process and no
+other, so it is a root only when there is no other environment to answer for.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

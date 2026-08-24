@@ -39,6 +39,14 @@ two, and **only one of them exists today**.
    placed at the pane's origin.
 5. agwinterm reads the file, decodes it on its own thread, and swaps the placement.
 
+**A reply is not a placement.** agwinterm can answer `ok:true` with `frame:0/0` — it skips
+an image whose file it cannot open *before* it counts it, so a redirected `TEMP`, a pane
+hosted by another user and an antivirus quarantine all present this way, as success on
+every frame with the pane left blank. That is treated exactly as a refusal is: the file is
+deleted as litter rather than kept as history, the directory is not marked, and nothing
+enters `written`, so the publisher's `Drop` sends no `image.clear` at a picture it never
+put there.
+
 **The fresh path per frame is load-bearing, not tidiness.** Rewriting one path races
 the host's `File.ReadAllBytes`, whose failure is swallowed (`ControlServer.cs:458`)
 and silently re-places the *stale* image; and agwinterm's staleness check is
@@ -48,7 +56,10 @@ and the second is dropped. Both present as "the browser stopped updating", in no
 The image *id* stays fixed for the opposite reason — it keeps the emulator's image
 table at one entry rather than growing per frame. Files past the last three are reaped
 as the next frame goes out, the directory is removed on drop, and a fresh publisher
-sweeps directories older than an hour left by processes that died before they could.
+sweeps directories older than an hour left by processes that died before they could. The
+`pane` marker (see *Taking the picture back*) is written beside the first frame the host
+*does* place, is exempt from that reaping, and is rewritten if something removes the
+directory out from under a live publisher.
 
 ### Why the fast path is not here
 
@@ -121,12 +132,35 @@ the one arrangement in which the verb genuinely looks like it did nothing.
 
 All three ask the same question first: **is this placement ours?** `FramePublisher::clear`
 answers it from its own state — it never published, so there is nothing of its to take
-back. The CLI's two answer it from disk, by looking for a `terminal-browser-frames-<pid>-*`
-directory holding a frame; the exit path knows the pid and asks the exact question, while
-`pane-clear` runs after everything is dead and can only ask the broad one. Where they
-differ is what they do with a *no*: the exit path stays quiet, and `pane-clear` **says so**
-and leaves the picture alone. That is the one place where "report that something happened"
-and "do not take down what is not yours" pull against each other, and ownership wins.
+back. The CLI's two answer it from disk, and from **two** pieces of evidence rather than
+one: the directory name, `terminal-browser-frames-<pid>-<n>`, and a file called `pane`
+written inside it beside the first frame the host actually places, holding the pipe name
+and the session id that frame was addressed to.
+
+Neither question is "the newest frame directory on this machine". The exit path knows the
+pid it spawned and asks the exact question — but a pid names a *live* process and nothing
+more, `frame_file.rs` burns a counter precisely because Windows recycles them, and
+`sweep_stale` leaves a wreck standing for an hour, so a marker naming a **different** pane
+disqualifies the directory even there. `pane-clear` runs after everything is dead and has
+no pid at all, and the marker is the whole of its answer: without it, two panes wrecked at
+once would mean the verb repairing one of them on the other's evidence and then deleting
+it. A directory with frames and no marker is read as nobody's rather than as ours — an
+engine predating the file stays recoverable by the process that spawned it, and by nothing
+else.
+
+The evidence goes with the placement it authorised. A clear the host **confirms** retires
+every directory the run would have accepted, not only the one it reported: a pane holds one
+placement, so an older wreck's picture was replaced long before this run started, and an
+older marker left standing would read as fresh ownership to the next run. A clear the host
+**refused** leaves everything where it is — the pane is still painted, and the directory is
+what a later run needs in order to try again. A directory that will not delete has its
+marker removed on its own, which downgrades it to an unattributed wreck rather than leaving
+a live claim behind.
+
+Where the three differ is what they do with a *no*: the exit path stays quiet, and
+`pane-clear` **says so** and leaves the picture alone. That is the one place where "report
+that something happened" and "do not take down what is not yours" pull against each other,
+and ownership wins.
 
 All three are addressed by `HostTarget::from_env`'s rules, repeated deliberately, because
 the engine places the frame and the CLI takes it back and a disagreement would not error —
@@ -394,6 +428,17 @@ an idle machine and the tail this must not clip is a loaded one; no more than th
 because the wait is charged to the render thread and, through the join, to shutdown. The
 odd number carries its derivation — a round second would read as a guess and would not
 move if the round trip were re-measured.
+
+"One deadline for the whole exchange" is a claim about the *loop*, not only about each
+wait, and it takes a second test to be one. `millis_until` answers an expired deadline
+with one millisecond rather than zero, because a zero wait does not time out — it
+returns immediately with a read still pending, and the buffer the kernel is holding
+would be freed under it. That floor is what a peer can spend: one that hands over a byte
+inside each of those milliseconds and never a newline used to keep `read_line` going
+round for another read, leaving `MAX_REPLY_BYTES` as the only bound on an exchange the
+render thread and `PixelEngine::stop`'s join are waiting behind. So the deadline is
+tested before each *new* read or write is started, and never before collecting one
+already begun.
 
 A timeout is deliberately **not** retried. The one replay `request` does exists for a
 host that went *away*; a host that may still be about to answer would be asked twice and

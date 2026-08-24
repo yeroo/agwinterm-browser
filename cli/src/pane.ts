@@ -12,9 +12,17 @@
 // the pane usable as a terminal" — and it failed on the picture, not on the shell:
 // the shell underneath was running and answering, and none of it could be read.
 //
-// So the CLI does it too. `openInForeground` is the pane's foreground job and it
-// outlives the browser by construction, whatever killed it. Sending `image.clear`
-// twice is harmless (the second finds nothing placed); never sending it is not.
+// So the CLI does it too. `openInForeground` is the pane's foreground job, so it
+// outlives the browser whenever the browser is what died — and only then. A
+// `taskkill /F` on the *CLI* takes the browser with it, because libuv puts a child
+// spawned without `detached` into a job object that dies with its parent, so that
+// exit runs neither half. That third path is what `pane-clear` below exists for
+// (`docs/design/06-acceptance.md` §4, which measured it).
+//
+// Nor is an extra `image.clear` free. A placement belongs to the pane, not to the
+// process that made it, so a clear sent when this browser owns nothing takes down
+// whatever *is* on the pane — which may be a picture someone else drew. That is the
+// ownership rule below: the engine's `written.is_empty()`, read off the filesystem.
 //
 // The picture is only half of what the browser leaves behind, and `restorePaneConsole`
 // below is the other half: the same `Drop` that clears the frame also takes the
@@ -22,10 +30,13 @@
 // the same exits.
 //
 // Kept apart from `main.ts` and importing only node builtins, so the addressing
-// rules can be tested without a pane, a pipe or an Electron. That constraint is also
-// why `pane-clear` — the recovery verb `main.ts` dispatches to — lives down here: it
-// runs when the engine is gone, the registry is empty and nothing else in the
-// workspace can be relied on to load.
+// rules can be tested without a pane, a pipe or an Electron. `pane-clear` — the
+// recovery verb `main.ts` dispatches to — lives down here for the same reason: it
+// runs when the engine is gone, the registry is empty and no browser is alive, so
+// every rule it needs has to be one this file can state on its own. It buys no
+// protection from a workspace module failing to *load*, and does not claim any:
+// `main.ts`'s imports are static and top-level, so all of them are evaluated before
+// the `pane-clear` branch is ever reached.
 
 import fs from "node:fs";
 import net from "node:net";
@@ -347,8 +358,10 @@ export interface ConsoleRestore {
  * The companion to `clearPaneFrame`, and it runs for the same reason and on the same
  * path: the picture and the console modes are both state the engine set on *this*
  * pane, both are normally undone by `ModeGuard::drop`, and neither is undone at all
- * when the browser exits without running a destructor. `openInForeground` is the
- * only survivor of that, so it does both.
+ * when the browser exits without running a destructor. `openInForeground` is one
+ * survivor of that and does both; [`paneClearCommand`] is the other, for the exit
+ * `openInForeground` does not survive either — a `taskkill /F` on the CLI, which
+ * takes the browser down with it.
  *
  * Safe to run after an ordinary quit as well, which is why the call site does not
  * try to tell the two apart: mode resets are idempotent, and asking a console that
@@ -439,6 +452,17 @@ export interface OwnedFramesOptions {
    * directory the engine could have chosen, not only the one Node prefers.
    */
   root?: string;
+  /**
+   * The environment [`frameRoots`] reads `TMP` and `TEMP` out of, when `root` names
+   * no directory of its own. Defaults to `process.env`.
+   *
+   * Threaded rather than left to `process.env` because the other half of
+   * [`clearOwnedPaneFrame`] — the addressing — already answers for the caller's
+   * environment. A caller that passes one and gets `process.env`'s temp directories
+   * searched is told "nothing of ours to clear" over a list of roots it never named,
+   * and the report's whole claim is that it names what it actually read.
+   */
+  env?: PaneEnv;
   /**
    * Only accept the directory this pid left behind.
    *
@@ -542,8 +566,16 @@ function sameMark(mark: PaneMark, pane: PaneMark): boolean {
  * and the report names what it searched rather than a directory it assumed.
  */
 function frameRoots(env: PaneEnv = process.env): string[] {
+  // `os.tmpdir()` reads *this process's* environment, never the one handed in, and it
+  // is worth having only for that: it carries the profile-directory fallback neither
+  // `TMP` nor `TEMP` spells out. So it is a root exactly when `env` is this process's
+  // own. Adding it for a caller that named its own environment would put a directory
+  // that caller never mentioned into `searched`, and let a wreck under it be adopted
+  // and retired on that caller's behalf — which is the half of [`OwnedFramesOptions.env`]
+  // that threading the variable through was for.
+  const mine = env === process.env;
   const roots: string[] = [];
-  for (const value of [os.tmpdir(), env.TMP, env.TEMP]) {
+  for (const value of mine ? [os.tmpdir(), env.TMP, env.TEMP] : [env.TMP, env.TEMP]) {
     const root = value?.trim();
     if (!root) continue;
     const full = path.resolve(root);
@@ -559,7 +591,7 @@ function samePath(a: string, b: string): boolean {
 
 /** The directories [`ownedFrames`] will read, in the order it reads them. */
 export function searchedRoots(options: OwnedFramesOptions = {}): string[] {
-  return options.root === undefined ? frameRoots() : [options.root];
+  return options.root === undefined ? frameRoots(options.env) : [options.root];
 }
 
 /**
@@ -576,17 +608,31 @@ export function searchedRoots(options: OwnedFramesOptions = {}): string[] {
  * directory on this machine" — see [`OwnedFramesOptions.pane`] for what that costs.
  */
 export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | null {
+  return allOwnedFrames(options)[0] ?? null;
+}
+
+/**
+ * Every directory [`ownedFrames`] would accept, newest first.
+ *
+ * The newest is the wreck the user is looking at, and it is the only one worth
+ * reporting — but it is *not* the only one the clear settles. `image.clear` takes the
+ * pane's placement, and a pane holds one: whatever an older wreck put there was
+ * replaced long before this run. So once the host has answered, every one of these is
+ * spent evidence, and leaving the older ones standing would let the next run treat a
+ * consumed marker as fresh ownership and send a second `image.clear` at a pane some
+ * other process may have painted since. See [`clearOwnedPaneFrame`].
+ */
+function allOwnedFrames(options: OwnedFramesOptions = {}): OwnedFrames[] {
   // A pid the caller asked about and does not have is not a licence to ask the
   // broad question. See [`OwnedFramesOptions.pid`].
-  if ("pid" in options && options.pid === undefined) return null;
+  if ("pid" in options && options.pid === undefined) return [];
   // And neither is a pane the caller could not resolve.
   const pane = options.pane ?? null;
-  if (options.pid === undefined && !pane) return null;
+  if (options.pid === undefined && !pane) return [];
   // The trailing `-` matters: without it a pid of 123 would adopt 1234's frames.
   const wanted =
     options.pid === undefined ? FRAME_DIR_PREFIX : `${FRAME_DIR_PREFIX}${options.pid}-`;
-  let best: OwnedFrames | null = null;
-  let bestAt = -Infinity;
+  const found: { at: number; owned: OwnedFrames }[] = [];
   for (const root of searchedRoots(options)) {
     let names: string[];
     try {
@@ -620,13 +666,14 @@ export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | nul
         const mark = frameMark(dir);
         if (mark ? !sameMark(mark, pane) : options.pid === undefined) continue;
       }
-      if (at <= bestAt) continue;
       const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
-      best = { dir, pid: Number.isFinite(pid) ? pid : null, frames };
-      bestAt = at;
+      found.push({ at, owned: { dir, pid: Number.isFinite(pid) ? pid : null, frames } });
     }
   }
-  return best;
+  // Stable, so directories whose mtimes tie keep the order they were read in — which
+  // is the one the single-answer form has always returned.
+  found.sort((a, b) => b.at - a.at);
+  return found.map((entry) => entry.owned);
 }
 
 /** What one attempt at taking the picture back actually did. */
@@ -655,7 +702,10 @@ export async function clearOwnedPaneFrame(
   env: PaneEnv,
   options: OwnedFramesOptions & { timeoutMs?: number } = {},
 ): Promise<PaneClearOutcome> {
-  const searched = searchedRoots(options);
+  // The addressing below answers for `env`, so root discovery has to as well — see
+  // [`OwnedFramesOptions.env`].
+  const scoped = { ...options, env: options.env ?? env };
+  const searched = searchedRoots(scoped);
   const request = paneClearRequest(env);
   // The broad question is asked *of this pane*, not of the machine — except where no
   // clear can follow from the answer, and then the machine-wide one is what lets the
@@ -664,14 +714,15 @@ export async function clearOwnedPaneFrame(
   // the environment, not the `\\.\pipe\` path a client dials.
   const address = paneAddress(env);
   const here = request && address ? { pipe: address.pipe, target: address.target } : null;
-  const owned = ownedFrames(
+  const wrecks = allOwnedFrames(
     "pid" in options
       ? // The pid still decides ownership; the pane only rules out a directory whose
         // marker names a different one, which a recycled pid cannot. A pane this
         // environment does not resolve leaves the pid question exactly as it was.
-        { ...options, pane: here }
-      : { ...options, pane: here ?? "any" },
+        { ...scoped, pane: here }
+      : { ...scoped, pane: here ?? "any" },
   );
+  const owned = wrecks[0] ?? null;
   if (!request || !owned) return { request, owned, cleared: false, refused: null, searched };
   const { cleared, refused } = await clearPaneFrame(env, options.timeoutMs ?? 1_000);
   // The evidence goes with the placement it authorised. `FrameDir`'s `Drop` is what
@@ -688,12 +739,38 @@ export async function clearOwnedPaneFrame(
   // arrival of bytes. A refusal leaves the directory exactly where it is: the pane is
   // still painted, and the evidence is what a later run — after the window that was
   // in front has moved, say — needs in order to try again.
+  //
+  // All of them, not only the one reported. A pane holds one placement, so a pane
+  // wrecked twice has one picture on it and the older wreck's was replaced before this
+  // run ever started; the clear that just went out settles every one of them. Retiring
+  // only the newest would leave the older marker looking like fresh ownership, and the
+  // next `pane-clear` would send a second `image.clear` at a pane that may by then be
+  // painted by somebody else — the exact thing the ownership rule exists to stop.
   if (cleared) {
-    try {
-      fs.rmSync(owned.dir, { recursive: true, force: true });
-    } catch {}
+    for (const wreck of wrecks) retire(wreck.dir);
   }
   return { request, owned, cleared, refused, searched };
+}
+
+/**
+ * Takes a spent wreck out of circulation, and never throws.
+ *
+ * Best-effort on the directory, because this runs on paths that must not fail: one
+ * that will not delete is `sweep_stale`'s problem an hour later, not the recovery's.
+ * The marker is not best-effort in the same way, though — it *is* the directory's
+ * claim on this pane, and a claim that outlives the placement it was made for is what
+ * authorises the next run's clear. So when the directory will not go, the marker is
+ * asked for on its own: what that leaves behind is an unattributed wreck, which the
+ * broad question already declines to own.
+ */
+function retire(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch {}
+  try {
+    fs.rmSync(path.join(dir, FRAME_PANE_FILE), { force: true });
+  } catch {}
 }
 
 // -- the recovery verb ---------------------------------------------------------
@@ -794,7 +871,9 @@ export function paneClearReport(
       `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, and no ` +
         "image.clear was sent — the guard above says this instance is not one this " +
         "build addresses, and clearing it anyway is how a placement someone else owns " +
-        "gets taken down",
+        "gets taken down. With no pane this build will address there is no marker to " +
+        "compare against either, so that is the newest wreck on this machine rather " +
+        "than provably this pane's",
     );
   } else if (!outcome.request) {
     lines.push(

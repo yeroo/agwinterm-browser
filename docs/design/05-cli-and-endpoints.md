@@ -154,7 +154,7 @@ here rather than at the first frame because a browser the CLI launched and the e
 then refused every frame from is a browser that starts and shows nothing. The allow-list
 half is `debug_assertions`-gated in the engine and cannot be in the CLI; the asymmetry
 and its consequence are in
-[07](07-as-built.md#terminalbrowserallowpipe--a-dev-build-refuses-an-instance-it-was-not-named-at).
+[07](07-as-built.md#terminal_browser_allow_pipe--a-dev-build-refuses-an-instance-it-was-not-named-at).
 
 **`herdr`** (`pixel-core/src/herdr.rs`, already `#[cfg(unix)]`) — permanently
 disabled, not pending. It is not a transport for the agwinterm path; it is a
@@ -196,5 +196,9 @@ alive. It is dispatched ahead of every liveness check in `cli/src/main.ts` and a
 exits 0, because it is a repair tool run against something already broken. `cli/src/pane.ts`
 holds it and imports nothing from the workspace for exactly that reason. What decides
 whether it sends anything is the engine's rule read off the filesystem: the frame
-directory `FrameDir`'s `Drop` would have removed. See
+directory `FrameDir`'s `Drop` would have removed, *and* the `pane` marker the engine
+wrote inside it naming the pipe and session that frame was placed on. The marker is
+what makes this a question about this pane rather than about the machine — without it,
+two panes wrecked at once means repairing one on the other's evidence — so a directory
+with frames and no marker is one this verb will not touch. See
 [07](07-as-built.md#taking-the-picture-back).

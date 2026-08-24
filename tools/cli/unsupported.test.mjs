@@ -35,6 +35,7 @@ async function loadModule(relative) {
 const readSource = (...parts) => fs.readFileSync(path.join(REPO, ...parts), "utf8");
 
 const {
+  ALLOW_PIPE_VAR: unsupportedAllowPipeVar,
   sandboxSetupNote,
   splitUnsupported,
   sshUnsupported,
@@ -45,7 +46,8 @@ const {
 // The other reader of the same rule. `pane.ts` cannot import `unsupported.ts`
 // (both are kept workspace-import-free for different reasons), so the agreement is
 // asserted rather than assumed.
-const { paneClearRequest } = await loadModule("cli/src/pane.ts");
+const { ALLOW_PIPE_VAR: paneAllowPipeVar, paneClearRequest } =
+  await loadModule("cli/src/pane.ts");
 
 // The other place a refusal has to appear: what a user reads *before* running the
 // command, rather than the sentence they meet when they do.
@@ -278,12 +280,16 @@ describe("the host refusal", () => {
     const engine = readSource("engine", "crates", "pixel-core", "src", "agwinterm.rs");
     const declared = /ALLOW_PIPE_VAR: &str = "([A-Z_]+)"/.exec(engine);
     assert.ok(declared, "agwinterm.rs no longer declares the allow-pipe variable");
-    for (const relative of ["cli/src/pane.ts", "cli/src/unsupported.ts"]) {
-      assert.ok(
-        readSource(...relative.split("/")).includes(`"${declared[1]}"`),
-        `${relative} does not name ${declared[1]}`,
-      );
-    }
+    // Compared as values, not searched for as text: a source-text match is satisfied
+    // by the name turning up in a comment, and what has to agree with the engine is
+    // the constant each reader actually consults. Importing them is also the only
+    // thing that makes the two exports a surface rather than a claim.
+    assert.equal(paneAllowPipeVar, declared[1], "pane.ts reads a different variable");
+    assert.equal(
+      unsupportedAllowPipeVar,
+      declared[1],
+      "unsupported.ts reads a different variable",
+    );
     // `[A-Za-z0-9._-]` on the Rust side is spelled as a byte test, so the two are
     // compared by behaviour above and by intent here.
     assert.match(engine, /is_ascii_alphanumeric\(\) \|\| matches!\(byte, b'\.' \| b'_' \| b'-'\)/);

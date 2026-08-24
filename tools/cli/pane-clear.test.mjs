@@ -6,7 +6,8 @@
 // force-killed the page stayed painted over a pane whose shell was running and
 // answering underneath. `Terminal`'s `Drop` (`terminal_windows.rs`) cannot help: a
 // `taskkill /F` runs no destructor. The CLI's foreground wait can, because it
-// outlives the browser by construction.
+// outlives the browser whenever the browser is what died — and when the CLI is what
+// died it does not, which is what the `pane-clear` verb below is for.
 //
 // What is driven here is a real `net.Server` on a real named pipe, standing in for
 // agwinterm's control server: the claim is about bytes on a pipe, and a mock of the
@@ -516,6 +517,10 @@ function leftoverFrames(root, pid, frames = 1, mark = MINE) {
   return dir;
 }
 
+/** Path equality as the filesystem sees it, which on Windows ignores case. */
+const samePath = (a, b) =>
+  process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+
 /** A fresh, empty temp root per test, so one test's leftovers are not another's. */
 function freshRoot(t, name) {
   const root = fs.mkdtempSync(path.join(scratch, `${name}-`));
@@ -718,6 +723,48 @@ describe("whose placement it is", () => {
     assert.deepEqual(pane.searchedRoots({ root: only }), [only]);
   });
 
+  it("searches the temp directories the caller's environment names", (t) => {
+    // Root discovery and addressing are two halves of one answer. `clearOwnedPaneFrame`
+    // addresses the pane out of the environment it was handed, so reading TMP and TEMP
+    // off `process.env` instead would let it report "nothing of ours to clear" over a
+    // list of roots the caller never named -- and the report's whole claim is that it
+    // names what it actually read.
+    const root = freshRoot(t, "envroot");
+    const other = freshRoot(t, "envroot-temp");
+    // The whole root set, not "is ours among them". `os.tmpdir()` answers for *this*
+    // process's environment and never for the one handed in, so a caller that names
+    // its own gets its own and nothing else -- otherwise a wreck under a directory it
+    // never mentioned is adopted, reported and retired on its behalf.
+    assert.deepEqual(pane.searchedRoots({ env: { TMP: root, TEMP: other } }), [root, other]);
+    assert.deepEqual(pane.searchedRoots({ env: { TMP: root, TEMP: root } }), [root]);
+    assert.deepEqual(pane.searchedRoots({ env: {} }), []);
+    // And the default still reaches the fallback `TMP`/`TEMP` alone cannot spell.
+    assert.ok(
+      pane.searchedRoots().some((seen) => samePath(seen, os.tmpdir())),
+      "the process's own temp directory is not searched by default",
+    );
+  });
+
+  it("finds a wreck under the TMP the caller handed it, not the one node prefers", async (t) => {
+    // The end of the same thread: a pipe nobody is listening on, so nothing is sent,
+    // and what is under test is only which directories were read.
+    const root = freshRoot(t, "envwreck");
+    const pipe = `winterm-envroot-${process.pid}`;
+    const dir = leftoverFrames(root, 4242, 1, { pipe, target: "pane-1" });
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: pipe, AGWINTERM_SESSION_ID: "pane-1", TMP: root, TEMP: root }),
+      { timeoutMs: 300 },
+    );
+
+    assert.equal(outcome.owned?.dir, dir, "the wreck under the caller's TMP was not found");
+    assert.ok(
+      outcome.searched.some((seen) =>
+        process.platform === "win32" ? seen.toLowerCase() === root.toLowerCase() : seen === root,
+      ),
+      `the report named ${outcome.searched.join(" or ")} rather than the roots it read`,
+    );
+  });
+
   it("does not let one pid adopt another's frames by prefix", (t) => {
     // Without the trailing separator, pid 424 would claim 4242's directory and clear
     // a placement it never made -- the exact rule this is here to keep.
@@ -796,6 +843,87 @@ describe("whose placement it is", () => {
     assert.equal(again.owned, null, "a second run found the wreck it had already fixed");
     assert.equal(again.cleared, false);
     assert.equal(host.lines.length, 1, "a second image.clear went to an already-clear pane");
+  });
+
+  it("retires every spent wreck, not only the one it reported", async (t) => {
+    // A pane holds one placement, so a pane wrecked twice has one picture on it and
+    // the older wreck's was replaced long before this run started. The clear that
+    // just went out settles both. Retiring only the newest would leave the older
+    // marker looking like fresh ownership, and the next `pane-clear` would send a
+    // second `image.clear` at a pane somebody else may have painted since -- which
+    // is the one thing the ownership rule exists to stop.
+    const host = hostOn(`winterm-owned-${process.pid}-twice`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "twice");
+    const mark = { pipe: host.name, target: "pane-1" };
+    const older = leftoverFrames(root, 1111, 1, mark);
+    const newer = leftoverFrames(root, 2222, 1, mark);
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(newer, later, later);
+    const env = inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" });
+
+    const first = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 1_000 });
+    assert.equal(first.cleared, true);
+    assert.equal(first.owned.pid, 2222, "it reported a wreck other than the newest");
+    assert.equal(fs.existsSync(newer), false, "the reported wreck outlived the clear");
+    assert.equal(
+      fs.existsSync(path.join(older, pane.FRAME_PANE_FILE)),
+      false,
+      "an older marker was left standing to authorise a second clear",
+    );
+
+    const again = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 500 });
+    assert.equal(again.owned, null, "a spent wreck was read as fresh ownership");
+    assert.equal(host.lines.length, 1, "a second image.clear went to a repaired pane");
+  });
+
+  it("gives up its claim on the pane when the directory will not delete", async (t) => {
+    // `retire`'s fallback, and the reason the marker is not best-effort in the way
+    // the directory is: the marker *is* the directory's claim on this pane, so a
+    // claim that outlives the placement it was made for authorises the next run's
+    // `image.clear` at a pane somebody else may have painted since. What the
+    // fallback leaves behind is an unattributed wreck, which the broad question
+    // already declines to own.
+    //
+    // A directory somebody's working directory is inside is how Windows says no to
+    // `fs.rmSync`; a platform that allows the delete has no fallback to reach.
+    if (process.platform !== "win32") {
+      t.skip("only Windows refuses to remove a directory a process is standing in");
+      return;
+    }
+    const host = hostOn(`winterm-owned-${process.pid}-stuck`);
+    await host.listening;
+    t.after(() => host.close());
+    // One teardown rather than `freshRoot`'s: the working directory has to move back
+    // out before anything tries to remove the root, and `after` hooks run in the
+    // order they were registered.
+    const where = process.cwd();
+    const root = fs.mkdtempSync(path.join(scratch, "stuck-"));
+    t.after(() => {
+      process.chdir(where);
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    const dir = leftoverFrames(root, 4242, 1, { pipe: host.name, target: "pane-1" });
+    const held = path.join(dir, "held");
+    fs.mkdirSync(held);
+    process.chdir(held);
+    const env = inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" });
+
+    const first = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 1_000 });
+    assert.equal(first.cleared, true);
+    assert.equal(first.owned.dir, dir);
+    assert.equal(fs.existsSync(dir), true, "the directory went after all, so nothing fell back");
+    assert.equal(
+      fs.existsSync(path.join(dir, pane.FRAME_PANE_FILE)),
+      false,
+      "a spent claim on this pane was left standing",
+    );
+
+    const again = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 500 });
+    assert.equal(again.owned, null, "an unattributed wreck was read as fresh ownership");
+    assert.equal(again.cleared, false);
+    assert.equal(host.lines.length, 1, "a second image.clear went to a repaired pane");
   });
 
   it("keeps the evidence when the host never answered", async (t) => {
@@ -910,6 +1038,14 @@ describe("the pane-clear verb", () => {
     assert.equal(host.lines.length, 1, "the frame half did not run");
     assert.deepEqual(JSON.parse(host.lines[0]), { cmd: "image.clear", target: "pane-1" });
     assert.ok(rec.written.includes(pane.DISABLE_REPORTING), "the console half did not run");
+    // Observed rather than read off the source: `DISABLE_REPORTING` ends with
+    // `?1049l`, so a report written first lands on the alternate screen and goes with
+    // it. The order is what makes a command that worked look like one that did.
+    assert.equal(
+      rec.written[0],
+      pane.DISABLE_REPORTING,
+      "the report was written before the console came back",
+    );
     assert.deepEqual(rec.calls, ["raw:false", "pause"], "the SetConsoleMode half did not run");
     assert.match(rec.text, /frame: +cleared/);
     assert.ok(rec.text.includes(dir), "it does not say which frames it found");
@@ -1030,6 +1166,72 @@ describe("the pane-clear verb", () => {
     assert.match(report.join("\n"), /console: could not be written to/);
     // And the command survives the stream that did it.
     assert.doesNotThrow(() => pane.restorePaneConsole({ write: thrower }, {}));
+  });
+
+  it("names the guard, not a repair, when it found a wreck it may not clear", () => {
+    // The refusal branch with something found. Under `TERMINAL_BROWSER_ALLOW_PIPE`
+    // there is no pane this build will address, so the search that found these frames
+    // was the machine-wide one -- the report has to say the clear was withheld, and
+    // that what it named is the newest wreck rather than provably this pane's.
+    const env = inPane({
+      AGWINTERM_SESSION_ID: "pane-1",
+      [pane.ALLOW_PIPE_VAR]: "agwinterm-dev",
+    });
+    const report = pane
+      .paneClearReport(
+        env,
+        {
+          request: null,
+          owned: { dir: "T:\wreck", pid: 4242, frames: 2 },
+          cleared: false,
+          refused: null,
+          searched: ["T:\\"],
+        },
+        { escapes: true, modes: true },
+      )
+      .join("\n");
+    assert.match(report, /not addressable/);
+    assert.match(report, new RegExp(pane.ALLOW_PIPE_VAR));
+    assert.match(report, /2 frame\(s\) left in T:\wreck/);
+    assert.match(report, /no image\.clear was sent/);
+    assert.match(report, /rather than provably this pane's/);
+    assert.ok(!/frame: +cleared/.test(report), report);
+  });
+
+  it("does not read a refused guard as there being no pane here", () => {
+    // The same refusal with nothing found. "There is no agwinterm pane" would be a
+    // lie to someone standing in one, and it reads as a shell problem rather than as
+    // a variable they set -- which is the one thing they can undo.
+    const env = inPane({
+      AGWINTERM_SESSION_ID: "pane-1",
+      [pane.ALLOW_PIPE_VAR]: "agwinterm-dev",
+    });
+    const report = pane
+      .paneClearReport(
+        env,
+        { request: null, owned: null, cleared: false, refused: null, searched: ["T:\\"] },
+        { escapes: true, modes: true },
+      )
+      .join("\n");
+    assert.match(report, /not addressable/);
+    assert.match(report, /would have withheld the image\.clear in any case/);
+    assert.ok(!/no agwinterm pane in this environment/.test(report), report);
+  });
+
+  it("reports the escapes that never went out while the input modes did go back", () => {
+    // The halves fail apart in both directions. A console whose stdout is a closed
+    // pipe still has a `setRawMode` to call, and claiming the full restore there
+    // sends a user away from a pane still on the alternate screen.
+    const half = pane
+      .paneClearReport(
+        {},
+        { request: null, owned: null, cleared: false, refused: null, searched: [] },
+        { escapes: false, modes: true },
+      )
+      .join("\n");
+    assert.match(half, /console: could not be written to/);
+    assert.match(half, /the input modes are back/);
+    assert.ok(!/nothing was restored/.test(half), half);
   });
 
   it("does not claim the input modes are back when there was no tty to ask", () => {
