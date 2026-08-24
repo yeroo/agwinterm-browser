@@ -964,6 +964,17 @@ pub struct Terminal {
     host: Option<ControlClient>,
     /// Set once the environment has been found not to describe an agwinterm pane,
     /// so the explanation is logged once rather than per frame.
+    ///
+    /// It does **not** latch on a failed exchange, and Task 5 checked whether a
+    /// timed-out one should be the exception. It should not. This flag answers "is
+    /// there a pane to draw into", which is a question about `SessionEnv` and is
+    /// settled before a byte moves; a timeout is a live host that went quiet, and
+    /// latching on it would turn one slow frame into a browser that never draws
+    /// again. Nor is there a repeated cost to suppress: a timeout comes out of
+    /// [`Terminal::draw`], which `Engine::pump` propagates and `pixel-node` treats as
+    /// a fatal exit, so the run ends on the first one. The other caller —
+    /// [`Terminal::clear_frame`], from `Drop` — swallows every error already; what
+    /// the deadline buys there is that shutdown finishes at all.
     host_absent: bool,
     /// The file-based frame path, created with the first frame. Lazily, because a
     /// terminal that never draws should not leave a directory behind, and because

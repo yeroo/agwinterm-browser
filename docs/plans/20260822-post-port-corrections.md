@@ -220,17 +220,60 @@ the one frame-critical client does not.
 This is the same defect class as Task 3's unbounded test wait, in shipped engine code
 rather than in a test, which is why it is its own task rather than a bullet there.
 
-- [ ] bound every request/response exchange with timed or overlapped pipe I/O
-- [ ] on expiry, discard the connection and return an error rather than retrying on a
+- [x] bound every request/response exchange with timed or overlapped pipe I/O
+- [x] on expiry, discard the connection and return an error rather than retrying on a
       pipe whose state is now unknown
-- [ ] choose the timeout against the frame budget in `docs/design/02-frame-budget.md`, and
+- [x] choose the timeout against the frame budget in `docs/design/02-frame-budget.md`, and
       say in a comment why that number and not a rounder one
-- [ ] check whether `host_absent` latching already covers the recovery path, or whether a
+- [x] check whether `host_absent` latching already covers the recovery path, or whether a
       timed-out exchange needs to latch it too
-- [ ] write a test with a server that accepts and never answers, asserting the exchange
+- [x] write a test with a server that accepts and never answers, asserting the exchange
       fails on the deadline instead of blocking
-- [ ] write a test that `PixelEngine::stop` completes while such a server is stalling
-- [ ] run tests — must pass before Task 6
+- [x] write a test that `PixelEngine::stop` completes while such a server is stalling
+- [x] run tests — must pass before Task 6
+
+Done 2026-08-24. `Connection` is no longer a `BufReader<File>`. The handle is opened
+`FILE_FLAG_OVERLAPPED` and every read and write is collected with
+`GetOverlappedResultEx` against one `EXCHANGE_DEADLINE` for the whole exchange, so the
+write and the reply share a budget rather than each getting their own.
+
+**The number is 1040 ms** — one hundred times the 10.4 ms round trip
+`docs/design/02-frame-budget.md` measures for a 2.48 Mpx frame, which is the slowest of
+the three it records. A hundredfold because the measurement is a median on an idle
+machine and the tail this must not clip is a loaded one; no more than that because the
+wait is charged to the render thread and, through `PixelEngine::stop`'s join, to
+shutdown. The odd number carries its derivation: a round 1 s would read as a guess and
+would not move if the round trip were re-measured.
+
+Four things the work turned up:
+
+- **`host_absent` neither covers this nor should.** It answers "is there a pane to draw
+  into", which is a question about `SessionEnv` settled before a byte moves; a timeout
+  is a live host that went quiet. Latching on it would turn one slow frame into a
+  browser that never draws again. There is also nothing to suppress: a timeout comes out
+  of `Terminal::draw`, which `Engine::pump` propagates and `pixel-node` treats as a fatal
+  exit, so the run ends on the first one. Written down at the field itself
+  (`terminal_windows.rs`).
+- **The other caller was the quieter half of the bug.** `Terminal::clear_frame` runs from
+  `Drop` and swallows every error — against a stalled host it swallowed them *after*
+  blocking forever, so the browser could not exit either. It needed no change beyond the
+  deadline, and that is what makes shutdown finish.
+- **A timeout is deliberately not `recoverable`.** The one replay `request` does exists
+  for a host that *went away*; a host that may still be about to answer would be asked
+  twice and cost a second deadline. Pinned by
+  `a_timed_out_request_is_not_replayed_onto_a_pipe_of_unknown_state`, which asserts the
+  server saw one request.
+- **`CancelIoEx` only asks.** Until a cancelled operation actually completes the kernel
+  holds pointers into the `OVERLAPPED` and the buffer, so both live in a boxed
+  `PendingIo` the connection owns, and a cancellation that will not settle inside
+  `CANCEL_GRACE_MS` leaks the box and the handle rather than freeing memory the kernel
+  may still write. Unreachable in practice; it is the only way to keep the give-up path
+  itself bounded.
+
+The fixture grew `Turn::Stall` — read the request, answer nothing, hold the connection
+open until the server is dropped — which is the case a `Turn::Hangup` never covered, and
+`Turn::ReplyAfter` so that "slow" is tested as distinct from "stuck". Five new tests
+against the real pipe; the suite is 44 tests in `agwinterm` and runs in 1.05s.
 
 ### Task 6: Verify acceptance criteria
 

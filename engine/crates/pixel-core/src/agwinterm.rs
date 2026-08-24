@@ -47,8 +47,14 @@
 //! the pointer, which is why this returns a value rather than an `Option`.
 
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::time::Duration;
+use std::io;
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
+use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, HANDLE, WAIT_TIMEOUT};
+use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, ReadFile, WriteFile};
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
 
 use crate::terminal::SessionEnv;
 
@@ -109,6 +115,30 @@ const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
 
 const OPEN_ATTEMPTS: u32 = 20;
 const BUSY_WAIT: Duration = Duration::from_millis(25);
+
+/// The longest one request/response exchange on the control pipe may take.
+///
+/// 1040 ms is one hundred times the slowest round trip `docs/design/02-frame-budget.md`
+/// measured: 10.4 ms, for a 2.48 Mpx frame whose 9.93 MB file the host reads
+/// synchronously inside the verb. The odd number is the point — a round 1000 ms or a
+/// round 5 s would read as a guess, and this one carries its derivation, so a
+/// re-measurement that moves the round trip moves this with it.
+///
+/// A hundredfold rather than a tenfold because the measured number is a *median* on
+/// an idle machine, and the tail this must not clip is a loaded one: a host paging in
+/// its decoder, a frame file on a slow volume, a debugger attached. And no more than
+/// that because the wait is charged to the render thread, and through
+/// `PixelEngine::stop`'s join to shutdown as well. Past about a second a user reads
+/// the pane as hung, so there is nothing left to buy above it.
+const EXCHANGE_DEADLINE: Duration = Duration::from_millis(1040);
+
+/// How long a cancelled operation is given to finish before its connection is
+/// abandoned rather than closed. See [`Connection::give_up`].
+///
+/// Not derived from the frame budget, because nothing about a frame is happening any
+/// more by the time this runs: it is the kernel's own turnaround on a cancellation,
+/// which is microseconds. 250 ms is a bound on a thing that should not need one.
+const CANCEL_GRACE_MS: u32 = 250;
 
 /// The most one reply line may grow to before it is refused. Matches
 /// `cli/src/control.ts`'s `MAX_REPLY_BYTES`, which caps the other client of the
@@ -328,21 +358,85 @@ fn not_hosted(missing: &str) -> io::Error {
 // The connection
 // ---------------------------------------------------------------------------
 
-/// One dialled pipe. A named-pipe client is an ordinary file on Windows, so this
-/// needs no Win32 of its own — only the retry that `CreateFile` on a pipe requires.
+/// One dialled pipe, with a deadline on every exchange.
+///
+/// A named-pipe client is an ordinary file on Windows, and this used to be a
+/// `BufReader<File>` for exactly that reason. It is not one any more: a blocking
+/// `read_line` is a wait with no end, and this read happens on the render thread.
+/// A host that accepts the connection and then stalls — inside its own
+/// `File.ReadAllBytes`, say, on a `TEMP` redirected to a network share — would stop
+/// rendering permanently, and stop *shutdown* too, because `PixelEngine::stop`
+/// joins that thread. So the handle is opened `FILE_FLAG_OVERLAPPED` and every read
+/// and write is collected with [`EXCHANGE_DEADLINE`] on it.
+///
+/// The cost of that is this struct: an overlapped handle cannot be read through
+/// `std::io::Read`, which passes a null `OVERLAPPED` and would get undefined
+/// results, so the line assembly is here rather than in a `BufReader`.
 struct Connection {
-    /// Read and write travel over the same handle; `get_mut` is the write end.
-    reader: BufReader<File>,
+    /// `None` only after [`Connection::drop`] has deliberately leaked it.
+    pipe: Option<File>,
+    /// The kernel's half of an in-flight operation. Heap-resident and never moved,
+    /// because a cancelled operation completes on its own schedule.
+    io: Option<Box<PendingIo>>,
+    /// Bytes read past the reply's newline. The protocol is one reply per request
+    /// (`ControlServer.cs:76-82`), so this is normally empty — but a chunk read is
+    /// not a line read, and the remainder has to go somewhere.
+    carry: Vec<u8>,
+    /// Set when an operation was given up on before the kernel finished with it.
+    /// See [`Connection::drop`].
+    abandoned: bool,
 }
+
+/// Everything an in-flight overlapped operation points at.
+///
+/// Boxed and owned by the [`Connection`], because `CancelIoEx` only *asks*: until
+/// the operation actually completes the kernel holds pointers to both fields and
+/// may still write through them. A stack `OVERLAPPED` would be a use-after-free the
+/// moment a timeout returned.
+struct PendingIo {
+    ov: OVERLAPPED,
+    /// The write source or the read destination — never both at once, because an
+    /// exchange writes its whole request before it reads a byte.
+    scratch: Vec<u8>,
+}
+
+// SAFETY: a plain byte buffer and an `OVERLAPPED` whose `hEvent` is always null, so
+// the only pointer-shaped field in it never points anywhere. The box is owned by one
+// `Connection` and never shared, and Windows completes overlapped I/O against the
+// handle rather than against the thread that started it — which is what lets the
+// render thread be the only thread that ever touches this. `Connection` was `Send`
+// as a `BufReader<File>`, and `ControlClient` lives in `Terminal`, so it stays one.
+#[allow(unsafe_code)]
+unsafe impl Send for PendingIo {}
+
+/// How much of a reply to ask for at a time.
+///
+/// Replies are short — an envelope around a status string — so this is sized to
+/// take every real one in a single read rather than to stream a large one well.
+const READ_CHUNK: usize = 8 * 1024;
 
 impl Connection {
     fn open(path: &str) -> io::Result<Self> {
         let mut attempt = 1;
         loop {
-            match OpenOptions::new().read(true).write(true).open(path) {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                // Not a performance choice. It is what makes a bounded wait possible
+                // at all: a synchronous handle has no way to ask for a read that
+                // gives up. See [`Connection`].
+                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .open(path)
+            {
                 Ok(file) => {
                     return Ok(Self {
-                        reader: BufReader::new(file),
+                        pipe: Some(file),
+                        io: Some(Box::new(PendingIo {
+                            ov: OVERLAPPED::default(),
+                            scratch: Vec::new(),
+                        })),
+                        carry: Vec::new(),
+                        abandoned: false,
                     });
                 }
                 // Every server instance is serving someone; agwinterm's accept loop
@@ -363,40 +457,217 @@ impl Connection {
         }
     }
 
-    /// One request line out, one reply line back. The server is strictly
-    /// request/response per connection (`ControlServer.cs:76-82`), so nothing else
-    /// can arrive in between.
+    /// One request line out, one reply line back, both inside one
+    /// [`EXCHANGE_DEADLINE`]. The server is strictly request/response per connection
+    /// (`ControlServer.cs:76-82`), so nothing else can arrive in between.
+    ///
+    /// The deadline covers the *exchange*, not each half of it, because what the
+    /// caller is waiting for is the answer: a host that takes 900 ms to accept the
+    /// request has already spent the frame's patience whether or not it then replies
+    /// quickly.
     fn exchange(&mut self, request: &str) -> io::Result<String> {
-        let pipe = self.reader.get_mut();
-        pipe.write_all(request.as_bytes())?;
-        pipe.write_all(b"\n")?;
-        pipe.flush()?;
-
-        let mut line = String::new();
-        // Capped, because this read is on the render thread and the reply is one
-        // line from a peer that only has to be listening on the name to be talking
-        // to us. `cli/src/control.ts` caps its half of the identical protocol for
-        // the same reason. A truncated read leaves the connection unusable, which
-        // is what returning an error out of `attempt` handles — it drops it.
-        let read = (&mut self.reader)
-            .take(MAX_REPLY_BYTES)
-            .read_line(&mut line)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "agwinterm closed the control pipe before answering",
-            ));
-        }
-        // Only the reply that *filled* the cap is refused. One that simply ends at
-        // EOF without its newline is still a reply, and was accepted before.
-        if read as u64 >= MAX_REPLY_BYTES && !line.ends_with('\n') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("agwinterm's reply passed {MAX_REPLY_BYTES} bytes with no newline"),
-            ));
-        }
-        Ok(line)
+        let deadline = Instant::now() + EXCHANGE_DEADLINE;
+        self.write_all(request.as_bytes(), deadline)?;
+        self.write_all(b"\n", deadline)?;
+        self.read_line(deadline)
     }
+
+    fn write_all(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
+        let mut sent = 0;
+        while sent < bytes.len() {
+            let chunk = &bytes[sent..];
+            let io = self.io.as_mut().expect("a live connection has its buffers");
+            io.scratch.clear();
+            io.scratch.extend_from_slice(chunk);
+            let moved = self.run(true, chunk.len(), deadline, "writing a request")?;
+            if moved == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "agwinterm accepted none of the request",
+                ));
+            }
+            sent += moved;
+        }
+        Ok(())
+    }
+
+    /// Reads until a newline, the cap, the deadline, or the host hanging up.
+    fn read_line(&mut self, deadline: Instant) -> io::Result<String> {
+        loop {
+            if let Some(at) = self.carry.iter().position(|byte| *byte == b'\n') {
+                let rest = self.carry.split_off(at + 1);
+                let line = std::mem::replace(&mut self.carry, rest);
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+            // Capped, because this read is on the render thread and the reply is one
+            // line from a peer that only has to be listening on the name to be
+            // talking to us. `cli/src/control.ts` caps its half of the identical
+            // protocol for the same reason. Only the reply that *fills* the cap is
+            // refused; one that simply ends at EOF without its newline is still a
+            // reply, and was accepted before.
+            let room = MAX_REPLY_BYTES.saturating_sub(self.carry.len() as u64);
+            if room == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("agwinterm's reply passed {MAX_REPLY_BYTES} bytes with no newline"),
+                ));
+            }
+            let want = room.min(READ_CHUNK as u64) as usize;
+            let io = self.io.as_mut().expect("a live connection has its buffers");
+            io.scratch.clear();
+            io.scratch.resize(want, 0);
+            let read = match self.run(false, want, deadline, "waiting for a reply") {
+                Ok(read) => read,
+                // A hangup is not an error here — it ends the reply. Which of the
+                // three the kernel reports depends on how the server end went away.
+                Err(err) if ended(&err) => 0,
+                Err(err) => return Err(err),
+            };
+            if read == 0 {
+                if self.carry.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "agwinterm closed the control pipe before answering",
+                    ));
+                }
+                let line = std::mem::take(&mut self.carry);
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+            let io = self.io.as_ref().expect("a live connection has its buffers");
+            let chunk = io.scratch[..read].to_vec();
+            self.carry.extend_from_slice(&chunk);
+        }
+    }
+
+    /// One overlapped read or write, collected with whatever is left of `deadline`.
+    ///
+    /// `what` names the half of the exchange for the timeout message, because
+    /// "agwinterm did not answer" and "agwinterm did not take the request" are
+    /// different hosts to go and look at.
+    #[allow(unsafe_code)]
+    fn run(&mut self, write: bool, len: usize, deadline: Instant, what: &str) -> io::Result<usize> {
+        let handle: HANDLE = self
+            .pipe
+            .as_ref()
+            .expect("a live connection has its handle")
+            .as_raw_handle()
+            .cast();
+        let io = self.io.as_mut().expect("a live connection has its buffers");
+        io.ov = OVERLAPPED::default();
+        let len = u32::try_from(len).expect("READ_CHUNK and one request line both fit a u32");
+        let buffer = io.scratch.as_mut_ptr();
+        let overlapped: *mut OVERLAPPED = &raw mut io.ov;
+        // SAFETY: `handle` is the live pipe borrowed for this call; `buffer` points
+        // at `len` bytes of `scratch`, which the caller just sized; `overlapped`
+        // points at the boxed `OVERLAPPED`. Both outlive the operation — that is what
+        // `PendingIo` and the leak in `drop` are for. The null count pointer is the
+        // documented form for an overlapped call, whose byte count comes from
+        // `GetOverlappedResultEx` instead.
+        let started = unsafe {
+            if write {
+                WriteFile(handle, buffer, len, std::ptr::null_mut(), overlapped)
+            } else {
+                ReadFile(handle, buffer, len, std::ptr::null_mut(), overlapped)
+            }
+        };
+        if started == 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                return Err(err);
+            }
+        }
+        // Even a synchronous completion is collected here, so there is one path that
+        // turns an `OVERLAPPED` into a byte count.
+        let mut moved: u32 = 0;
+        let wait = millis_until(deadline);
+        // SAFETY: as above; `moved` is a live local for the duration of the call.
+        let done = unsafe { GetOverlappedResultEx(handle, overlapped, &mut moved, wait, 0) };
+        if done != 0 {
+            return Ok(moved as usize);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(WAIT_TIMEOUT as i32) {
+            return Err(err);
+        }
+        self.give_up(handle, overlapped, &mut moved);
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "agwinterm did not respond within {} ms while {what}",
+                EXCHANGE_DEADLINE.as_millis()
+            ),
+        ))
+    }
+
+    /// Cancels a timed-out operation and decides whether the connection can still be
+    /// closed.
+    #[allow(unsafe_code)]
+    fn give_up(&mut self, handle: HANDLE, overlapped: *mut OVERLAPPED, moved: &mut u32) {
+        // SAFETY: `handle` and `overlapped` are the ones the operation was started
+        // with, and both are still alive — `overlapped` points into the box this
+        // connection owns.
+        unsafe {
+            CancelIoEx(handle, overlapped);
+        }
+        // Cancellation is an ask, not an act: the operation completes when the kernel
+        // gets to it, with `ERROR_OPERATION_ABORTED`. Waiting for that is what makes
+        // the buffers reusable — or, here, freeable.
+        //
+        // SAFETY: as above.
+        let settled =
+            unsafe { GetOverlappedResultEx(handle, overlapped, moved, CANCEL_GRACE_MS, 0) };
+        if settled == 0 && io::Error::last_os_error().raw_os_error() == Some(WAIT_TIMEOUT as i32) {
+            // A cancellation that will not complete leaves the kernel holding
+            // pointers into this connection. Freeing them is the one thing worse than
+            // leaking them, so the connection is abandoned instead.
+            self.abandoned = true;
+        }
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if !self.abandoned {
+            return;
+        }
+        // An operation the kernel has not finished with may still write into
+        // `scratch` and into the `OVERLAPPED`, and closing the handle does not change
+        // that. So both are leaked, and the handle with them: `CloseHandle` is what
+        // would let the address space be reused underneath the write.
+        //
+        // Unreachable in practice — a cancelled pipe read completes in microseconds —
+        // and it costs one buffer and one handle when it is not.
+        crate::logging::warn(
+            "agwinterm",
+            "a timed-out control-pipe operation would not cancel; \
+             the connection is abandoned rather than closed",
+        );
+        std::mem::forget(self.pipe.take());
+        std::mem::forget(self.io.take());
+    }
+}
+
+/// Whether an error out of a read means "the reply ended", as opposed to "the read
+/// failed".
+///
+/// A named pipe reports the far end going away as a failed `ReadFile` rather than as
+/// zero bytes, so the three ways agwinterm can vanish mid-reply all arrive here.
+fn ended(err: &io::Error) -> bool {
+    matches!(err.kind(), io::ErrorKind::BrokenPipe)
+        || matches!(
+            err.raw_os_error(),
+            Some(ERROR_NO_DATA) | Some(ERROR_PIPE_NOT_CONNECTED)
+        )
+}
+
+/// The deadline as the `dwMilliseconds` a Win32 wait takes, saturating at zero.
+fn millis_until(deadline: Instant) -> u32 {
+    u32::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(u32::MAX)
 }
 
 /// Whether a failed exchange is worth re-dialling for, as opposed to reporting.
@@ -404,6 +675,12 @@ impl Connection {
 /// The distinction that matters: "the host went away mid-conversation" is
 /// recoverable, "there is no host" is not — otherwise a missing agwinterm would be
 /// retried forever instead of explained once.
+///
+/// [`io::ErrorKind::TimedOut`] is deliberately absent. A host that accepted the
+/// request and then went quiet has not gone away; replaying the request would ask a
+/// host that is already behind to do the work twice, and would spend a second
+/// [`EXCHANGE_DEADLINE`] finding out. The connection is dropped and the error is
+/// reported — the caller is better placed to decide than a retry loop is.
 fn recoverable(err: &io::Error) -> bool {
     if matches!(
         err.kind(),
@@ -827,8 +1104,9 @@ pub(crate) mod fixture {
     //! second guess about Win32 rather than a second check of the same one.
 
     use super::*;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::windows::io::FromRawHandle;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
 
@@ -850,7 +1128,20 @@ pub(crate) mod fixture {
         /// shape of a host that exits, or of `ControlServer.cs:84` swallowing an
         /// `IOException` mid-conversation.
         Hangup,
+        /// Answer, but only after this long. A host that is slow rather than stuck,
+        /// which is the case [`EXCHANGE_DEADLINE`] must *not* fail.
+        ReplyAfter(Duration, String),
+        /// Read the request and then answer nothing at all, holding the connection
+        /// open. This is the failure the deadline exists for: not a pipe that died,
+        /// which the client already recovers from, but a live one nobody is going to
+        /// speak on. It ends when the [`PipeServer`] is dropped, or after
+        /// [`STALL_CAP`] so that a test which forgets to drop it still terminates.
+        Stall,
     }
+
+    /// The longest a [`Turn::Stall`] holds its thread if nothing tells it to stop.
+    /// Far past any deadline under test; it is a backstop, not a timing knob.
+    const STALL_CAP: Duration = Duration::from_secs(30);
 
     /// A real named-pipe server, scripted turn by turn.
     ///
@@ -861,6 +1152,8 @@ pub(crate) mod fixture {
     pub(crate) struct PipeServer {
         pub(crate) name: String,
         requests: Arc<Mutex<Vec<String>>>,
+        /// Set by [`PipeServer::drop`] so a stalling turn lets go of its thread.
+        closing: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
 
@@ -873,6 +1166,7 @@ pub(crate) mod fixture {
                 SEQ.fetch_add(1, Ordering::Relaxed)
             );
             let requests = Arc::new(Mutex::new(Vec::new()));
+            let closing = Arc::new(AtomicBool::new(false));
             // The constructor does not return until the first instance exists.
             // Without this the client races the server thread and every pipe test
             // below fails as "no such pipe", which is a different test.
@@ -880,7 +1174,8 @@ pub(crate) mod fixture {
             let thread = std::thread::spawn({
                 let name = name.clone();
                 let requests = Arc::clone(&requests);
-                move || serve(&name, turns, &requests, &ready)
+                let closing = Arc::clone(&closing);
+                move || serve(&name, turns, &requests, &closing, &ready)
             });
             listening
                 .recv()
@@ -889,6 +1184,7 @@ pub(crate) mod fixture {
             Self {
                 name,
                 requests,
+                closing,
                 thread: Some(thread),
             }
         }
@@ -927,9 +1223,13 @@ pub(crate) mod fixture {
 
     impl Drop for PipeServer {
         fn drop(&mut self) {
-            // Deliberately not joined: a script the test did not exhaust leaves the
-            // thread parked in `ConnectNamedPipe`, and joining it would hang the
-            // suite. The handle is dropped, the thread ends with the process.
+            // A stalling turn is the one kind of thread that *can* be released, and
+            // releasing it closes the connection the test left open.
+            self.closing.store(true, Ordering::Relaxed);
+            // Otherwise deliberately not joined: a script the test did not exhaust
+            // leaves the thread parked in `ConnectNamedPipe`, and joining it would
+            // hang the suite. The handle is dropped, the thread ends with the
+            // process.
             drop(self.thread.take());
         }
     }
@@ -985,6 +1285,7 @@ pub(crate) mod fixture {
         name: &str,
         turns: Vec<Turn>,
         requests: &Arc<Mutex<Vec<String>>>,
+        closing: &Arc<AtomicBool>,
         ready: &std::sync::mpsc::SyncSender<io::Result<()>>,
     ) {
         let mut pending = match instance(name) {
@@ -1029,6 +1330,25 @@ pub(crate) mod fixture {
                             return;
                         }
                     }
+                    Some(Turn::ReplyAfter(delay, reply)) => {
+                        std::thread::sleep(delay);
+                        let pipe = reader.get_mut();
+                        if pipe.write_all(reply.as_bytes()).is_err()
+                            || pipe.write_all(b"\n").is_err()
+                        {
+                            return;
+                        }
+                    }
+                    // Hold the connection open and say nothing. Returning would close
+                    // it, which is the *other* failure — the one the client already
+                    // recovers from.
+                    Some(Turn::Stall) => {
+                        let cap = Instant::now() + STALL_CAP;
+                        while !closing.load(Ordering::Relaxed) && Instant::now() < cap {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        return;
+                    }
                     // Break out to close this connection and accept a fresh one.
                     Some(Turn::Hangup) => break,
                     None => return,
@@ -1053,7 +1373,9 @@ mod tests {
     use super::fixture::{PipeServer, Turn};
     use super::*;
     use std::collections::HashMap;
-    use std::io::Read;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn env_of(pairs: &[(&str, &str)]) -> SessionEnv {
         SessionEnv::of_session(
@@ -1517,6 +1839,119 @@ mod tests {
             err.to_string().contains("pixel-core-absent"),
             "the message should say which pipe: {err}",
         );
+    }
+
+    // -- the deadline -----------------------------------------------------
+    //
+    // A pipe that dies is already handled above. These are about the pipe that
+    // does not: a host that took the request, holds the connection, and never
+    // speaks. Before Task 5 that read blocked forever on the render thread.
+
+    #[test]
+    fn a_host_that_accepts_and_never_answers_fails_on_the_deadline() {
+        let server = PipeServer::scripted(vec![Turn::Stall]);
+        let mut client = server.client();
+
+        let started = Instant::now();
+        let err = client.ping().expect_err("nothing will ever answer");
+        let waited = started.elapsed();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(
+            err.to_string().contains("waiting for a reply"),
+            "the message should say which half of the exchange stalled: {err}",
+        );
+        assert!(
+            waited >= EXCHANGE_DEADLINE,
+            "gave up after {waited:?}, before the deadline it promised",
+        );
+        assert!(
+            waited < EXCHANGE_DEADLINE * 3,
+            "{waited:?} is not a bounded wait",
+        );
+    }
+
+    #[test]
+    fn a_timed_out_request_is_not_replayed_onto_a_pipe_of_unknown_state() {
+        // The reconnect above exists for a host that *went away*. This one did
+        // not: it may still be about to answer, and asking twice would both
+        // double the work and spend a second deadline on it.
+        let server = PipeServer::scripted(vec![Turn::Stall]);
+        let mut client = server.client();
+
+        client.ping().expect_err("nothing will ever answer");
+
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "a timed-out request was replayed: {:?}",
+            server.requests(),
+        );
+    }
+
+    #[test]
+    fn a_timeout_is_not_a_pipe_that_went_away() {
+        // The rule the test above depends on, stated where `request` reads it.
+        assert!(!recoverable(&io::Error::new(
+            io::ErrorKind::TimedOut,
+            "agwinterm did not respond",
+        )));
+    }
+
+    #[test]
+    fn a_slow_host_is_still_answered_rather_than_cut_off() {
+        // The deadline is a deadline, not an eagerness to fail. A quarter of a
+        // second is twenty-four times the slowest round trip the frame budget
+        // measured and still well inside the bound.
+        let slow = Duration::from_millis(250);
+        let server = PipeServer::scripted(vec![Turn::ReplyAfter(
+            slow,
+            r#"{"ok":true,"result":"pong"}"#.to_owned(),
+        )]);
+        let mut client = server.client();
+
+        let started = Instant::now();
+        assert_eq!(client.ping().unwrap(), "pong");
+        assert!(
+            started.elapsed() >= slow,
+            "the fixture answered early, so this proved nothing",
+        );
+    }
+
+    #[test]
+    fn a_thread_blocked_on_a_stalling_host_can_still_be_joined() {
+        // `PixelEngine::stop` sets its flag, wakes the render thread and joins it
+        // (`pixel-node/src/lib.rs`). Joining is the whole risk: the thread can only
+        // notice the flag between exchanges, so shutdown takes however long the
+        // exchange in flight takes. This is that shape, with the exchange that used
+        // to take forever.
+        let server = PipeServer::scripted(vec![Turn::Stall]);
+        let mut client = server.client();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let render = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = client.ping();
+                }
+            }
+        });
+
+        // Long enough that the thread is inside the stalled exchange, so the flag
+        // is set at the moment that used to be unrecoverable.
+        std::thread::sleep(Duration::from_millis(100));
+        stop.store(true, Ordering::Relaxed);
+
+        let give_up_at = Instant::now() + EXCHANGE_DEADLINE * 4;
+        while !render.is_finished() && Instant::now() < give_up_at {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            render.is_finished(),
+            "the render thread is still in the exchange, so `stop` would hang",
+        );
+        render.join().expect("the render thread does not panic");
     }
 
     // -- cell metrics -----------------------------------------------------
