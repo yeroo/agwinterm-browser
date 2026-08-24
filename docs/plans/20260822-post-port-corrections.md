@@ -81,16 +81,16 @@ Task 4 below is not a formality.
 
 ### Task 1: A recovery command for a wrecked pane
 
-- [ ] add a `pane-clear` (or `doctor`) verb to the CLI that calls `clearPaneFrame` and
+- [x] add a `pane-clear` (or `doctor`) verb to the CLI that calls `clearPaneFrame` and
       `restorePaneConsole` against the current pane and exits
-- [ ] register it in `cli/src/help.ts` alongside the other verbs, with body text saying
+- [x] register it in `cli/src/help.ts` alongside the other verbs, with body text saying
       what it fixes: a frame left painted over the shell, and a console left with mouse
       reporting on, the cursor hidden, or the alternate buffer active
-- [ ] make it work when the engine is **not** running — that is its whole purpose; it
+- [x] make it work when the engine is **not** running — that is its whole purpose; it
       must not require an instance in the registry
-- [ ] make it succeed loudly when there was nothing to fix, so a user cannot tell
+- [x] make it succeed loudly when there was nothing to fix, so a user cannot tell
       "it worked" from "it did nothing" only by the pane looking the same
-- [ ] **do not clear a placement this browser did not make.** `openInForeground`
+- [x] **do not clear a placement this browser did not make.** `openInForeground`
       (`cli/src/main.ts:484`) sends `image.clear` on every exit path with no test for
       whether anything was ever drawn. The engine deliberately does the opposite:
       `FramePublisher::clear` (`engine/crates/pixel-core/src/frame_file.rs:485`) returns
@@ -99,12 +99,12 @@ Task 4 below is not a formality.
       it runs when things are already broken — so it needs the engine's rule, not the
       CLI's. Note this cuts against "succeed loudly when there was nothing to fix":
       resolve it as *report* that nothing was owned, rather than clear anyway
-- [ ] fix `openInForeground`'s unconditional clear at the same time, since the verb and
+- [x] fix `openInForeground`'s unconditional clear at the same time, since the verb and
       the exit path are the two halves of one mechanism
-- [ ] write tests for the verb dispatching to both halves
-- [ ] write tests for it running with no browser alive and no instance registered
-- [ ] write tests for it reporting cleanly when `AGWINTERM_PIPE` is unset
-- [ ] run tests — must pass before Task 2
+- [x] write tests for the verb dispatching to both halves
+- [x] write tests for it running with no browser alive and no instance registered
+- [x] write tests for it reporting cleanly when `AGWINTERM_PIPE` is unset
+- [x] run tests — must pass before Task 2
 
 ### Task 2: Do not paint into the user's live terminal during development
 

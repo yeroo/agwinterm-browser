@@ -31,7 +31,7 @@ import {
 } from "./launch";
 import type { LaunchPlan } from "./launch";
 import { lsCommand } from "./ls";
-import { clearPaneFrame, restorePaneConsole } from "./pane";
+import { clearOwnedPaneFrame, paneClearCommand, restorePaneConsole } from "./pane";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -481,7 +481,17 @@ async function openInForeground(argv: string[]): Promise<number> {
     // engine clears it on an ordinary exit; this covers the exits that run no
     // destructor. Failure means the placement is gone anyway, so it cannot change
     // the exit code.
-    await clearPaneFrame(process.env);
+    //
+    // `clearOwnedPaneFrame` rather than `clearPaneFrame`, and the pid is the point:
+    // this used to fire unconditionally, which is the CLI contradicting the engine's
+    // own rule that a publisher which never published has nothing to take back and
+    // "asking anyway would clear a placement some *other* process owns"
+    // (`frame_file.rs`). A browser that failed before its first frame — a missing
+    // artifact, a refused pane, an instant crash — would otherwise take down
+    // whatever the pane was showing before it started. The engine names its frame
+    // directory after this process, so this is the exact question, not the broad one
+    // `pane-clear` has to settle for.
+    await clearOwnedPaneFrame(process.env, { pid: child.pid });
     // And the console with it. The engine put *this* process's console on the
     // alternate screen, hid the cursor and turned on mouse reporting; `ModeGuard`
     // undoes that on an ordinary exit and not on any of the exits above, so the
@@ -825,6 +835,14 @@ async function main(): Promise<number> {
   if (asksForHelp(args)) {
     process.stdout.write(commandHelp(command) ?? rootHelp());
     return 0;
+  }
+  // Deliberately ahead of everything that needs something to be working. No
+  // `requirePaneAccess`, no terminal detection, no registry lookup: the pane this
+  // repairs is one whose browser is gone, and every check above would be a way for
+  // the recovery to fail on the same wreckage it was called to clean up.
+  if (command === "pane-clear") {
+    if (args.length > 0) fail(`unexpected ${args[0]} — pane-clear takes no arguments`);
+    return paneClearCommand();
   }
   if (command === "open") {
     await openCommand(args);

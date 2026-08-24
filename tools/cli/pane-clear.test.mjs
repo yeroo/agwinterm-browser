@@ -39,6 +39,7 @@ async function loadModule(relative) {
 }
 
 const pane = await loadModule("cli/src/pane.ts");
+const help = await loadModule("cli/src/help.ts");
 const mainSource = fs.readFileSync(path.join(REPO, "cli", "src", "main.ts"), "utf8");
 
 const PIPE_PREFIX = "\\\\.\\pipe\\";
@@ -231,7 +232,7 @@ describe("the CLI's foreground wait", () => {
     // The ordering is the whole point: clearing before the wait would take the
     // picture down while the browser is still drawing it.
     const wait = body.indexOf("await Promise.race([exited, stopped])");
-    const clear = body.indexOf("clearPaneFrame(process.env)");
+    const clear = body.indexOf("clearOwnedPaneFrame(process.env");
     assert.ok(wait > 0, "openInForeground no longer waits for the child");
     assert.ok(clear > wait, "the clear does not follow the wait");
   });
@@ -240,7 +241,7 @@ describe("the CLI's foreground wait", () => {
     // The browser's exit code is the pane's exit code (`docs/design/03-process-model.md`).
     // A failed cleanup of a placement that is already gone must not overwrite it.
     assert.match(body, /const code = await Promise\.race/);
-    assert.match(body, /await clearPaneFrame\(process\.env\);[\s\S]*return code;/);
+    assert.match(body, /await clearOwnedPaneFrame\(process\.env[^;]*\);[\s\S]*return code;/);
   });
 
   it("listens for the signals that used to skip the clear entirely", () => {
@@ -271,7 +272,7 @@ describe("the CLI's foreground wait", () => {
     // and leave a browser about to attach to that same console -- eating its keys
     // and painting over it, which is what `pane.ts` exists to prevent.
     const kill = body.indexOf("if (running) await terminateTree(child)");
-    const clear = body.indexOf("clearPaneFrame(process.env)");
+    const clear = body.indexOf("clearOwnedPaneFrame(process.env");
     assert.ok(kill > 0, "a browser that outlived the signal is no longer terminated");
     assert.ok(kill < clear, "the pane is taken back before the browser is stopped");
   });
@@ -394,12 +395,405 @@ describe("giving the console back, which is the other half of giving the pane ba
       mainSource.indexOf("async function openInForeground"),
       mainSource.indexOf("async function attachHere"),
     );
-    const clear = body.indexOf("clearPaneFrame(process.env)");
+    const clear = body.indexOf("clearOwnedPaneFrame(process.env");
     const restore = body.indexOf("restorePaneConsole()");
+    assert.ok(clear > 0, "the frame half left the foreground wait");
     assert.ok(restore > clear, "the console is not restored after the frame is cleared");
     assert.ok(
       restore < body.indexOf("return code"),
       "the restore does not happen before the exit code is returned",
     );
+  });
+});
+
+// -- the recovery verb ---------------------------------------------------------
+//
+// Everything above runs on `openInForeground`'s way out, which covers a browser that
+// died and not a CLI that died with it. The pane found eighteen hours later — stale
+// frame, SGR mouse reports streaming into the shell prompt — had been left by a run
+// where neither half ever ran, and was recovered by hand over the control pipe. That
+// hand recovery is what `pane-clear` automates, so what is tested here is that one
+// command does both halves and needs nothing that a wrecked pane has already lost.
+
+/** The engine's frame-directory naming, read out of the Rust that defines it. */
+function rustFrameNaming() {
+  const source = fs.readFileSync(
+    path.join(REPO, "engine", "crates", "pixel-core", "src", "frame_file.rs"),
+    "utf8",
+  );
+  const prefix = /const DIR_PREFIX: &str = "([^"]+)";/.exec(source);
+  assert.ok(prefix, "DIR_PREFIX is no longer where this test looks for it");
+  const file = /join\(format!\("frame-\{seq:(\d+)\}\.png"\)\)/.exec(source);
+  assert.ok(file, "the frame file name is no longer where this test looks for it");
+  return { prefix: prefix[1], width: Number(file[1]) };
+}
+
+/**
+ * A frame directory the way a killed browser leaves one.
+ *
+ * `frames: 0` is the browser that died before drawing anything, which is the
+ * engine's `written.is_empty()` — a directory exists, nothing was ever placed.
+ */
+function leftoverFrames(root, pid, frames = 1) {
+  const dir = path.join(root, `${pane.FRAME_DIR_PREFIX}${pid}-0`);
+  fs.mkdirSync(dir, { recursive: true });
+  for (let seq = 0; seq < frames; seq += 1) {
+    fs.writeFileSync(path.join(dir, `frame-${String(seq).padStart(8, "0")}.png`), "");
+  }
+  return dir;
+}
+
+/** A fresh, empty temp root per test, so one test's leftovers are not another's. */
+function freshRoot(t, name) {
+  const root = fs.mkdtempSync(path.join(scratch, `${name}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+/** `process.stdout` and `process.stdin` as recorders. */
+function recorder() {
+  const written = [];
+  const calls = [];
+  return {
+    written,
+    calls,
+    out: { write: (chunk) => written.push(chunk) },
+    input: {
+      isTTY: true,
+      setRawMode: (raw) => calls.push(`raw:${raw}`),
+      pause: () => calls.push("pause"),
+    },
+    get text() {
+      return written.join("");
+    },
+  };
+}
+
+describe("whose placement it is", () => {
+  // `FramePublisher::clear` returns early when nothing was published, because
+  // "asking anyway would clear a placement some *other* process owns". The CLI
+  // shipped an unconditional clear instead. `ownedFrames` is that rule read off the
+  // filesystem: the directory survives the exits `Drop` does not.
+
+  it("spells the directory and the frame file the way the engine does", () => {
+    // Two copies of a naming scheme in two languages is a drift risk, and drifting
+    // means the CLI stops recognising its own browser's frames -- which presents as
+    // `pane-clear` refusing to clear the pane it was called to fix.
+    const naming = rustFrameNaming();
+    assert.equal(pane.FRAME_DIR_PREFIX, naming.prefix);
+    const root = fs.mkdtempSync(path.join(scratch, "naming-"));
+    const dir = path.join(root, `${naming.prefix}4242-0`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, `frame-${"0".repeat(naming.width)}.png`), "");
+    assert.ok(pane.ownedFrames({ root }), "the engine's own frame file is not recognised");
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("finds the frames a killed browser left behind", (t) => {
+    const root = freshRoot(t, "owned");
+    const dir = leftoverFrames(root, 4242, 3);
+    assert.deepEqual(pane.ownedFrames({ root }), { dir, pid: 4242, frames: 3 });
+  });
+
+  it("owns nothing when the browser exited cleanly", (t) => {
+    // `FrameDir`'s `Drop` removes the directory, and the engine has already sent
+    // the clear. Nothing on this pane is ours to take down.
+    const root = freshRoot(t, "clean");
+    assert.equal(pane.ownedFrames({ root }), null);
+  });
+
+  it("owns nothing when a browser died before it drew anything", (t) => {
+    // The directory is created by `FramePublisher::new` and the first frame may
+    // never arrive -- a refused pane, an unwritable frame directory, an instant
+    // crash. `written` would be empty; so is this.
+    const root = freshRoot(t, "undrawn");
+    leftoverFrames(root, 4242, 0);
+    assert.equal(pane.ownedFrames({ root }), null);
+  });
+
+  it("ignores directories that are not a publisher's", (t) => {
+    const root = freshRoot(t, "foreign");
+    const other = path.join(root, "some-other-tool-4242");
+    fs.mkdirSync(other);
+    fs.writeFileSync(path.join(other, "frame-00000000.png"), "");
+    assert.equal(pane.ownedFrames({ root }), null);
+  });
+
+  it("asks about one pid when the caller knows which process it spawned", (t) => {
+    // `openInForeground` does: the engine names the directory after the process the
+    // CLI started, so the exit path can ask the exact question rather than the broad
+    // one `pane-clear` is left with.
+    const root = freshRoot(t, "bypid");
+    const mine = leftoverFrames(root, 4242, 1);
+    leftoverFrames(root, 9999, 1);
+    assert.equal(pane.ownedFrames({ root, pid: 4242 }).dir, mine);
+    assert.equal(pane.ownedFrames({ root, pid: 1234 }), null);
+  });
+
+  it("does not let one pid adopt another's frames by prefix", (t) => {
+    // Without the trailing separator, pid 424 would claim 4242's directory and clear
+    // a placement it never made -- the exact rule this is here to keep.
+    const root = freshRoot(t, "prefix");
+    leftoverFrames(root, 4242, 1);
+    assert.equal(pane.ownedFrames({ root, pid: 424 }), null);
+  });
+
+  it("reports the most recent wreck when there is more than one", (t) => {
+    const root = freshRoot(t, "recent");
+    leftoverFrames(root, 1111, 1);
+    const newer = leftoverFrames(root, 2222, 1);
+    fs.utimesSync(newer, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+    assert.equal(pane.ownedFrames({ root }).pid, 2222);
+  });
+
+  it("never throws on a temp directory it cannot read", () => {
+    assert.equal(pane.ownedFrames({ root: path.join(scratch, "nothing-here") }), null);
+  });
+
+  it("sends no clear at all when nothing is owned", async (t) => {
+    // The point of the rule: a pane holding someone else's picture is left holding
+    // it. Reported, not cleared.
+    const host = hostOn(`winterm-owned-${process.pid}-none`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "noclear");
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, timeoutMs: 500 },
+    );
+
+    assert.equal(outcome.owned, null);
+    assert.equal(outcome.cleared, false);
+    assert.ok(outcome.request, "it still worked out where a clear would have gone");
+    assert.deepEqual(host.lines, [], "it cleared a placement it does not own");
+  });
+
+  it("sends the clear when the frames are ours", async (t) => {
+    const host = hostOn(`winterm-owned-${process.pid}-yes`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "doclear");
+    leftoverFrames(root, 4242, 2);
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, timeoutMs: 1_000 },
+    );
+
+    assert.equal(outcome.cleared, true);
+    assert.equal(outcome.owned.frames, 2);
+    assert.equal(host.lines.length, 1);
+    assert.deepEqual(JSON.parse(host.lines[0]), { cmd: "image.clear", target: "pane-1" });
+  });
+});
+
+describe("the pane-clear verb", () => {
+  it("does both halves in one command", async (t) => {
+    // The two halves are the whole design: the picture and the console modes are
+    // separate state restored by separate mechanisms, and a command that sends only
+    // the escapes leaves the pane holding a page over the shell.
+    const host = hostOn(`winterm-verb-${process.pid}-both`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "verb-both");
+    const dir = leftoverFrames(root, 4242, 5);
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      out: rec.out,
+      input: rec.input,
+      root,
+      timeoutMs: 1_000,
+    });
+
+    assert.equal(code, 0);
+    assert.equal(host.lines.length, 1, "the frame half did not run");
+    assert.deepEqual(JSON.parse(host.lines[0]), { cmd: "image.clear", target: "pane-1" });
+    assert.ok(rec.written.includes(pane.DISABLE_REPORTING), "the console half did not run");
+    assert.deepEqual(rec.calls, ["raw:false", "pause"], "the SetConsoleMode half did not run");
+    assert.match(rec.text, /frame: +cleared/);
+    assert.ok(rec.text.includes(dir), "it does not say which frames it found");
+    assert.match(rec.text, /pid 4242/);
+  });
+
+  it("restores the console before it prints, or the report is thrown away", () => {
+    // `DISABLE_REPORTING` ends with `?1049l`. Printing first would put the report on
+    // the alternate screen and then leave it -- the one arrangement where a command
+    // that worked is indistinguishable from one that did nothing.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
+    const body = source.slice(source.indexOf("export async function paneClearCommand"));
+    const restore = body.indexOf("restorePaneConsole(out");
+    const print = body.indexOf("paneClearReport(");
+    assert.ok(restore > 0 && print > restore, "the report is written before the console is back");
+  });
+
+  it("says so out loud when there was nothing to fix", async (t) => {
+    // A pane that was already fine looks exactly like a pane this just repaired, so
+    // the report is the only way to tell them apart.
+    const host = hostOn(`winterm-verb-${process.pid}-clean`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "verb-clean");
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      out: rec.out,
+      input: rec.input,
+      root,
+      timeoutMs: 500,
+    });
+
+    assert.equal(code, 0);
+    assert.deepEqual(host.lines, [], "it cleared a placement it does not own");
+    assert.match(rec.text, /nothing of ours to clear/);
+    assert.match(rec.text, /left alone/);
+    assert.ok(rec.written.includes(pane.DISABLE_REPORTING), "the console half was skipped");
+  });
+
+  it("needs no browser, no host and no instance registered", async (t) => {
+    // Which is the whole point: the pane it repairs is one where all three are gone.
+    // Nothing is listening on this pipe and there is no registry anywhere in reach.
+    const root = freshRoot(t, "verb-alone");
+    leftoverFrames(root, 4242, 1);
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: inPane({
+        AGWINTERM_PIPE: `winterm-verb-${process.pid}-absent`,
+        AGWINTERM_SESSION_ID: "pane-1",
+      }),
+      out: rec.out,
+      input: rec.input,
+      root,
+      timeoutMs: 500,
+    });
+
+    assert.equal(code, 0, "a dead host turned the repair into a failure");
+    assert.match(rec.text, /unanswered/);
+    assert.ok(rec.written.includes(pane.DISABLE_REPORTING), "the half that never needed a host");
+  });
+
+  it("reports cleanly when AGWINTERM_PIPE is unset", async (t) => {
+    // Unset means `agwinterm`, which is what agwintermctl falls back to -- and which
+    // is the *production* instance. Saying which pipe it used is how a user notices
+    // they are addressing the wrong one.
+    const root = freshRoot(t, "verb-nopipe");
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: { AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "pane-1" },
+      out: rec.out,
+      input: rec.input,
+      root,
+      timeoutMs: 200,
+    });
+
+    assert.equal(code, 0);
+    assert.match(rec.text, /pipe agwinterm \(AGWINTERM_PIPE unset\)/);
+    assert.match(rec.text, /session pane-1/);
+  });
+
+  it("says there is no pane rather than pretending, outside one", async (t) => {
+    const root = freshRoot(t, "verb-nopane");
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, root });
+
+    assert.equal(code, 0);
+    assert.match(rec.text, /no agwinterm pane/);
+    // The console half still runs: modes are this console's state whether or not
+    // anything is holding a picture over it, and the reset is idempotent.
+    assert.ok(rec.written.includes(pane.DISABLE_REPORTING));
+  });
+
+  it("names the frames it found even when it cannot address a pane", async (t) => {
+    // Running it in the wrong shell is a thing users do. Silence there reads as
+    // "nothing was wrong"; this says where to run it instead.
+    const root = freshRoot(t, "verb-wrongshell");
+    leftoverFrames(root, 4242, 2);
+    const rec = recorder();
+
+    await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, root });
+
+    assert.match(rec.text, /2 frame\(s\)/);
+    assert.match(rec.text, /run this from the pane/);
+  });
+
+  it("reports a console it could not write to rather than claiming success", () => {
+    const thrower = () => {
+      throw new Error("EPIPE");
+    };
+    const report = pane.paneClearReport({}, { request: null, owned: null, cleared: false }, false);
+    assert.match(report.join("\n"), /console: could not be written to/);
+    // And the command survives the stream that did it.
+    assert.doesNotThrow(() => pane.restorePaneConsole({ write: thrower }, {}));
+  });
+});
+
+describe("how the CLI dispatches pane-clear", () => {
+  const main = mainSource.slice(mainSource.indexOf("async function main("));
+  const branch = main.slice(main.indexOf('command === "pane-clear"'));
+
+  it("has a verb in front of it at all", () => {
+    // `clearPaneFrame` and `restorePaneConsole` were library functions with one
+    // caller on one exit path. A user whose pane is wrecked could not reach either.
+    assert.match(main, /command === "pane-clear"/);
+    assert.match(mainSource, /import \{[^}]*paneClearCommand[^}]*\} from "\.\/pane"/);
+  });
+
+  it("runs before anything that could fail on the same wreckage", () => {
+    // No sandbox check, no terminal detection, no registry lookup: each of those is
+    // a way for the recovery to die on exactly what it was called to clean up.
+    const at = main.indexOf('command === "pane-clear"');
+    assert.ok(at > 0);
+    assert.ok(
+      !branch.slice(0, branch.indexOf("return paneClearCommand()")).includes("requirePaneAccess"),
+      "pane-clear gates itself behind a sandbox check",
+    );
+    assert.ok(
+      at < main.indexOf("currentTerminal()"),
+      "pane-clear is dispatched after the terminal has to be detected",
+    );
+  });
+
+  it("is listed and documented, with what it fixes on the page", () => {
+    const page = help.commandHelp("pane-clear", "win32");
+    assert.ok(page, "pane-clear has no help page");
+    for (const symptom of [/alternate screen/, /cursor/, /mouse reporting/, /placement/]) {
+      assert.match(page, symptom, "the page does not say what it fixes");
+    }
+    const line = help
+      .rootHelp("win32")
+      .split("\n")
+      .find((entry) => entry.trim().startsWith("pane-clear"));
+    assert.ok(line, "pane-clear is not in the command list");
+    assert.ok(!line.includes("not supported"), "the recovery command is listed as refused");
+  });
+});
+
+describe("the foreground exit path clears only what it drew", () => {
+  const body = mainSource.slice(
+    mainSource.indexOf("async function openInForeground"),
+    mainSource.indexOf("async function attachHere"),
+  );
+
+  it("asks whether this browser ever placed a frame", () => {
+    // It used to send `image.clear` unconditionally, which is the CLI contradicting
+    // the engine's own rule (`FramePublisher::clear`): a browser that died before its
+    // first frame would take down whatever the pane was showing beforehand.
+    assert.match(body, /clearOwnedPaneFrame\(process\.env, \{ pid: child\.pid \}\)/);
+    assert.ok(
+      !/\bawait clearPaneFrame\(process\.env\)/.test(body),
+      "the unconditional clear is still on the exit path",
+    );
+  });
+
+  it("asks about the process it started, not about any browser on the machine", () => {
+    // The engine names its frame directory after its own pid, so the exit path can
+    // ask the exact question. `pane-clear` cannot -- that process is long gone.
+    assert.match(body, /pid: child\.pid/);
   });
 });

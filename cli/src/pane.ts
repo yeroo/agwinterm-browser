@@ -21,10 +21,16 @@
 // console off the alternate screen and out of raw mode, and it is skipped by exactly
 // the same exits.
 //
-// Kept apart from `main.ts` and importing only `node:net`, so the addressing rules
-// can be tested without a pane, a pipe or an Electron.
+// Kept apart from `main.ts` and importing only node builtins, so the addressing
+// rules can be tested without a pane, a pipe or an Electron. That constraint is also
+// why `pane-clear` — the recovery verb `main.ts` dispatches to — lives down here: it
+// runs when the engine is gone, the registry is empty and nothing else in the
+// workspace can be relied on to load.
 
+import fs from "node:fs";
 import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 
 /** agwinterm's control-pipe verb for "take the placement off this pane". */
 export const CLEAR_CMD = "image.clear";
@@ -195,4 +201,234 @@ export function restorePaneConsole(
     }
   } catch {}
   return written;
+}
+
+// -- whose placement is it -----------------------------------------------------
+//
+// `FramePublisher::clear` (`engine/crates/pixel-core/src/frame_file.rs`) returns
+// early when nothing was ever published, and says why: "asking anyway would clear a
+// placement some *other* process owns". The CLI shipped the opposite rule — an
+// unconditional `image.clear` on every exit path — and the recovery verb is where
+// that matters most, because it runs against a pane that is already broken and may
+// well be holding a picture this browser had no part in.
+//
+// The engine can consult `written`; the CLI cannot, because the process that held it
+// is the one that died. What survives it is the frame directory. A publisher creates
+// `%TEMP%\terminal-browser-frames-<pid>-<seq>` and writes `frame-00000000.png` into
+// it per frame, and `FrameDir`'s `Drop` removes the whole directory on the way out —
+// so the directory existing *with a frame file in it* is exactly the state the
+// engine's `written` is non-empty in, left on disk for whoever comes after:
+//
+//   - ordinary quit — `Drop` ran, directory gone, engine already sent the clear
+//   - `taskkill /F`  — directory survives with frames in it, nobody sent the clear
+//   - died before drawing — directory survives, empty, nothing was ever placed
+//
+// which is `written.is_empty()` read from the filesystem instead of from memory.
+// `tools/cli/pane-clear.test.mjs` reads the prefix and the frame-file name out of
+// the Rust so the two spellings cannot drift.
+
+/** Mirrors `DIR_PREFIX` in `frame_file.rs`. */
+export const FRAME_DIR_PREFIX = "terminal-browser-frames-";
+
+/** Mirrors `FramePublisher::path_for`'s `frame-{seq:08}.png`. */
+const FRAME_FILE = /^frame-\d{8}\.png$/;
+
+/** Evidence that a browser placed a frame and never took it back. */
+export interface OwnedFrames {
+  /** The frame directory it was left in. */
+  dir: string;
+  /** The pid in that directory's name, or null when it does not parse. */
+  pid: number | null;
+  /** How many frame files are in it. Never zero — an empty directory is not owned. */
+  frames: number;
+}
+
+export interface OwnedFramesOptions {
+  /** Where publishers put their directories. Defaults to `os.tmpdir()`. */
+  root?: string;
+  /**
+   * Only accept the directory this pid left behind.
+   *
+   * `openInForeground` knows which process it spawned and the engine names its
+   * directory after that pid, so the exit path can ask the precise question. The
+   * `pane-clear` verb runs when that process is long gone and its pid unknowable,
+   * so it asks the broad one.
+   */
+  pid?: number;
+}
+
+/**
+ * The frame directory proving a browser drew on this machine and did not clean up,
+ * or `null`. Never throws — it is read on paths that must not fail.
+ *
+ * Returns the *newest* match, so a pane wrecked twice reports the wreck the user is
+ * actually looking at.
+ */
+export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | null {
+  const root = options.root ?? os.tmpdir();
+  let names: string[];
+  try {
+    names = fs.readdirSync(root);
+  } catch {
+    return null;
+  }
+  // The trailing `-` matters: without it a pid of 123 would adopt 1234's frames.
+  const wanted =
+    options.pid === undefined ? FRAME_DIR_PREFIX : `${FRAME_DIR_PREFIX}${options.pid}-`;
+  let best: OwnedFrames | null = null;
+  let bestAt = -Infinity;
+  for (const name of names) {
+    if (!name.startsWith(wanted)) continue;
+    const dir = path.join(root, name);
+    let frames = 0;
+    let at = -Infinity;
+    try {
+      for (const entry of fs.readdirSync(dir)) if (FRAME_FILE.test(entry)) frames += 1;
+      at = fs.statSync(dir).mtimeMs;
+    } catch {
+      continue;
+    }
+    // An empty directory is a browser that died before it drew anything, which is
+    // the engine's `written.is_empty()` case: nothing was placed, so nothing is ours.
+    if (frames === 0) continue;
+    if (at <= bestAt) continue;
+    const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
+    best = { dir, pid: Number.isFinite(pid) ? pid : null, frames };
+    bestAt = at;
+  }
+  return best;
+}
+
+/** What one attempt at taking the picture back actually did. */
+export interface PaneClearOutcome {
+  /** Where the clear would have gone, or `null` when the environment names no pane. */
+  request: ClearRequest | null;
+  /** The frames a dead browser left behind, or `null` when it owns nothing here. */
+  owned: OwnedFrames | null;
+  /** True only when the host answered the clear. */
+  cleared: boolean;
+}
+
+/**
+ * `clearPaneFrame` under the engine's rule: send nothing when nothing is owned.
+ *
+ * Reports rather than clears, which is the resolution of the tension between "say so
+ * loudly when there was nothing to fix" and "do not clear a placement this browser
+ * did not make" — the caller gets a `null` `owned` to print, not a pane whose picture
+ * was taken down on a guess.
+ */
+export async function clearOwnedPaneFrame(
+  env: PaneEnv,
+  options: OwnedFramesOptions & { timeoutMs?: number } = {},
+): Promise<PaneClearOutcome> {
+  const request = paneClearRequest(env);
+  const owned = ownedFrames(options);
+  if (!request || !owned) return { request, owned, cleared: false };
+  const cleared = await clearPaneFrame(env, options.timeoutMs ?? 1_000);
+  return { request, owned, cleared };
+}
+
+// -- the recovery verb ---------------------------------------------------------
+
+export interface PaneClearOptions {
+  env?: PaneEnv;
+  out?: PaneOutput;
+  input?: PaneInput;
+  timeoutMs?: number;
+  root?: string;
+}
+
+/**
+ * `terminal-browser pane-clear`: give the pane back, from outside the browser.
+ *
+ * Everything above runs on `openInForeground`'s way out, which covers a browser that
+ * died — and not a CLI that died with it. A `taskkill /F` on the *foreground job*, a
+ * console that went away underneath both, a pane recovered by hand over the control
+ * pipe eighteen hours later: those exits run neither half, and until this verb there
+ * was no second chance at either. So it needs no engine, no instance in the registry
+ * and no browser alive; a wrecked pane is defined by all three being gone.
+ *
+ * Always exits 0. It is a repair tool run against something already broken, and there
+ * is no failure here that leaves the pane worse than it found it — a clear the host
+ * never answered means the placement is gone anyway. What it owes the user instead is
+ * a report specific enough to tell "it worked" from "it did nothing", because the
+ * pane looking normal afterwards is consistent with both.
+ */
+export async function paneClearCommand(options: PaneClearOptions = {}): Promise<number> {
+  const env = options.env ?? process.env;
+  const out = options.out ?? process.stdout;
+  const outcome = await clearOwnedPaneFrame(env, {
+    root: options.root,
+    timeoutMs: options.timeoutMs,
+  });
+  // The console goes back before anything is printed. `DISABLE_REPORTING` ends with
+  // `?1049l`, so a report written first lands on the alternate screen and is thrown
+  // away with it — the one arrangement in which this command genuinely looks like it
+  // did nothing.
+  const restored = restorePaneConsole(out, options.input ?? process.stdin);
+  for (const line of paneClearReport(env, outcome, restored)) out.write(`${line}\n`);
+  return 0;
+}
+
+/**
+ * What the verb says it did. Pure, so the wording is testable without a pane.
+ *
+ * Every branch names the state it found, not just the action it took: "nothing to
+ * clear" and "cleared" have the same visible result on a pane whose browser exited
+ * cleanly, and the difference between them is the whole diagnostic value.
+ */
+export function paneClearReport(
+  env: PaneEnv,
+  outcome: PaneClearOutcome,
+  consoleRestored: boolean,
+): string[] {
+  const lines: string[] = [];
+  if (outcome.request) {
+    const pipe = nonempty(env, "AGWINTERM_PIPE");
+    const where = pipe ? `pipe ${pipe}` : `pipe ${DEFAULT_PIPE} (AGWINTERM_PIPE unset)`;
+    const target = (JSON.parse(outcome.request.line) as { target: string }).target;
+    lines.push(`pane-clear: ${where}, session ${target}`);
+  } else {
+    lines.push("pane-clear: no agwinterm pane in this environment");
+  }
+
+  if (!outcome.owned) {
+    lines.push(
+      outcome.request
+        ? `  frame:   nothing of ours to clear — no ${FRAME_DIR_PREFIX}* directory under ` +
+          `${os.tmpdir()} holds a frame, so any picture on this pane was placed by ` +
+          "something else and was left alone"
+        : "  frame:   nothing to clear — no frames of ours were left behind, and there " +
+          "is no pane here to address anyway",
+    );
+  } else if (!outcome.request) {
+    lines.push(
+      `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, but this ` +
+        "shell is not an agwinterm pane, so there is nowhere to send the clear — run " +
+        "this from the pane that was drawn on",
+    );
+  } else if (outcome.cleared) {
+    lines.push(
+      `  frame:   cleared — a browser${owner(outcome.owned)} left ${outcome.owned.frames} ` +
+        `frame(s) in ${outcome.owned.dir} and never took the picture back`,
+    );
+  } else {
+    lines.push(
+      `  frame:   image.clear went unanswered — a browser${owner(outcome.owned)} left ` +
+        `${outcome.owned.frames} frame(s) in ${outcome.owned.dir}, and the host did not ` +
+        "reply, so either that placement is already gone or that pane is",
+    );
+  }
+
+  lines.push(
+    consoleRestored
+      ? "  console: mouse reporting off, bracketed paste off, cursor shown, back on the " +
+        "primary buffer and out of raw mode"
+      : "  console: could not be written to — nothing was restored",
+  );
+  return lines;
+}
+
+function owner(owned: OwnedFrames): string {
+  return owned.pid === null ? "" : ` (pid ${owned.pid})`;
 }

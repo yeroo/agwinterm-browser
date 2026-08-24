@@ -114,6 +114,35 @@ fully quit terminal-browser operations, you can use this shutdown command. This 
 close all open browsers.
 `,
   },
+  "pane-clear": {
+    summary: "Repair a terminal pane a dead browser left unusable",
+    usage: "terminal-browser pane-clear",
+    body: `
+Gives the pane back after a browser stopped without cleaning up. Run it in the
+pane that is wrong; it needs no browser running and no instance registered,
+which is the whole point of it.
+
+It fixes two things, and they are separate:
+
+  the frame     A picture drawn in a pane is a placement the terminal holds
+                until something replaces it, so the last page a browser drew
+                outlives the process that drew it and stays painted over the
+                shell running underneath. The pane is a working terminal that
+                cannot be read.
+  the console   The browser also puts the console on the alternate screen,
+                hides the cursor and turns on mouse reporting. Left on, the
+                shell comes back cursorless and echoless, and every mouse
+                move over the pane types escape bytes at the prompt.
+
+Both are normally undone when the browser exits. Neither is undone by an exit
+that runs no cleanup: a force-kill, a crash, or the terminal closing the pane
+out from under it.
+
+It prints what it found, so "it worked" and "there was nothing wrong" do not
+look the same, and it will not take down a picture this browser never drew —
+if the placement is someone else's it says so and leaves it alone.
+`,
+  },
   action: {
     summary: "Use the open browser through the agent-browser CLI",
     usage: "terminal-browser action [selectors] -- <command>",
@@ -184,6 +213,13 @@ Not supported on Windows:
 Not supported on Windows:
   There is no daemon to stop — each browser runs in its own pane
   (docs/design/03-process-model.md). Close one with q, or stop its process.
+`,
+  "pane-clear": `
+On Windows:
+  The pane is the one AGWINTERM_SESSION_ID names, on the pipe AGWINTERM_PIPE
+  names (agwinterm, unset), so run it in the affected pane rather than
+  anywhere in the same window. Outside an agwinterm pane there is no placement
+  to take back and only the console half runs.
 `,
   setup: `
 On Windows:
