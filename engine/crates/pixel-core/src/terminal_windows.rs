@@ -2639,13 +2639,21 @@ mod tests {
         // never turns any-motion mouse reporting on. Guarding only the frame left the
         // console half of the wreck reachable on the engine-direct path, where a
         // `taskkill /F` runs no `ModeGuard::drop` and the pane stays that way.
-        let err = refuse_unlisted_instance(&pane_env(Some("agwinterm"), Some("agwinterm-dev")))
-            .expect_err("a dev build started against an unlisted instance");
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(
-            err.to_string().contains(agwinterm::ALLOW_PIPE_VAR),
-            "the refusal has to name the way out, and this is the only place it is read: {err}",
-        );
+        //
+        // The guard is a dev-build one, so the refusal only exists under
+        // `debug_assertions`; `cargo test --release` runs the shipped behaviour, where
+        // the variable is not consulted at all and the console is taken as usual.
+        let refused = refuse_unlisted_instance(&pane_env(Some("agwinterm"), Some("agwinterm-dev")));
+        if cfg!(debug_assertions) {
+            let err = refused.expect_err("a dev build started against an unlisted instance");
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                err.to_string().contains(agwinterm::ALLOW_PIPE_VAR),
+                "the refusal has to name the way out, and this is the only place it is read: {err}",
+            );
+        } else {
+            refused.expect("a release build takes the console the pane named");
+        }
 
         // Everything else `from_env` says no to means "there is no pane to draw
         // into", which a browser degrades quietly through rather than dying of.

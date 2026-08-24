@@ -564,6 +564,20 @@ describe("whose placement it is", () => {
       pane.ownedFrames({ root, pane: MINE }),
       "the engine's own frame file is not recognised",
     );
+
+    // The width is a pad, not a cap. A publisher whose sequence has run past it
+    // writes a longer name, and a pattern anchored to the pad exactly would stop
+    // recognising the frames right when the session has been up long enough to be
+    // worth recovering.
+    const long = path.join(root, `${naming.prefix}4243-0`);
+    fs.mkdirSync(long);
+    fs.writeFileSync(path.join(long, `frame-${"9".repeat(naming.width + 1)}.png`), "");
+    fs.writeFileSync(path.join(long, naming.marker), `${MINE.pipe}\n${MINE.target}\n`);
+    assert.equal(
+      pane.ownedFrames({ root, pane: MINE, pid: 4243 })?.frames,
+      1,
+      "a sequence past the pad width is still this engine's frame",
+    );
     fs.rmSync(root, { recursive: true, force: true });
   });
 

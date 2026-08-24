@@ -412,8 +412,13 @@ export function restorePaneConsole(
 /** Mirrors `DIR_PREFIX` in `frame_file.rs`. */
 export const FRAME_DIR_PREFIX = "terminal-browser-frames-";
 
-/** Mirrors `FramePublisher::path_for`'s `frame-{seq:08}.png`. */
-const FRAME_FILE = /^frame-\d{8}\.png$/;
+/**
+ * Mirrors `FramePublisher::path_for`'s `frame-{seq:08}.png`. The eight is a minimum
+ * width, not a cap: a long-lived publisher's sequence runs past it, and matching
+ * exactly eight digits would stop counting frames at that point — which presents as
+ * `pane-clear` declining to repair a pane that is still painted.
+ */
+const FRAME_FILE = /^frame-\d{8,}\.png$/;
 
 /** Mirrors `PANE_FILE` in `frame_file.rs`: the pipe, then the session id. */
 export const FRAME_PANE_FILE = "pane";
