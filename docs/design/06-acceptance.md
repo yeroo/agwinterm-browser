@@ -208,9 +208,9 @@ the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **452 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 395 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **364 passed**, 88 suites, 8.7 s wall clock |
+| `cargo nextest run --workspace` | **453 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 396 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **366 passed**, 88 suites, 8.5 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -274,8 +274,8 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 73 |
-| `agwinterm.rs` | 48 | | `vendor-check/inventory.test.mjs` | 37 |
+| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 75 |
+| `agwinterm.rs` | 49 | | `vendor-check/inventory.test.mjs` | 37 |
 | `frame_file.rs` | 40 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
@@ -283,13 +283,13 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 123 |
 
-Counted on 2026-08-24; the node column sums to the 364 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 73),
-`agwinterm.rs` (29 → 48, the exchange deadline) and `terminal_windows.rs` (38 → 54).
+Counted on 2026-08-24; the node column sums to the 366 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 75),
+`agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
 five of each are that round's: the frame roots the engine could have chosen, a pid the
 caller asked about and does not have, the evidence consumed with the placement it
-authorised, and the two ends of the `u32` a Win32 wait must never be given. The five
+authorised, and the two ends of the `u32` a Win32 wait must never be given. The eight
 rounds below carry them the rest of the way.
 
 A second review round moved seven more, and all seven are about the same seam — which
@@ -351,6 +351,53 @@ and `tools/acceptance/pane-clear.test.mjs` gained the stray argument, which is t
 command line the verb does not exit 0 for. The same round scoped the frame roots to the
 environment the caller handed over: `os.tmpdir()` answers for this process and no
 other, so it is a root only when there is no other environment to answer for.
+
+A seventh round moved one, and it is about a name compared two ways in one file. The
+`TERMINAL_BROWSER_ALLOW_PIPE` allow-list matched its entry exactly while `sameMark`,
+at the other end of the same module, folded the case of the same identifier and said
+why: the object manager resolves a pipe name case-insensitively, so `Agwinterm-Dev` and
+`agwinterm-dev` are one instance. All three readers now fold it — `pipeAllowed`
+(`pane.ts`), `pipeRefusal` (`unsupported.ts`) and `allows_pipe` (`agwinterm.rs`) —
+and `pane-clear.test.mjs` (73 → 74) pins the axis, with a `HOST_CASES` row and a Rust
+case keeping the other two level. The guard failed closed, so what this fixes is a
+developer refused from the instance they had put on the list, by a message naming a
+value they could see was already there. The fold is **ASCII** in all three, which the
+same round's review had to correct: the TypeScript copies reached for `toLowerCase`,
+a Unicode fold no `eq_ignore_ascii_case` matches, and an entry spelling
+`AGWINTERM-KIOSK` with a U+212A KELVIN SIGN would have cleared CLI preflight for the
+engine to refuse a frame at a time later. All three now carry that row; no count
+moved, because the axis was already pinned and only the fold under it changed.
+
+An eighth round moved none, and all of it is about the same identifier compared by
+readers that had to agree. `sameMark` was still the Unicode fold the seventh round
+took out of the allow-list, and its operand is the one this module validates least —
+`frameMark` reads the pipe name off a marker file in temp and trims it, where the
+allow-list at least came from a variable the developer typed. It folds with
+`asciiLower` now, so a marker spelling `AGWINTERM-KIOSK` with a U+212A KELVIN SIGN is
+not read as this pane's: `FrameDir::mark_pane` only ever writes a `valid_pipe_name`,
+so a marker that is not ASCII is one something else planted, and adopting it would
+have been `pane-clear` deleting another tool's directory. The same round put the
+padding on one definition too — `String.trim` and `str::trim` disagree about U+FEFF
+and U+0085, so an entry an editor prefixed with a byte-order mark cleared the CLI and
+was refused by the engine — and spelled the KELVIN SIGN as `\u{212a}` in the two
+JavaScript fixtures, the way `agwinterm.rs` already spelled it, so the row and the
+all-ASCII control beneath it stop rendering as two identical lines asserting opposite
+results. No count moved: every case landed as an assertion inside a test that was
+already there, or as a `HOST_CASES` row.
+
+A ninth round moved two, and both are the half of the padding rule the eighth round
+left untested. The union trim landed on every reader, but every fixture carrying a
+U+FEFF or a U+0085 sat on the allow-list — so reverting either `nonempty` to its
+language's own trim left the suite green, and the address is where the disagreement
+actually costs a pane: a session id padded with a NEL had the CLI clearing
+`"s1\u{85}"` while the engine drew on `"s1"`, and `sameMark` then declined the wreck
+the engine's own marker named. `pane-clear.test.mjs` (74 → 75) and `agwinterm.rs`
+(48 → 49) assert the *resolved* target, endpoint and window selector rather than a
+request that is merely non-null, and a `HOST_CASES` row carries the pipe variable
+through the third reader. The same round took `str::trim` out of the two TypeScript
+doc comments, which named it as the set both languages had to agree on while their own
+bodies explained it is not — the engine spells `trimmed` out precisely because
+`str::trim` is the wrong half.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

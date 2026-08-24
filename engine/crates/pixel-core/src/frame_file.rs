@@ -93,9 +93,24 @@ const FRAME_IMAGE_ID: u32 = 1;
 /// fresh connection after the host dropped the first one.
 const RETAINED: usize = 3;
 
-/// Directories older than this belonged to a process that is gone. A live
-/// publisher creates a file inside its directory every frame, which keeps the
-/// directory's own timestamp fresh, so nothing in use is ever this old.
+/// How old a directory has to be before [`sweep_stale`] reclaims it.
+///
+/// A publisher that is *painting* refreshes its directory's timestamp for free:
+/// every frame creates a file inside it. An idle one does not — a browser sitting
+/// on a static page writes nothing, so age is a bound on the last frame, not on
+/// liveness, and an hour of it does not mean the process is gone. That is why
+/// [`FramePublisher::write_frame`] recreates a directory swept out from under it and
+/// [`FrameDir::remark`] puts the pane marker back; without those, a live browser's
+/// next frame would fail and its wreck would stop being attributable to `pane-clear`.
+///
+/// Both of those run *on the next frame*, which leaves one window they do not cover:
+/// an idle publisher swept out, then killed before it repaints, has no directory and
+/// so no wreck for `pane-clear` to attribute — its placement stays on the pane and
+/// the recovery verb reports nothing owned. Closing that would mean sweeping on
+/// liveness rather than age, and [`sweep_stale`] says why this does not: a pid is
+/// reused, so a liveness test would strand real wrecks for as long as some unrelated
+/// process holds the number, which is the commoner failure and the unbounded one. An
+/// hour is chosen to make the window rare rather than to make it impossible.
 const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 /// Shared by every publisher's directory, so [`sweep_stale`] can recognise one.
@@ -355,10 +370,13 @@ impl Drop for FrameDir {
 /// Removes the frame directories of processes that did not get to run their `Drop`.
 ///
 /// By age, not by liveness: asking whether a pid is still alive is both racy (pids
-/// are reused) and more Win32 than this needs. A directory in use gains a file
-/// every frame, so its timestamp is never [`STALE_AFTER`] old. Every error is
-/// ignored — a directory another live browser is holding open is exactly the case
-/// where failing to delete it is correct.
+/// are reused) and more Win32 than this needs. The trade is that age only tracks
+/// *painting* — a directory gains a file every frame, so a browser drawing anything
+/// at all stays fresh, but an idle one goes quiet and can pass [`STALE_AFTER`] while
+/// still holding its pane. [`FramePublisher::write_frame`] and [`FrameDir::remark`]
+/// are what make that survivable rather than fatal. Every error is ignored — a
+/// directory another live browser is holding open is exactly the case where failing
+/// to delete it is correct.
 ///
 /// `older_than` is a parameter rather than [`STALE_AFTER`] read directly so the
 /// tests can drive both sides of the threshold in their own root, instead of

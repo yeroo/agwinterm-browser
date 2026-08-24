@@ -163,6 +163,41 @@ function paneAddress(env: PaneEnv): PaneAddress | null {
 }
 
 /**
+ * `agwinterm.rs`'s `trimmed`, as an edge trim: the Unicode `White_Space` property,
+ * plus U+FEFF. That set is neither language's own trim but the union of the two,
+ * which is why the engine spells `trimmed` out instead of calling `str::trim`.
+ *
+ * `String.trim` is not the same set as `str::trim`, and every rule this module
+ * shares with the engine is applied to a trimmed value, so the two disagree on the
+ * two code points where the sets part. ECMAScript counts U+FEFF ZWNBSP as
+ * whitespace and Unicode `White_Space` does not, so `String.trim` takes a byte-order
+ * mark off the front of an entry and `str::trim` leaves it on — a
+ * `TERMINAL_BROWSER_ALLOW_PIPE` written by an editor that prefixes one would clear
+ * CLI preflight and be refused by the engine. U+0085 NEL parts the other way, and
+ * refuses at the CLI a list the engine would have allowed. Trimming the union keeps
+ * the two readers on one answer; which answer matters less than that it is one.
+ */
+const PADDING = /^[\s\u0085]+|[\s\u0085]+$/g;
+
+/** A value with the shell's padding taken off, the way the engine's `trimmed` takes it. */
+function trimmed(value: string): string {
+  return value.replace(PADDING, "");
+}
+
+/**
+ * Rust's `str::eq_ignore_ascii_case`, as a fold: `A`-`Z` and nothing else.
+ *
+ * `toLowerCase` is the Unicode fold and would map U+212A KELVIN SIGN onto `k`, which
+ * no `eq_ignore_ascii_case` in the engine does. Where the two sides of a comparison
+ * are both ASCII the difference cannot show, so this is for the operands `PIPE_NAME`
+ * has not been over: an entry a developer typed into `TERMINAL_BROWSER_ALLOW_PIPE`
+ * ([`pipeAllowed`]), and a pipe name read back off disk ([`sameMark`]).
+ */
+function asciiLower(value: string): string {
+  return value.replace(/[A-Z]/g, (upper) => upper.toLowerCase());
+}
+
+/**
  * Whether an allow-list names this pipe. `*` names every pipe, and a list with
  * nothing in it is an unset variable rather than a list that allows nothing —
  * `set TERMINAL_BROWSER_ALLOW_PIPE=` is how a shell spells "off".
@@ -170,15 +205,32 @@ function paneAddress(env: PaneEnv): PaneAddress | null {
  * `allows_pipe` in `agwinterm.rs`, character for character, including the two
  * separators: a `cmd.exe` `set` treats a comma as an argument separator, so a
  * developer who writes one means a list.
+ *
+ * The entry compares case-insensitively for the reason [`sameMark`] does: the object
+ * manager resolves pipe names case-insensitively, so `Agwinterm-Dev` and
+ * `agwinterm-dev` are one instance and a guard that told them apart would refuse the
+ * very instance the developer put on the list. `*` is matched before the fold because
+ * it is a literal, not a name.
+ *
+ * The fold is ASCII-only, which is what `eq_ignore_ascii_case` means and what
+ * `toLowerCase` would not have been. Only one of the two operands is constrained:
+ * `pipe` has been through `PIPE_NAME` (`valid_pipe_name` in the engine), but a list
+ * entry is whatever the variable held, split and trimmed and nothing else. An entry
+ * that is not ASCII but Unicode-folds to the pipe — `AGWINTERM-KIOSK` with its first
+ * `K` written as U+212A KELVIN SIGN, against a pipe of `agwinterm-kiosk` — is one
+ * `toLowerCase` matches and `allows_pipe` cannot, since that weighs 17 bytes against
+ * 15. Folding the way the engine folds is what keeps this copy character for
+ * character, rather than letting the CLI pass a launch the engine then refuses.
  */
 export function pipeAllowed(list: string | null | undefined, pipe: string): boolean {
   if (!list) return true;
   const entries = list
     .split(/[,;]/)
-    .map((entry) => entry.trim())
+    .map((entry) => trimmed(entry))
     .filter((entry) => entry.length > 0);
   if (entries.length === 0) return true;
-  return entries.some((entry) => entry === "*" || entry === pipe);
+  const folded = asciiLower(pipe);
+  return entries.some((entry) => entry === "*" || asciiLower(entry) === folded);
 }
 
 /**
@@ -231,8 +283,10 @@ export function pipeRefusal(env: PaneEnv): string | null {
   return null;
 }
 
+/** A variable with its padding taken off, or `null` when nothing is left. */
 function nonempty(env: PaneEnv, key: string): string | null {
-  const value = env[key]?.trim();
+  const raw = env[key];
+  const value = raw === undefined ? "" : trimmed(raw);
   return value ? value : null;
 }
 
@@ -548,9 +602,17 @@ function frameMark(dir: string): PaneMark | null {
  * `AGWINTERM_PIPE` is `Agwinterm-Dev` and an engine that recorded `agwinterm-dev`
  * addressed the same instance. The session id is agwinterm's own opaque string and
  * is compared as given.
+ *
+ * The fold is [`asciiLower`] for the reason [`pipeAllowed`]'s is, and this is the
+ * other place that reason applies: `pane.pipe` has been through `PIPE_NAME`, but
+ * `mark.pipe` is a line [`frameMark`] read out of a file in temp and trimmed, which
+ * this module does not validate. `FrameDir::mark_pane` only ever writes a
+ * `valid_pipe_name`, so a marker that is not ASCII is one something else planted —
+ * and `toLowerCase` would fold `AGWINTERM-KIOSK` spelled with a U+212A KELVIN SIGN
+ * onto a pane of `agwinterm-kiosk` and adopt that directory as ours to delete.
  */
 function sameMark(mark: PaneMark, pane: PaneMark): boolean {
-  return mark.pipe.toLowerCase() === pane.pipe.toLowerCase() && mark.target === pane.target;
+  return asciiLower(mark.pipe) === asciiLower(pane.pipe) && mark.target === pane.target;
 }
 
 /**
@@ -700,7 +762,21 @@ export interface PaneClearOutcome {
  */
 export async function clearOwnedPaneFrame(
   env: PaneEnv,
-  options: OwnedFramesOptions & { timeoutMs?: number } = {},
+  // `pane` is deliberately not in the accepted shape: it is derived from `env` below
+  // — the question is asked of *this* pane, not of one a caller names — and both
+  // branches of the `allOwnedFrames` call overwrite it. Naming only what is honoured
+  // makes passing it a type error rather than a silent no-op.
+  //
+  // `pane?: never` rather than leaving it off the `Pick`, because leaving it off only
+  // rejects a *fresh literal*, through the excess-property check. A caller holding an
+  // `OwnedFramesOptions` already typed — `const options: OwnedFramesOptions = { root,
+  // pane: "any" }` — passes it by structural assignability with the property intact
+  // and gets the silent no-op back. Declaring it as a property nothing can satisfy is
+  // what makes the rejection about the shape rather than about how it was spelled.
+  options: Pick<OwnedFramesOptions, "root" | "env" | "pid"> & {
+    timeoutMs?: number;
+    pane?: never;
+  } = {},
 ): Promise<PaneClearOutcome> {
   // The addressing below answers for `env`, so root discovery has to as well — see
   // [`OwnedFramesOptions.env`].

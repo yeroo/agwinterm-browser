@@ -365,6 +365,29 @@ refused an unlisted instance by default would refuse every ordinary run. Set it,
 browser addresses only the instances it names (comma- or semicolon-separated, or `*`),
 and says the variable's name when it refuses.
 
+A name is matched **case-insensitively**, because that is how the object manager
+resolves a pipe name: `Agwinterm-Dev` and `agwinterm-dev` are one instance, and a guard
+that told them apart would refuse the very instance the developer listed. `*` is
+matched before the fold, being a literal rather than a name.
+
+The fold is **ASCII-only** in all three readers — Rust's `eq_ignore_ascii_case`, and an
+`asciiLower` in the two TypeScript copies rather than `String.toLowerCase`. The pipe
+itself is ASCII by `valid_pipe_name`, so the choice only shows on the other operand: an
+entry is whatever the variable held, and `AGWINTERM-KIOSK` with its first `K` written as
+U+212A KELVIN SIGN is one a Unicode fold lowercases onto `agwinterm-kiosk` and a byte
+comparison cannot. A CLI folding the wider way would clear such a launch through
+preflight for the engine to refuse a frame at a time later.
+
+The **padding** taken off an entry is the same set in all three, which neither
+language's own trim gives: ECMAScript counts U+FEFF ZWNBSP as whitespace and
+Unicode `White_Space` does not, so `String.trim` takes a byte-order mark off an
+entry that `str::trim` leaves on — an editor that prefixes one writes a list the
+CLI passes and the engine refuses. U+0085 NEL parts the other way. Each reader
+trims the union (`PADDING` in the two TypeScript copies, `trimmed` in
+`agwinterm.rs`), and it is the same trim `AGWINTERM_PIPE` and `AGWINTERM_SESSION_ID`
+go through, since a pane addressed by one reader and drawn by another has to be
+one pane.
+
 It is enforced in **three** places, and only one of them can be debug-only. The engine's
 copy (`agwinterm.rs`'s `pipe_refusal`) takes `cfg!(debug_assertions)`, so a `--release`
 engine ignores the variable outright. The CLI's two copies cannot: `tsc` emits the same

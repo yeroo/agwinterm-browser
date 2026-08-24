@@ -246,6 +246,58 @@ describe("the host refusal", () => {
       {
         AGWINTERM_ENABLED: "1",
         AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "Agwinterm-Dev",
+        TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+      },
+      true,
+      "the object manager resolves the pipe case-insensitively, so the guard does too",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "agwinterm-kiosk",
+        // `AGWINTERM-KIOSK` with its first `K` as U+212A KELVIN SIGN. `toLowerCase`
+        // folds it onto the pipe and the engine's `eq_ignore_ascii_case` cannot, so
+        // an entry the CLI admitted here would be refused a frame at a time later.
+        TERMINAL_BROWSER_ALLOW_PIPE: "AGWINTERM-\u{212a}IOSK",
+      },
+      false,
+      "the fold is ASCII-only, the way `allows_pipe` is",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        AGWINTERM_PIPE: "agwinterm-dev",
+        // Padding is what `str::trim` calls padding, not what `String.trim` does:
+        // an editor that prefixes a byte-order mark (U+FEFF) writes an entry
+        // ECMAScript trims and Unicode `White_Space` does not, and U+0085 NEL is
+        // the pair of that. A reader trimming its own set admits a launch the
+        // engine refuses, or refuses one it would have allowed.
+        TERMINAL_BROWSER_ALLOW_PIPE: "other,\u{feff}agwinterm-dev,\u{85}other-2",
+      },
+      true,
+      "the trim is `str::trim` plus U+FEFF, in every reader",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
+        // The same union trim, on the variable that carries the *address* rather
+        // than the list. U+0085 NEL is `White_Space` and `String.trim` leaves it on,
+        // so a reader using its own trim asks `valid_pipe_name` about a name with a
+        // NEL in it and refuses a pane the engine addresses happily.
+        AGWINTERM_PIPE: "\u{85}agwinterm-dev\u{feff}",
+        TERMINAL_BROWSER_ALLOW_PIPE: "agwinterm-dev",
+      },
+      true,
+      "the pipe variable is trimmed the same way the list entries are",
+    ],
+    [
+      {
+        AGWINTERM_ENABLED: "1",
+        AGWINTERM_SESSION_ID: "s1",
         TERMINAL_BROWSER_ALLOW_PIPE: "*",
       },
       true,

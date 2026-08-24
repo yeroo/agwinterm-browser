@@ -108,6 +108,35 @@ describe("where the clear is addressed", () => {
     assert.equal(request.endpoint, `${PIPE_PREFIX}agwinterm`);
   });
 
+  it("takes the same padding off the pane's own variables as the engine does", () => {
+    // Not just the allow-list entries below: `nonempty` here and `nonempty` in
+    // `agwinterm.rs` resolve the *address*, so a reader trimming its own set does not
+    // refuse a launch -- it clears a pane the engine never drew into. U+0085 NEL is
+    // Unicode `White_Space` and `str::trim` takes it; `String.trim` does not, so an
+    // `AGWINTERM_SESSION_ID` of `"s1\u{85}"` had the CLI addressing `"s1\u{85}"` while
+    // the engine had drawn on `"s1"`, and `sameMark` then declined the wreck the
+    // engine's own marker names. U+FEFF parts the other way: `String.trim` took the
+    // byte-order mark off a pipe name the engine kept and failed `valid_pipe_name` on.
+    // Asserted on the resolved value, because a request that is merely non-null is a
+    // request delivered to the wrong pane.
+    const nel = pane.paneClearRequest(inPane({ AGWINTERM_SESSION_ID: "\u{85}s1\u{85}" }));
+    assert.equal(nel.target, "s1");
+    assert.deepEqual(JSON.parse(nel.line), { cmd: "image.clear", target: "s1" });
+    const bom = pane.paneClearRequest(
+      inPane({ AGWINTERM_SESSION_ID: "s1", AGWINTERM_PIPE: "\u{feff}agwinterm-dev\u{feff}" }),
+    );
+    assert.equal(bom.endpoint, `${PIPE_PREFIX}agwinterm-dev`);
+    // And the window selector, which rides the same helper.
+    const window = pane.paneClearRequest(
+      inPane({ AGWINTERM_SESSION_ID: "s1", AGWINTERM_WINDOW_ID: "\u{feff}win-7\u{85}" }),
+    );
+    assert.deepEqual(JSON.parse(window.line), {
+      cmd: "image.clear",
+      target: "s1",
+      window: "win-7",
+    });
+  });
+
   it("refuses the target that means whichever pane is in front", () => {
     // By the time a browser exits, "active" may well be someone else's pane.
     assert.equal(pane.paneClearRequest(inPane({ AGWINTERM_SESSION_ID: "active" })), null);
@@ -194,6 +223,40 @@ describe("the development-instance guard", () => {
     }
     assert.equal(pane.pipeAllowed("a,b", "agwinterm-dev"), false);
     assert.equal(pane.pipeAllowed(null, "anything"), true);
+  });
+
+  it("compares the pipe the way the object manager resolves it", () => {
+    // `sameMark` already folds case on this identifier and says why: `Agwinterm-Dev`
+    // and `agwinterm-dev` address one instance. A guard that told them apart would
+    // refuse the very instance the developer put on the list, with a message naming
+    // a value they can see is already there.
+    assert.equal(pane.pipeAllowed("agwinterm-dev", "Agwinterm-Dev"), true);
+    assert.equal(pane.pipeAllowed("Agwinterm-Dev", "agwinterm-dev"), true);
+    assert.equal(pane.pipeAllowed("other, AGWINTERM-DEV", "agwinterm-dev"), true);
+    // Folding a name is not folding anything else: a different name is still one.
+    assert.equal(pane.pipeAllowed("agwinterm-dev", "agwinterm-prod"), false);
+    // `*` stays a literal, matched before the fold rather than through it.
+    assert.equal(pane.pipeAllowed("*", "Agwinterm-Dev"), true);
+    // And it folds the way `allows_pipe` folds, which is ASCII and no wider. The
+    // entry is `AGWINTERM-KIOSK` with its first `K` written as U+212A KELVIN SIGN:
+    // `toLowerCase` maps that onto `k` and the engine's `eq_ignore_ascii_case`
+    // cannot, since it is weighing 17 bytes against the pipe's 15. A CLI folding the
+    // Unicode way would pass this launch through preflight for the engine to refuse
+    // a frame at a time later. Spelled as an escape, the way `agwinterm.rs` spells
+    // it: raw, the character is invisible beside the ASCII control below it, and an
+    // editor normalising it -- or a find-and-replace on `KIOSK` -- would leave two
+    // identical-looking lines asserting opposite results.
+    const kelvin = "AGWINTERM-\u{212a}IOSK";
+    assert.equal(pane.pipeAllowed(kelvin, "agwinterm-kiosk"), false);
+    // The all-ASCII control for the line above: the same entry, spelled with `K`.
+    assert.equal(pane.pipeAllowed("AGWINTERM-KIOSK", "agwinterm-kiosk"), true);
+    // And the padding it strips is the union both readers trim, which is neither
+    // language's own trim: ECMAScript counts U+FEFF ZWNBSP as whitespace and Unicode
+    // `White_Space` does not, and U+0085 NEL is the pair of that. Each reader trimming its own set is how an
+    // entry an editor prefixed with a byte-order mark passes here and is refused by
+    // `allows_pipe` -- so both sides trim the union, and both rows below are `true`.
+    assert.equal(pane.pipeAllowed("other,\u{feff}agwinterm-dev", "agwinterm-dev"), true);
+    assert.equal(pane.pipeAllowed("other,\u{85}agwinterm-dev", "agwinterm-dev"), true);
   });
 
   it("says the clear was withheld rather than reporting no pane at all", async () => {
@@ -646,6 +709,21 @@ describe("whose placement it is", () => {
       pane.ownedFrames({ root: unmarked, pid: 4242, pane: MINE }),
       "the exit path lost frames no marker disowned",
     );
+    // The marker folds case the way the object manager resolves a pipe name, and no
+    // wider: `Agwinterm` recorded by the engine and `agwinterm` in this pane are one
+    // instance. `AGWINTERM-<U+212A>IOSK` is not -- `FrameDir::mark_pane` only ever
+    // writes a `valid_pipe_name`, so a marker that is not ASCII is one something
+    // else planted, and a Unicode fold would adopt its directory as ours to delete.
+    const cased = freshRoot(t, "marker-cased");
+    leftoverFrames(cased, 4242, 1, { pipe: "Agwinterm", target: MINE.target });
+    assert.ok(
+      pane.ownedFrames({ root: cased, pane: MINE }),
+      "one instance under two spellings read as two panes",
+    );
+    const kiosk = freshRoot(t, "marker-kelvin");
+    const kelvinPane = { pipe: "agwinterm-kiosk", target: MINE.target };
+    leftoverFrames(kiosk, 4242, 1, { pipe: "AGWINTERM-\u{212a}IOSK", target: MINE.target });
+    assert.equal(pane.ownedFrames({ root: kiosk, pane: kelvinPane }), null);
   });
 
   it("owns nothing when the caller asked about a pid it does not have", (t) => {
@@ -1177,12 +1255,19 @@ describe("the pane-clear verb", () => {
       AGWINTERM_SESSION_ID: "pane-1",
       [pane.ALLOW_PIPE_VAR]: "agwinterm-dev",
     });
+    // Backslash doubled, per the rule `tools/launcher/launch.test.mjs` states: `\w`
+    // is an unrecognised escape, so "T:\wreck" written singly is "T:wreck", and `\w`
+    // on the pattern side is the word-character class, which consumes the missing
+    // separator's neighbour and passes. A frame directory is always
+    // backslash-separated (`path.join(root, name)`), so the fixture has to be too.
+    const dir = "T:\\wreck";
+    assert.ok(dir.includes("\\"), "the fixture must keep its separators to be worth asserting");
     const report = pane
       .paneClearReport(
         env,
         {
           request: null,
-          owned: { dir: "T:\wreck", pid: 4242, frames: 2 },
+          owned: { dir, pid: 4242, frames: 2 },
           cleared: false,
           refused: null,
           searched: ["T:\\"],
@@ -1192,7 +1277,7 @@ describe("the pane-clear verb", () => {
       .join("\n");
     assert.match(report, /not addressable/);
     assert.match(report, new RegExp(pane.ALLOW_PIPE_VAR));
-    assert.match(report, /2 frame\(s\) left in T:\wreck/);
+    assert.match(report, /2 frame\(s\) left in T:\\wreck/);
     assert.match(report, /no image\.clear was sent/);
     assert.match(report, /rather than provably this pane's/);
     assert.ok(!/frame: +cleared/.test(report), report);

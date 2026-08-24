@@ -136,11 +136,28 @@ export function inAgwintermPane(env: Record<string, string | undefined>): boolea
   return paneNamed(env) !== null && pipeRefusal(env) === null;
 }
 
+/**
+ * `pane.ts`'s `PADDING`, and `agwinterm.rs`'s `trimmed`: the Unicode `White_Space`
+ * property, plus U+FEFF — the union, which is neither language's own trim.
+ *
+ * `String.trim` is not `str::trim` — ECMAScript counts U+FEFF ZWNBSP as whitespace
+ * and Unicode `White_Space` does not, and U+0085 NEL parts the other way, which is
+ * why the engine spells `trimmed` out instead of calling `str::trim`. Every rule
+ * this module shares with the engine is applied to a trimmed value, so a reader
+ * trimming a different set is a reader that disagrees. See `pane.ts` for the case
+ * it costs.
+ */
+const PADDING = /^[\s\u0085]+|[\s\u0085]+$/g;
+
+/** A variable with its padding taken off, the way the engine's `trimmed` takes it. */
+const trimmed = (value: string | undefined) =>
+  value === undefined ? "" : value.replace(PADDING, "");
+
 /** The pane this environment addresses, before the pipe is considered. */
 function paneNamed(env: Record<string, string | undefined>): string | null {
-  const enabled = env.AGWINTERM_ENABLED?.trim();
+  const enabled = trimmed(env.AGWINTERM_ENABLED);
   if (!enabled || enabled === "0") return null;
-  const target = env.AGWINTERM_SESSION_ID?.trim() || env.AGWINTERM_PANE_ID?.trim();
+  const target = trimmed(env.AGWINTERM_SESSION_ID) || trimmed(env.AGWINTERM_PANE_ID);
   if (!target || target === "active") return null;
   return target;
 }
@@ -167,21 +184,28 @@ export const ALLOW_PIPE_VAR = "TERMINAL_BROWSER_ALLOW_PIPE";
  * engine consults it only under `debug_assertions`.
  */
 function pipeRefusal(env: Record<string, string | undefined>): string | null {
-  const pipe = env.AGWINTERM_PIPE?.trim() || DEFAULT_PIPE;
+  const pipe = trimmed(env.AGWINTERM_PIPE) || DEFAULT_PIPE;
   if (!PIPE_NAME.test(pipe)) {
     return (
       `AGWINTERM_PIPE=${JSON.stringify(pipe)} is not a pipe name — it may contain ` +
       "only letters, digits, `.`, `_` and `-`"
     );
   }
-  const allow = env[ALLOW_PIPE_VAR]?.trim();
-  const entries = (allow ?? "")
+  const allow = trimmed(env[ALLOW_PIPE_VAR]);
+  const entries = allow
     .split(/[,;]/)
-    .map((entry) => entry.trim())
+    .map((entry) => trimmed(entry))
     .filter((entry) => entry.length > 0);
   if (entries.length === 0) return null;
-  if (entries.some((entry) => entry === "*" || entry === pipe)) return null;
-  const source = env.AGWINTERM_PIPE?.trim()
+  // Case-insensitively, because the object manager resolves pipe names that way —
+  // see `pane.ts`'s `pipeAllowed` and `sameMark`. `*` is a literal, not a name. The
+  // fold is ASCII-only for the reason `pane.ts`'s `asciiLower` gives: an entry is the
+  // one operand `PIPE_NAME` has not been over, and `toLowerCase` would admit a
+  // homoglyph the engine's `eq_ignore_ascii_case` refuses.
+  const asciiLower = (value: string) => value.replace(/[A-Z]/g, (upper) => upper.toLowerCase());
+  const folded = asciiLower(pipe);
+  if (entries.some((entry) => entry === "*" || asciiLower(entry) === folded)) return null;
+  const source = trimmed(env.AGWINTERM_PIPE)
     ? `AGWINTERM_PIPE names ${JSON.stringify(pipe)}`
     : `AGWINTERM_PIPE is unset, so this pane resolves to ${JSON.stringify(pipe)}`;
   return (

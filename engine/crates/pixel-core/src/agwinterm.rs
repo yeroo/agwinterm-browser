@@ -303,7 +303,10 @@ fn pipe_refusal(
     // nothing: `set TERMINAL_BROWSER_ALLOW_PIPE=` and a value of spaces are both how
     // a shell spells "off", and reading either as "refuse everything" would turn the
     // guard on for someone trying to turn it off.
-    if allow.split([',', ';']).all(|entry| entry.trim().is_empty()) {
+    if allow
+        .split([',', ';'])
+        .all(|entry| trimmed(entry).is_empty())
+    {
         return None;
     }
     if allows_pipe(allow, pipe) {
@@ -328,11 +331,25 @@ fn pipe_refusal(
 /// Separators are `,` and `;` because both are what a shell hands over without
 /// quoting — `set` on `cmd.exe` treats a comma as an argument separator, and a
 /// developer who writes one means it as a list.
+///
+/// An entry compares case-insensitively because the object manager resolves pipe
+/// names that way: `Agwinterm-Dev` and `agwinterm-dev` name one instance, and a guard
+/// that told them apart would refuse the instance the developer put on the list. `*`
+/// is matched before the fold because it is a literal, not a name.
+///
+/// Only one of the two operands is checked. [`valid_pipe_name`] restricts `pipe` to
+/// ASCII; a list entry is whatever the variable held, and an entry that is not ASCII
+/// is where an ASCII fold and a Unicode one part — `AGWINTERM-KIOSK` with its first
+/// `K` written as U+212A KELVIN SIGN would lowercase onto a pipe of `agwinterm-kiosk`
+/// and cannot compare equal here, where it is 17 bytes against 15. That is why the
+/// CLI's two copies spell this `asciiLower` rather than `toLowerCase`: a `String`
+/// method that folded the wider way would have let a launch through preflight for the
+/// engine to refuse a frame at a time later.
 fn allows_pipe(list: &str, pipe: &str) -> bool {
     list.split([',', ';'])
-        .map(str::trim)
+        .map(trimmed)
         .filter(|entry| !entry.is_empty())
-        .any(|entry| entry == "*" || entry == pipe)
+        .any(|entry| entry == "*" || entry.eq_ignore_ascii_case(pipe))
 }
 
 /// Whether this process is inside an agwinterm pane at all.
@@ -343,17 +360,31 @@ fn hosted(env: &SessionEnv) -> bool {
     }
 }
 
+/// The padding a shell leaves on a variable, taken off both ends.
+///
+/// [`str::trim`] would be this, but the CLI's copies of these rules are written in
+/// JavaScript and `String.prototype.trim` is a different set: ECMAScript counts
+/// U+FEFF ZWNBSP as whitespace and Unicode `White_Space` does not, so a
+/// `TERMINAL_BROWSER_ALLOW_PIPE` entry an editor prefixed with a byte-order mark
+/// clears CLI preflight and is refused here. (U+0085 NEL parts the other way, and
+/// `pane.ts`'s `PADDING` adds it for the same reason.) Trimming the union puts the
+/// three readers on one answer, which matters more than which answer it is.
+fn trimmed(value: &str) -> &str {
+    value.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
 /// A variable's value with the shell's padding taken off, or `None` when there is
 /// nothing left.
 ///
-/// Trimmed, because the CLI's copies of these rules trim (`pane.ts`'s `nonempty` is
-/// `env[key]?.trim()`) and a reader that does not is a reader that disagrees: a pane
-/// whose `AGWINTERM_SESSION_ID` arrived as `" s3 "` had the CLI clearing `s3` and the
+/// Trimmed, because the CLI's copies of these rules trim (`pane.ts`'s `nonempty`)
+/// and a reader that does not is a reader that disagrees: a pane whose
+/// `AGWINTERM_SESSION_ID` arrived as `" s3 "` had the CLI clearing `s3` and the
 /// engine drawing into `" s3 "`, and a padded `AGWINTERM_PIPE` failed
-/// [`valid_pipe_name`] here while the CLI addressed it happily.
+/// [`valid_pipe_name`] here while the CLI addressed it happily. [`trimmed`] rather
+/// than [`str::trim`] because the two languages disagree about what padding is.
 fn nonempty(env: &SessionEnv, key: &str) -> Option<String> {
     env.var(key)
-        .map(|value| value.trim().to_owned())
+        .map(|value| trimmed(&value).to_owned())
         .filter(|value| !value.is_empty())
 }
 
@@ -1604,6 +1635,27 @@ mod tests {
     }
 
     #[test]
+    fn the_padding_taken_off_the_address_is_the_union_both_languages_trim() {
+        // The test above uses ASCII spaces, which every trim agrees about. These two
+        // code points are the ones the languages part on, and the address is where
+        // parting costs a pane rather than a launch: `String.trim` leaves U+0085 NEL
+        // on, so a session id padded with one had the CLI addressing `"s3\u{85}"`
+        // while the engine drew on `"s3"` — the clear never landed, and `sameMark`
+        // then refused the wreck the engine's own marker named. U+FEFF parts the
+        // other way, and a pipe name an editor prefixed with a byte-order mark was
+        // trimmed by the CLI and refused by `valid_pipe_name` here. [`trimmed`] is
+        // the union, so both readers resolve the same pane.
+        let target = HostTarget::from_env(&env_of(&[
+            (ENABLED_VAR, "\u{feff}1\u{85}"),
+            (SESSION_VAR, "\u{85}s3\u{feff}"),
+            (PIPE_VAR, "\u{feff}agwinterm-dev\u{85}"),
+        ]))
+        .expect("neither code point is part of the value");
+        assert_eq!(target.session(), "s3");
+        assert_eq!(target.path(), r"\\.\pipe\agwinterm-dev");
+    }
+
+    #[test]
     fn the_pane_id_stands_in_when_only_it_is_set() {
         let target = HostTarget::from_env(&env_of(&[(ENABLED_VAR, "1"), (PANE_VAR, "w1:p2")]))
             .expect("a pane id addresses a pane");
@@ -1690,6 +1742,56 @@ mod tests {
                 "{list:?} names the pipe and was refused anyway",
             );
         }
+        // And in whatever case, because the object manager resolves the name that
+        // way: these are one instance, and refusing one of them would refuse the
+        // instance the developer put on the list. The CLI's two copies fold the same
+        // (`pipeAllowed` in `pane.ts`, `pipeRefusal` in `unsupported.ts`).
+        for (list, pipe) in [
+            ("agwinterm-dev", "Agwinterm-Dev"),
+            ("Agwinterm-Dev", "agwinterm-dev"),
+            ("other, AGWINTERM-DEV", "agwinterm-dev"),
+        ] {
+            assert_eq!(
+                pipe_refusal(Some(list), pipe, true, true),
+                None,
+                "{list:?} and {pipe:?} name one instance and it was refused anyway",
+            );
+        }
+        // Folding a name is not folding anything else: a different name is still one.
+        assert!(pipe_refusal(Some("agwinterm-dev"), "agwinterm-prod", true, true).is_some());
+        // And the fold is ASCII, which is the half of the rule an all-ASCII table
+        // cannot see. The entry is `AGWINTERM-KIOSK` with its first `K` written as
+        // U+212A KELVIN SIGN: a Unicode fold lowercases it onto the pipe and this one
+        // is weighing 17 bytes against 15. The CLI's copies spell it `asciiLower`
+        // rather than `toLowerCase` so that this row reads the same on both sides.
+        let kelvin = "AGWINTERM-\u{212a}IOSK";
+        assert!(pipe_refusal(Some(kelvin), "agwinterm-kiosk", true, true).is_some());
+        assert_eq!(
+            pipe_refusal(Some("AGWINTERM-KIOSK"), "agwinterm-kiosk", true, true),
+            None,
+        );
+        // And the padding is trimmed the way the CLI trims it, which [`str::trim`]
+        // alone is not: ECMAScript counts U+FEFF ZWNBSP as whitespace and Unicode
+        // `White_Space` does not, so a byte-order mark an editor put on an entry
+        // would clear the CLI and be refused here. U+0085 NEL is the pair of that.
+        assert_eq!(
+            pipe_refusal(
+                Some("other,\u{feff}agwinterm-dev"),
+                "agwinterm-dev",
+                true,
+                true
+            ),
+            None,
+        );
+        assert_eq!(
+            pipe_refusal(
+                Some("other,\u{85}agwinterm-dev"),
+                "agwinterm-dev",
+                true,
+                true
+            ),
+            None,
+        );
     }
 
     #[test]
@@ -2065,21 +2167,26 @@ mod tests {
         // `Turn::Drip` — because a peer can be made to dribble bytes; the write side
         // cannot be provoked from here, since every request this client sends fits in
         // the pipe buffer and goes out in one move. So the guard itself is asserted:
-        // both phrasings, and the kind `recoverable` deliberately excludes so a
-        // timed-out request is never replayed onto a pipe of unknown state.
+        // the two messages the call sites actually produce, and the kind `recoverable`
+        // deliberately excludes so a timed-out request is never replayed onto a pipe
+        // of unknown state.
+        //
+        // The whole message is compared rather than only searched for the `what`.
+        // `expired` interpolates its argument, so a `contains(what)` would hold for
+        // any string at all — including one no call site passes — and could not
+        // fail. `assert_eq!` against the sentence pins the wording around the
+        // argument as well; the two arguments themselves are `write_all`'s and
+        // `read_line`'s, copied, and have to be kept level with them by hand.
         let past = Instant::now() - Duration::from_secs(1);
-        for what in ["writing a request", "reading a reply"] {
+        let spent = EXCHANGE_DEADLINE.as_millis();
+        // `write_all`'s argument and `read_line`'s, spelled as they spell them.
+        for what in ["writing a request", "waiting for a reply"] {
             let err = expired(past, what).expect_err("nothing is left of the deadline");
             assert_eq!(err.kind(), io::ErrorKind::TimedOut);
             assert!(!recoverable(&err), "a timed-out exchange would be replayed");
-            let said = err.to_string();
-            assert!(
-                said.contains(what),
-                "the timeout does not say what it was doing: {said}"
-            );
-            assert!(
-                said.contains(&EXCHANGE_DEADLINE.as_millis().to_string()),
-                "the timeout does not name the deadline it spent: {said}",
+            assert_eq!(
+                err.to_string(),
+                format!("agwinterm did not respond within {spent} ms while {what}"),
             );
         }
         expired(Instant::now() + EXCHANGE_DEADLINE, "writing a request")
