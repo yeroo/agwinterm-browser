@@ -205,8 +205,8 @@ the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **445 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 388 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `cargo nextest run --workspace` | **446 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 389 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
 | `node --test "tools/*/*.test.mjs"` | **352 passed**, 87 suites, 8.3 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |

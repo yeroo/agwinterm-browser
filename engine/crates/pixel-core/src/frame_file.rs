@@ -230,6 +230,10 @@ struct FrameDir {
     /// Set when the clear this directory authorises did not happen, so `Drop` leaves
     /// it standing. See [`FramePublisher::clear`].
     keep: bool,
+    /// What [`PANE_FILE`] holds, remembered so [`FramePublisher::write_frame`] can
+    /// put it back on a directory it had to recreate. `None` until the host has
+    /// accepted a frame, which is the only point at which there is a pane to name.
+    mark: Option<String>,
 }
 
 impl FrameDir {
@@ -269,7 +273,13 @@ impl FrameDir {
                 SEQ.fetch_add(1, Ordering::Relaxed)
             ));
             match fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path, keep: false }),
+                Ok(()) => {
+                    return Ok(Self {
+                        path,
+                        keep: false,
+                        mark: None,
+                    });
+                }
                 // A directory that already exists is a dead browser's, not ours.
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = Some(err),
                 // The temp directory itself may not exist yet on a fresh profile.
@@ -296,11 +306,31 @@ impl FrameDir {
     /// Records which pane the frames in here went to. Best-effort: a marker that
     /// could not be written costs `pane-clear` a recovery it would otherwise make,
     /// which is not worth failing a frame over.
-    fn mark_pane(&self, target: &crate::agwinterm::HostTarget) {
-        let _ = fs::write(
-            self.path.join(PANE_FILE),
-            format!("{}\n{}\n", target.pipe(), target.session()),
-        );
+    ///
+    /// The text is kept rather than only written, because the directory it goes in
+    /// is one [`FramePublisher::write_frame`] recreates — see [`FrameDir::remark`].
+    fn mark_pane(&mut self, target: &crate::agwinterm::HostTarget) {
+        let mark = format!("{}\n{}\n", target.pipe(), target.session());
+        let _ = fs::write(self.path.join(PANE_FILE), &mark);
+        self.mark = Some(mark);
+    }
+
+    /// Puts the marker back after the directory has been recreated under a live
+    /// publisher.
+    ///
+    /// Without this, the sweep that [`FramePublisher::write_frame`] recovers from
+    /// takes `pane-clear` with it: the recovery verb refuses to adopt a directory
+    /// that holds frames and names no pane (`ownedFrames`, `cli/src/pane.ts`), so a
+    /// browser whose directory was reclaimed while it sat idle — a real case, since
+    /// [`sweep_stale`] reads age, not liveness, and an idle publisher writes no
+    /// frames to keep its timestamp fresh — would go on publishing frames nothing
+    /// could ever attribute, and its wreck would be unrecoverable. Best-effort for
+    /// the same reason [`FrameDir::mark_pane`] is.
+    fn remark(&self) {
+        let Some(mark) = self.mark.as_ref() else {
+            return;
+        };
+        let _ = fs::write(self.path.join(PANE_FILE), mark);
     }
 }
 
@@ -643,10 +673,15 @@ impl FramePublisher {
     /// whose clock disagrees. Any other failure is reported and leaves the
     /// publisher usable: the sequence has already moved on, so the next frame picks
     /// a path of its own rather than retrying into a file that may be half-written.
+    ///
+    /// The recreated directory gets its marker back too: whatever removed it took
+    /// [`PANE_FILE`] as well, and a directory with frames and no marker is one
+    /// `pane-clear` will not touch. See [`FrameDir::remark`].
     fn write_frame(&self, path: &Path, png: &[u8]) -> io::Result<()> {
         match write_all_new(path, png) {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir_all(&self.dir.path)?;
+                self.dir.remark();
                 write_all_new(path, png)
             }
             other => other,
@@ -1379,6 +1414,38 @@ mod tests {
             .expect("the host takes the frame");
 
         let written = fs::read_to_string(&marker).expect("a marker beside the first frame");
+        assert_eq!(written, expected);
+    }
+
+    #[test]
+    fn a_directory_recreated_under_the_publisher_names_its_pane_again() {
+        // The two recoveries have to compose. `write_frame` recreates a directory
+        // something removed under a live publisher — and what removes it, whether
+        // that is a cleaner or another browser's `sweep_stale`, takes the marker
+        // with it. An idle browser is the realistic case: `sweep_stale` reads age,
+        // and a publisher that is not repainting writes nothing to keep its
+        // timestamp fresh. Without the marker put back, every frame after that is
+        // one `pane-clear` cannot attribute, so killing this browser would leave a
+        // pane painted and unrecoverable.
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+        let expected = format!(
+            "{}\n{}\n",
+            client.target().pipe(),
+            client.target().session()
+        );
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the first frame");
+        fs::remove_dir_all(publisher.dir()).expect("the sweep takes the whole directory");
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the directory is recreated rather than the frame lost");
+
+        let written = fs::read_to_string(&marker).expect("a marker beside the frame again");
         assert_eq!(written, expected);
     }
 
