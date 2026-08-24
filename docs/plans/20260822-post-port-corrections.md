@@ -344,16 +344,61 @@ rather than being copied, for the reason `deadline.mjs` exists: two suites now m
 same claim about bytes on a pipe, and a second copy is a second place for "what the host
 does when it stops answering" to drift.
 
-### Task 7: [Final] Update documentation
+### Task 7: [Final] Update documentation — **done 2026-08-24**
 
-- [ ] document the recovery command in `README.md`
-- [ ] correct `docs/design/06-acceptance.md` per Task 2's finding
-- [ ] add a short note to `docs/design/07-as-built.md` recording that the port shipped
+- [x] document the recovery command in `README.md`
+- [x] correct `docs/design/06-acceptance.md` per Task 2's finding
+- [x] add a short note to `docs/design/07-as-built.md` recording that the port shipped
       unreviewed by revmux and when that was remedied — the gap is part of the record
-- [ ] the round's self-contained doc corrections were already applied when it ran (the
+- [x] the round's self-contained doc corrections were already applied when it ran (the
       `presentBitmap` row, the stale "Two lesser ones" count, the README and brief
       cross-references, the backwards cell-metrics order, the milestone runner header).
       Do not redo them; check they still hold after Tasks 1-6 move the code
+
+Checked, all five, and all five still hold: the `presentBitmap` row is pinned by
+`docs.test.mjs`'s "the dropped fast paths name the presenter Windows actually runs" and
+its gate (`event.texture || shmFrame`) has not moved; "The lesser ones" carries no count
+to go stale; the README and `00-port-brief.md` both point at `06-acceptance.md` §5 for
+all three keep-unchanged divergences, and the anchor resolves; the cell-metrics order in
+§3 matches `cell_size()`'s three arms in the order it takes them; and
+`run-milestone.cmd`'s header still explains its `agwinterm-dev` default. Nothing was
+redone.
+
+What did need correcting was newer than the round. **`06-acceptance.md` §4 asserted the
+opposite of what Task 6 measured** — "the CLI is the pane's foreground job, so it
+outlives the browser by construction" — which is true only when the browser is what
+died. That sentence is now the thing the warning beside it corrects, since a criterion
+whose write-up contradicts the test that checks it is worse than one that says nothing.
+§6's results table was stale by three rows and its coverage table by nine, so both carry
+today's numbers and the date they were counted: **439** Rust (`nextest`), 382+57
+(`cargo test`), **344** node in 87 suites, clippy 12 / 0 port lines, fmt 298 / 0 port
+lines.
+
+`07-as-built.md` grew a §4 rather than absorbing the changes into §1-3, because the
+three things Tasks 1-5 added are not what the port decided — they are what it got wrong
+and what a person meets afterwards: the `TERMINAL_BROWSER_ALLOW_PIPE` guard (and why it
+is enforced twice), the 1040 ms exchange deadline with its derivation, and the review
+that did not run. §1's "Taking the picture back" went from two paths to three, with the
+ownership rule all three now share.
+
+Two things the work turned up:
+
+- **The tests are the part that does not rot.** Four new ones in
+  `tools/docs-check/docs.test.mjs`, in that file's existing idiom — assert the *names* a
+  paragraph promises still exist, never read for sense. The recovery verb the README
+  tells a user to type is dispatched by `main.ts` and carried by `help.ts`; the three
+  documented `image.clear` paths all resolve, including the exit path's
+  `clearOwnedPaneFrame(process.env, { pid: child.pid })`, whose pid argument *is* the
+  ownership rule and whose loss would be the exact regression §1 warns about; the
+  **1040** in the prose is parsed out and compared to `EXCHANGE_DEADLINE`, so a constant
+  that moves without its derivation moving fails; and `TERMINAL_BROWSER_ALLOW_PIPE` is
+  checked in `cli/src/pane.ts` as well as in `agwinterm.rs`, which is the "enforced
+  twice" claim rather than a restatement of the existing knobs test — that one only
+  reaches the engine.
+- **A count in a doc is a claim with a date on it.** Adding those four tests moved the
+  node total from 340 to 344 mid-task and falsified three sentences written minutes
+  earlier. Both tables now say when they were counted, and the coverage table's rows sum
+  to the total above it — so the next reader can tell a stale number from a wrong one.
 
 ## Deferred from the revmux round
 

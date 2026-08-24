@@ -5,8 +5,9 @@ say what was decided ([00](00-port-brief.md), [03](03-process-model.md),
 [04](04-cell-metrics.md), [05](05-cli-and-endpoints.md)) and what was checked
 ([06](06-acceptance.md)). This one says what a person running the thing actually
 meets: how a frame gets to the pane and how to force the other way, what upstream
-offers that this tree does not, and the two places where the picture is worse than
-upstream's on purpose.
+offers that this tree does not, the two places where the picture is worse than
+upstream's on purpose, and — §4 — the three things added after the port shipped,
+including the review that should have caught them and did not run.
 
 Every absence below is a decision with a reason. That is the point of writing them
 down: a missing feature with no record reads as an oversight, and the next person to
@@ -90,18 +91,44 @@ afterwards wrong. So it explains itself once per run and names the missing spec.
 Not a third transport but part of the same contract: a frame is a **placement**,
 which agwinterm holds until something replaces it. That is why switching sessions and
 back costs no repaint — and why an exiting browser leaves a page painted over a shell
-that is running underneath, readable by `session.text` and not by a person. Two paths
-send `image.clear`, because neither covers the other:
+that is running underneath, readable by `session.text` and not by a person. **Three**
+paths send `image.clear`, because no one of them covers the others:
 
 - `Terminal::drop` → `FramePublisher::clear`, for an ordinary quit or an unwind. A
   publisher that never published sends nothing: that placement belongs to whoever drew it.
-- `clearPaneFrame` (`cli/src/pane.ts`) after `openInForeground`'s wait, for the exits
+- `clearOwnedPaneFrame` (`cli/src/pane.ts`) after `openInForeground`'s wait, for the exits
   that run no destructor — `taskkill /F`, a crash, a kill from another pane. Best-effort,
   and it cannot change the exit code: every failure means the placement is gone anyway.
+- the **`pane-clear`** verb, for the exit that runs *neither*. Killing the CLI kills the
+  browser with it on Windows — a child spawned without `detached` sits in a job object
+  that terminates with its parent, which is exactly how `openInForeground` spawns — so
+  the pane's foreground job is gone and there is nobody left in the chain to clear
+  anything. It is the only one of the three a person invokes, it needs no browser running
+  and no instance registered, and it puts the **console** back as well as the frame.
 
-Both addressed by `HostTarget::from_env`'s rules, repeated deliberately, because the
-engine places the frame and the CLI takes it back and a disagreement would not error —
-it would clear someone else's pane.
+The console is the half that is easy to forget. A dead browser also leaves the alternate
+screen buffer on, the cursor hidden and mouse reporting live, so the shell comes back
+cursorless, echoless, and typing `\x1b[<…M` at the prompt on every pointer move.
+`restorePaneConsole` undoes that by **two** mechanisms rather than one — the escape
+sequences, written to stdout, and raw mode, taken back off stdin — because a recovery
+that sent only the escapes would hand back a shell that still does not echo. It runs
+before anything is printed, too: `DISABLE_REPORTING` ends with `?1049l`, so a report
+written first would land on the alternate screen and be thrown away with it, which is
+the one arrangement in which the verb genuinely looks like it did nothing.
+
+All three ask the same question first: **is this placement ours?** `FramePublisher::clear`
+answers it from its own state — it never published, so there is nothing of its to take
+back. The CLI's two answer it from disk, by looking for a `terminal-browser-frames-<pid>-*`
+directory holding a frame; the exit path knows the pid and asks the exact question, while
+`pane-clear` runs after everything is dead and can only ask the broad one. Where they
+differ is what they do with a *no*: the exit path stays quiet, and `pane-clear` **says so**
+and leaves the picture alone. That is the one place where "report that something happened"
+and "do not take down what is not yours" pull against each other, and ownership wins.
+
+All three are addressed by `HostTarget::from_env`'s rules, repeated deliberately, because
+the engine places the frame and the CLI takes it back and a disagreement would not error —
+it would clear someone else's pane. On the dev-build path they now share a guard as well:
+`TERMINAL_BROWSER_ALLOW_PIPE` (§4).
 
 ---
 
@@ -274,3 +301,93 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
   Reload; Alt+Enter because conhost sends Ctrl+Enter as `0x0a`, which is Ctrl+J, so
   `complete()` was unreachable and Enter took one more snapshot instead. macOS and Linux
   keep every binding they had.
+
+---
+
+## 4. Added after the port shipped
+
+Three things below were not in the port. They are here rather than in the corrections
+plan because this file is what a person running the thing meets, and all three change
+what they meet. The plan is
+[`20260822-post-port-corrections.md`](../plans/20260822-post-port-corrections.md).
+
+### `TERMINAL_BROWSER_ALLOW_PIPE` — a dev build refuses an instance it was not named at
+
+A pane's `AGWINTERM_PIPE` names whichever agwinterm that pane belongs to, and with the
+variable unset it is `agwinterm` — the machine's real terminal. So a browser launched
+from an ordinary shell during development publishes into *that*, and a frame is a
+placement: a force-kill leaves the page painted over a working shell with mouse
+reporting still on. That is not hypothetical. It is how a pane of the production
+instance was found wrecked eighteen hours after the port run ended
+([`06-acceptance.md`](06-acceptance.md), preamble).
+
+The guard is opt-in and **debug-only**, in that order for two different reasons. Opt-in
+because on Windows the shipped product *is* a checkout — `pnpm -r build` runs
+`cargo build -p pixel-node` with no `--release` — so a guard that refused an unlisted
+instance by default would refuse every ordinary run. Debug-only because a value left
+behind in a shell profile must never be able to stop a shipped browser drawing: a
+release build ignores the variable entirely. Set it, and a debug build publishes only
+into the instances it names (comma- or semicolon-separated, or `*`), and says the
+variable's name when it refuses.
+
+It is enforced **twice, on purpose**. `cli/src/pane.ts` imports nothing from the
+workspace — that is a deliberate constraint, so the CLI can address a pane with no build
+and no engine — which means it carries its own copy of the fallback pipe name, and a
+guard on the engine alone would leave the CLI publishing into production. The
+duplication is the same one the addressing rules already have, for the same reason, and
+it is pinned the same way: `HOST_CASES` now carries `AGWINTERM_PIPE` rows so all three
+readers of a pipe name — `inAgwintermPane`, `paneClearRequest` and the engine — are held
+to one character set and cannot drift apart again. The dev workflow the variable belongs
+to is in [the README](../../README.md#working-on-the-browser).
+
+### A control-pipe exchange has a deadline
+
+`ControlClient` used to write a request and then `read_line` with no deadline of any
+kind. A host that accepts the connection and then stalls — inside its own
+`File.ReadAllBytes`, on a `TEMP` redirected to a network share — would block the render
+thread permanently, and block *shutdown* too, since `PixelEngine::stop` joins it. The
+quieter half was `Terminal::clear_frame`, which runs from `Drop` and swallows every
+error: against a stalled host it swallowed them after blocking forever, so the browser
+could not exit either.
+
+The handle is opened `FILE_FLAG_OVERLAPPED` now, and every read and write is collected
+with `GetOverlappedResultEx` against **one** deadline for the whole exchange — the write
+and the reply share a budget rather than each getting their own. The number is
+**1040 ms**: a hundred times the 10.4 ms round trip
+[`02-frame-budget.md`](02-frame-budget.md) measures for a 2.48 Mpx frame, which is the
+slowest of the three it records. A hundredfold because that measurement is a median on
+an idle machine and the tail this must not clip is a loaded one; no more than that
+because the wait is charged to the render thread and, through the join, to shutdown. The
+odd number carries its derivation — a round second would read as a guess and would not
+move if the round trip were re-measured.
+
+A timeout is deliberately **not** retried. The one replay `request` does exists for a
+host that went *away*; a host that may still be about to answer would be asked twice and
+cost a second deadline on a pipe whose state is now unknown. It is also not latched into
+`host_absent`, which answers a different question — "is there a pane to draw into" — and
+would turn one slow frame into a browser that never draws again.
+
+### The review that did not run, and when it did
+
+This project's README says every plan and every diff is reviewed by
+[revmux](https://github.com/umputun/revmux) before acceptance, and `.revmux/` is
+committed so that standard is versioned rather than remembered. **For the fifteen tasks
+of the port, it did not happen.** `.ralphex/config` named the bridge as
+`./tools/ralphex-revmux.cmd`; ralphex invokes a custom review script as
+`exec.Command(script, promptFile)`, and a `.cmd` goes through cmd.exe, which reads the
+leading `.`/`/` as a switch prefix. Every task's review phase died on
+`'.' is not recognized as an internal or external command` — one line, scrolled past —
+and the run continued. The six `fix: address code review findings` commits in that run
+came from ralphex's own internal reviewer, not from revmux.
+
+Two of the four spellings work (`tools\ralphex-revmux.cmd`, `.\tools\ralphex-revmux.cmd`)
+and two do not; the config now uses a working one. The round ran on **2026-08-24**
+against the whole port rather than one diff — base `45b5e43`, the vendoring commit,
+profile `comprehensive` — and is committed at
+`.revmux/tasks/port-windows-full/01-initial/`. It raised 19 findings, one major: the
+missing deadline above.
+
+The gap is recorded here rather than quietly closed because the failure mode is the
+interesting part. **A review that could not start was indistinguishable from a review
+that found nothing.** Anything downstream of an external tool needs to fail loudly when
+the tool does not run, or its absence reads as a pass.

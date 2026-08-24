@@ -279,3 +279,138 @@ test("the dropped fast paths name the presenter Windows actually runs", () => {
     "the controller's presentPaint gate moved — re-check the as-built row against it",
   );
 });
+
+// ---------------------------------------------------------------------------
+// The recovery verb, and the three paths that take a picture back
+// ---------------------------------------------------------------------------
+
+/**
+ * `pane-clear` is the one verb a user reaches for when everything else has already
+ * failed, so a README that describes it and a CLI that does not have it is worse than
+ * no documentation at all: the reader is in a broken pane, typing a command that
+ * errors. Both directions, because both rot — a rename in `main.ts` and a section
+ * quietly dropped from the README fail differently and neither would be noticed.
+ */
+test("the recovery verb the README documents is one the CLI actually dispatches", () => {
+  const readme = read("README.md");
+  const section = readme.split("### Recovering a pane")[1]?.split("\n### ")[0];
+  assert.ok(section, "the README should still have its recovery section");
+
+  assert.ok(
+    section.includes("main.js pane-clear"),
+    "the recovery section should show the command a reader is meant to type",
+  );
+
+  // The verb, at the two places that have to agree about its name.
+  assert.match(
+    read("cli/src/main.ts"),
+    /command === "pane-clear"/,
+    "main.ts no longer dispatches pane-clear — the README tells users to run it",
+  );
+  assert.match(
+    read("cli/src/help.ts"),
+    /"pane-clear": \{/,
+    "help.ts no longer carries pane-clear — `--help` and the README disagree",
+  );
+
+  // Both halves. A recovery that only sends the escape sequences fixes the frame and
+  // leaves the console cursorless and echoless, which is the failure the README's
+  // second bullet is about; the section promises both, so both must still be called.
+  const pane = read("cli/src/pane.ts");
+  for (const half of ["clearOwnedPaneFrame", "restorePaneConsole"]) {
+    assert.match(
+      pane,
+      new RegExp(`export (async )?function ${half}[(]`),
+      `pane.ts no longer exports ${half}, which the recovery section rests on`,
+    );
+  }
+  assert.match(
+    pane,
+    /paneClearCommand[\s\S]{0,600}restorePaneConsole\(/,
+    "paneClearCommand no longer restores the console — half the documented repair",
+  );
+});
+
+/**
+ * The as-built doc's clear paths, against the functions it names. This is the section
+ * that went stale first: it said "two paths" for as long as there were two, and the
+ * third — the verb — exists precisely because killing the CLI runs neither of them.
+ */
+test("the three documented paths that send image.clear all still exist", () => {
+  const section = read("docs/design/07-as-built.md")
+    .split("### Taking the picture back")[1]
+    .split("\n---")[0];
+
+  assert.match(section, /\*\*Three\*\*\s*\n?\s*paths send `image\.clear`/);
+
+  assert.match(
+    read("engine/crates/pixel-core/src/frame_file.rs"),
+    /fn clear\(&mut self, client: &mut ControlClient\)/,
+    "FramePublisher::clear moved — the as-built doc names it as the first path",
+  );
+  assert.match(
+    read("cli/src/pane.ts"),
+    /export async function clearOwnedPaneFrame/,
+    "clearOwnedPaneFrame moved — the as-built doc names it as the second path",
+  );
+  assert.match(
+    read("cli/src/main.ts"),
+    /command === "pane-clear"/,
+    "the pane-clear verb moved — the as-built doc names it as the third path",
+  );
+
+  // The ownership rule the section says all three share. The engine's early return is
+  // the original; the CLI's is the copy Task 1 of the corrections plan added, and a
+  // CLI that clears unconditionally again is the exact regression that paragraph warns
+  // about — it would take down a placement another process owns.
+  assert.match(
+    read("cli/src/main.ts"),
+    /clearOwnedPaneFrame\(process\.env, \{ pid: child\.pid \}\)/,
+    "the exit path no longer asks whether the placement is ours before clearing it",
+  );
+});
+
+/**
+ * The deadline, as a number, in both places. `07-as-built.md` §4 explains why 1040 ms
+ * and not a rounder number — the derivation is the documentation — so a constant that
+ * moves without the prose moving turns a reasoned figure back into a guess.
+ */
+test("the control-pipe deadline the docs derive is the one the engine uses", () => {
+  const doc = read("docs/design/07-as-built.md");
+  const stated = doc.match(/\*\*(\d+) ms\*\*/);
+  assert.ok(stated, "the as-built doc should still state the exchange deadline");
+
+  const engine = read("engine/crates/pixel-core/src/agwinterm.rs");
+  const constant = engine.match(
+    /const EXCHANGE_DEADLINE: Duration = Duration::from_millis\((\d+)\)/,
+  );
+  assert.ok(constant, "EXCHANGE_DEADLINE moved or was renamed");
+  assert.equal(
+    constant[1],
+    stated[1],
+    "the documented deadline and EXCHANGE_DEADLINE disagree",
+  );
+});
+
+/**
+ * The dev guard, in **both** readers.
+ *
+ * `cli/src/pane.ts` imports nothing from the workspace on purpose, so it carries its
+ * own copy of the fallback pipe name — which is why a guard on the engine alone left
+ * the CLI publishing into production, the case that actually wrecked a pane. The
+ * as-built doc says it is enforced twice; this is that claim, checked.
+ */
+test("the dev-build pipe guard is enforced in both readers, not just the engine", () => {
+  const doc = read("docs/design/07-as-built.md");
+  assert.ok(
+    doc.includes("TERMINAL_BROWSER_ALLOW_PIPE"),
+    "the as-built doc should still name the guard variable",
+  );
+
+  for (const source of ["engine/crates/pixel-core/src/agwinterm.rs", "cli/src/pane.ts"]) {
+    assert.ok(
+      read(source).includes("TERMINAL_BROWSER_ALLOW_PIPE"),
+      `${source} no longer consults the guard — the docs say both halves do`,
+    );
+  }
+});

@@ -28,7 +28,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 428 Rust tests and 282 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 439 Rust tests and 344 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -76,6 +76,7 @@ From inside an agwinterm pane:
 node cli\dist\main.js https://example.com
 node cli\dist\main.js open https://example.com   # the same thing, spelled out
 node cli\dist\main.js ls                         # running browsers and their tabs
+node cli\dist\main.js pane-clear                 # repair a pane a dead browser left unusable
 node cli\dist\main.js --help
 ```
 
@@ -94,6 +95,35 @@ bare `=` and Ctrl+`[` as Escape. Alt is accepted for those two and nowhere else.
 The same encoding carries no Shift with a Ctrl chord — `ctrl+shift+f` and `ctrl+f` arrive as the
 same byte — so the Ctrl+Shift defaults are spelled differently here: **find is Ctrl+F, devtools is
 F12, record is Alt+R, and Alt+Enter finishes a recording**.
+
+### Recovering a pane
+
+```powershell
+node cli\dist\main.js pane-clear
+```
+
+Run it **in the pane that is wrong**. A browser that exits normally cleans up after itself. One
+that is force-killed, crashes, or has its pane closed out from under it runs no cleanup at all,
+and leaves two separate things behind:
+
+- **the frame.** A picture is a *placement* — agwinterm holds the last PNG until something
+  replaces it — so the final page stays painted over the shell running underneath. The pane is a
+  working terminal you cannot read.
+- **the console.** The alternate screen buffer, a hidden cursor, and mouse reporting, all left on.
+  The shell comes back cursorless and echoless, and every pointer move over the pane types
+  `\x1b[<555;39;9M` at the prompt.
+
+`pane-clear` undoes both. It needs no browser running and no instance in the registry — that is
+its whole purpose, since it runs when things are already broken — and it **prints what it found**,
+so "it worked" and "there was nothing wrong here" do not look identical on a pane that was already
+fine. It will not take down a picture this browser never drew: with no frame directory of ours on
+disk it reports that the placement is someone else's and leaves it alone, restoring the console
+either way.
+
+Killing the **CLI** rather than the browser is the case it exists for. On Windows a child spawned
+without `detached` sits in a job object that dies with its parent, so one `taskkill /F` on the CLI
+takes down both halves of the automatic cleanup at once — the browser's destructor never runs, and
+neither does the CLI's clear on the way out.
 
 ### Getting a sharp picture
 
@@ -145,9 +175,8 @@ unlisted instance by default would refuse every ordinary run. Setting the variab
 build ignores it entirely, so a value left in a shell profile can never stop a shipped browser
 drawing. `tools/milestone/run-milestone.cmd` defaults it to `agwinterm-dev` on your behalf.
 
-If a pane does end up wrecked, `terminal-browser pane-clear` in that pane is the recovery — it takes
-back a frame this browser left and puts the console modes back, and reports rather than clears when
-the placement is not ours.
+If a pane does end up wrecked anyway, [`pane-clear`](#recovering-a-pane) in that pane is the
+recovery.
 
 ### What this port refuses
 
@@ -198,7 +227,9 @@ apply to lines this port wrote, and that scope is enforced rather than asserted.
 | [`07-as-built.md`](docs/design/07-as-built.md) | the two frame transports, what was dropped, and the accepted ceilings |
 | [`UPSTREAM.md`](docs/design/UPSTREAM.md) | what was vendored, every deliberate divergence, and the re-vendoring checklist |
 
-The implementation plan is [`docs/plans/20260821-windows-port.md`](docs/plans/20260821-windows-port.md).
+The plans are [`20260821-windows-port.md`](docs/plans/20260821-windows-port.md), the port itself,
+and [`20260822-post-port-corrections.md`](docs/plans/20260822-post-port-corrections.md), which fixed
+four defects the port shipped with — and ran the review it shipped without.
 
 ## How this project is built
 

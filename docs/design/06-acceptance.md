@@ -121,11 +121,15 @@ Fixed in the two places that can, because neither covers the other:
 - **`Terminal::drop`** (`terminal_windows.rs`) → `FramePublisher::clear`. Covers an
   ordinary quit and an unwind. A publisher that never published sends nothing — that
   placement belongs to whoever *did* draw it.
-- **`clearPaneFrame`** (`cli/src/pane.ts`), after `openInForeground`'s wait. Covers
+- **`clearOwnedPaneFrame`** (`cli/src/pane.ts`), after `openInForeground`'s wait. Covers
   the exits that run no destructor: `taskkill /F`, a crash, a kill from another pane.
-  The CLI is the pane's foreground job, so it outlives the browser by construction.
-  Best-effort and unable to change the exit code: every failure means the placement
-  is gone anyway.
+  The CLI is the pane's foreground job, so it outlives the browser whenever the browser
+  is what died. Best-effort and unable to change the exit code: every failure means the
+  placement is gone anyway.
+
+⚠️ **"Whenever the browser is what died" was written as "by construction", and that
+was the gap.** Kill the CLI instead and it takes the browser with it, so neither of the
+two runs — see the re-check below, and the third path it produced.
 
 Its addressing repeats `HostTarget::from_env`'s rules deliberately — `AGWINTERM_ENABLED`,
 session-then-pane id, `"active"` refused, the default pipe name — because the engine
@@ -139,9 +143,32 @@ Both paths verified live:
 | ![after a taskkill /F](img/14-killed-browser-pane-recovers.png) | `taskkill /F` on the browser started by `terminal-browser open`. The picture is gone and the shell echoes. |
 | ![after ctrl+q](img/14-clean-quit-pane-recovers.png) | Ctrl+Q, with no CLI in the chain — so this is `Drop` doing it. `[milestone] exit=0` and the scrollback is readable. |
 
-Tests: three in `frame_file.rs` (the verb goes out last; a publisher that never drew
-clears nothing; a refused clear is still an exit) and thirteen in
-`tools/cli/pane-clear.test.mjs`, driving a real `net.Server` on a real named pipe.
+Tests: four in `frame_file.rs` (the verb goes out last; a publisher that never drew
+clears nothing; one whose first frame was *refused* clears nothing either; a refused
+clear is still an exit) and 55 in `tools/cli/pane-clear.test.mjs`, driving a real
+`net.Server` on a real named pipe.
+
+➕ **Re-checked, harder, on 2026-08-24 — and the first check had the wrong half.**
+Force-killing the *browser* is the mild case: the CLI is still there and clears the
+frame on its way out. Killing the **CLI** is the one nothing covered, and on Windows it
+is not a variant of the other — libuv puts a child spawned without `detached` into a job
+object that terminates with its parent, which is exactly how `openInForeground` spawns
+("this process is the pane's foreground job"). So one `taskkill /F` on the CLI takes
+down *both* cleanup halves at once: `ModeGuard::drop` never runs in the browser and the
+CLI's clear never runs either. Measured rather than reasoned about, and it is the
+strongest argument for the `pane-clear` verb existing
+([the corrections plan](../plans/20260822-post-port-corrections.md), Tasks 1 and 6).
+Both cases are now processes rather than eyes: `tools/acceptance/pane-clear.test.mjs`
+spawns `node cli/dist/main.js pane-clear` against a real named pipe, with a browser that
+is a real process planting a real frame directory and then ended with `taskkill /F`, and
+reads what came back.
+
+The other correction the verb forced is upstream of it. `openInForeground` sent
+`image.clear` on **every** exit path with no test for whether this browser had ever
+drawn — the CLI contradicting the engine's own rule that a publisher which never
+published has nothing to take back, because "asking anyway would clear a placement some
+*other* process owns" (`frame_file.rs`). A browser that died before its first frame
+would have taken down whatever the pane was showing beforehand. It asks now, by pid.
 
 ## 5. The keep-unchanged files
 
@@ -171,14 +198,27 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 
 ## 6. Tests, lints and coverage
 
+Re-run on **2026-08-24**, after the six tasks of
+[the corrections plan](../plans/20260822-post-port-corrections.md). The numbers this
+table carried on 2026-08-21 were 421 / 364+57 / 266, and leaving them would have made
+the table a claim about a tree that no longer exists.
+
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **421 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 364 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **266 passed**, 68 suites |
+| `cargo nextest run --workspace` | **439 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 382 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **344 passed**, 87 suites, 8.4 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
+
+The two lint rows are the scoped scripts below rather than the bare commands, and that
+is not a softening: the bare commands cannot be green in this tree and never could —
+298 rustfmt complaints and 12 clippy warnings are the *vendored* tree's, and
+reformatting it is the silent edit the Constraints forbid. The two scripts under
+`tools/vendor-check/` run the real check and `git blame` every complaint.
+And a suite that cannot hang is now part of what "passed" means: `--test-timeout` plus
+the shared waits in `tools/lib/deadline.mjs` (corrections plan, Task 3).
 
 ### The two probe crates are not in this table, on purpose
 
@@ -229,17 +269,22 @@ percentage in this repo and inventing one at the last task would be a number rat
 than a standard. What is checkable is that every module the port added is tested, and
 every one is:
 
-| module | `#[test]`s | | module | `it()`s |
+| module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 38 | | `inventory.test.mjs` | 36 |
-| `agwinterm.rs` | 29 | | `endpoint.test.mjs` | 24 |
-| `frame_file.rs` | 29 | | `page-input.test.mjs` | 20 |
-| `frame_shm.rs` | 10 | | `launch.test.mjs` | 19 |
-| `terminal_backend.rs` | 9 | | `present.test.mjs` | 18 |
-| `terminal_types.rs` | 5 | | `unsupported.test.mjs` | 18 |
-| | | | `registry.test.mjs` | 14 |
-| | | | `pane-clear.test.mjs` | 13 |
-| | | | the rest | 61 |
+| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 55 |
+| `agwinterm.rs` | 44 | | `vendor-check/inventory.test.mjs` | 37 |
+| `frame_file.rs` | 32 | | `cli/endpoint.test.mjs` | 32 |
+| `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
+| `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
+| `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
+| | | | `offscreen/present.test.mjs` | 18 |
+| | | | the rest | 121 |
+
+Counted on 2026-08-24; the node column sums to the 344 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 55),
+`agwinterm.rs` (29 → 44, the exchange deadline) and `terminal_windows.rs` (38 → 53).
+Two suites in the table did not exist then — `tools/lib/deadline.test.mjs` and
+`tools/acceptance/pane-clear.test.mjs` — and are inside "the rest".
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep
@@ -257,3 +302,26 @@ Still unchecked, and deliberately: everything under **Post-Completion** in the p
 real browsing on heavy pages, video, long-running handle and memory counts, several
 instances at once, and the judgement call about whether cell-resolution pointing is
 merely awkward or disqualifying. Those need a person using it, not a harness.
+
+### What it did not catch, and how that was found out
+
+Four more defects surfaced the next morning, and none of them by re-reading this
+document — they came from looking at what the run had left behind on the machine: a
+wrecked pane of the *real* instance (the preamble above), three `node` processes wedged
+since the evening before, and a review that never started. They became
+[the corrections plan](../plans/20260822-post-port-corrections.md): a `pane-clear` verb,
+a dev-build pipe guard, bounded waits in the test suite, and a deadline on the engine's
+control-pipe exchange. Its Task 6 re-ran the suites and the pane criteria above, which
+is where the 2026-08-24 numbers came from.
+
+The last of the four is the one worth carrying: **the review this project is built
+around never ran.** `.ralphex/config` pointed at `./tools/ralphex-revmux.cmd`, and
+`exec.Command` hands a `.cmd` to cmd.exe, which reads the leading `.` / `/` as a switch
+prefix — so the bridge failed to start with a one-line error that scrolled past, and a
+review that could not run was indistinguishable from a clean one. All fifteen port tasks
+were reviewed only by the internal reviewer. The round finally ran on 2026-08-24 against
+the whole port (`.revmux/tasks/port-windows-full/01-initial/`, base `45b5e43`, profile
+`comprehensive`): 19 findings, one of them major. That major one became the corrections
+plan's Task 5 — an unbounded `read_line` on the control pipe — and the rest were triaged
+in the open, into fixes, a **Deferred** section in that plan, and one finding accepted
+with a reason. Several of the doc corrections in this file's neighbours are its too.
