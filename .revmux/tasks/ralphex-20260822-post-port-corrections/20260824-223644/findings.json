@@ -1,0 +1,134 @@
+{
+  "scope": {
+    "task": "ralphex-20260822-post-port-corrections",
+    "run": "20260824-223644",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260822-post-port-corrections\\20260824-223644\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2942134,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2450209,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 3665585,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 134920,
+        "raised": 2,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [],
+  "open_questions": [],
+  "pre_existing": [
+    {
+      "id": "adversarial-1",
+      "file": "cli/src/pane.ts",
+      "line": 729,
+      "end_line": 803,
+      "severity": "minor",
+      "confidence": 92,
+      "title": "Pane markers prove a past placement but are treated as current ownership",
+      "body": "The finding is self-declared pre-existing: `allOwnedFrames` accepts any surviving marker for the current pane, then `clearOwnedPaneFrame` sends `image.clear` without establishing that the marked frame is still the pane's current placement. If browser A crashes and leaves its marker, then another producer replaces A's placement before the user runs `pane-clear`, A's historical marker still authorizes line 803 to clear the newer producer's picture. The host replaces placements wholesale, while nothing updates or invalidates A's directory on that replacement, so the filesystem evidence proves only that A drew there previously — not that it still owns what is displayed. The ownership-marker scheme and the wholesale-replacement behaviour it relies on both predate the change under review; the change did not introduce the marker-versus-current-placement gap.",
+      "fix": "",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": ""
+    },
+    {
+      "id": "adversarial-2",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 401,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "Staleness is inferred from frame activity rather than publisher liveness",
+      "body": "The finding is self-declared pre-existing and, per the reviewer, is explicitly documented by the changed comments rather than caused by them: every new publisher removes directories whose mtime is at least one hour old, although an idle live browser writes no frames and therefore stops refreshing that timestamp. Browser A can remain static for an hour, browser B can sweep A's directory and pane marker, and A can then be force-killed before repainting. Its placement remains displayed, but `pane-clear` has no ownership evidence and refuses to clear it. `write_frame` recreates the directory only after another repaint, so it does not cover this sequence. The mtime-based reaping policy itself is untouched by the change under review, which only describes it in comments.",
+      "fix": "Use a renewable publisher lease or heartbeat distinct from frame activity, while retaining an expiry so crashed publishers are eventually reclaimed.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": ""
+    }
+  ],
+  "immaterial": [],
+  "stats": {
+    "started_at": "2026-08-24T22:36:45.2946116+03:00",
+    "finished_at": "2026-08-24T22:45:37.3748206+03:00",
+    "duration_ms": 532080,
+    "tokens": 9222433,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 513624
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 18453,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 0
+      }
+    ]
+  }
+}

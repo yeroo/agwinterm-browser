@@ -1,0 +1,177 @@
+{
+  "scope": {
+    "task": "ralphex-20260822-post-port-corrections",
+    "run": "20260824-221702",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260822-post-port-corrections\\20260824-221702\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2472735,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2098054,
+        "raised": 3,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 3053557,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 107440,
+        "raised": 0,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "arch+quality-1",
+      "file": "cli/src/pane.ts",
+      "line": 166,
+      "end_line": 167,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "Doc comments define the new trim set as `str::trim`, contradicting their own bodies and the Rust definition",
+      "body": "The two new TypeScript trim helpers head their doc comments with an equation that the same comments then refute.\n\n`cli/src/pane.ts:166-167`: \"Rust's `str::trim`, as an edge trim: the Unicode `White_Space` property, plus U+FEFF.\" Six lines later, in the same comment (pane.ts:171-174): \"ECMAScript counts U+FEFF ZWNBSP as whitespace and Unicode `White_Space` does not, so `String.trim` takes a byte-order mark off the front of an entry and `str::trim` leaves it on.\" Both cannot be true: if `str::trim` leaves U+FEFF on, `str::trim` is not \"`White_Space` plus U+FEFF\". `pane.ts:181` repeats it — \"the way `str::trim` takes it\" — of a helper that deliberately does not take it that way.\n\n`cli/src/unsupported.ts:140-141` is the same claim plus a second error: \"`pane.ts`'s `PADDING`, and `agwinterm.rs`'s `str::trim`: the Unicode `White_Space` property, plus U+FEFF.\" `agwinterm.rs` does not use `str::trim` for this any more — this change replaced it with `fn trimmed` (agwinterm.rs:372-374) precisely because `str::trim` is the wrong set, and that function's own doc says so plainly: \"[`str::trim`] would be this, but ...\" (agwinterm.rs:365). `unsupported.ts:151` repeats \"the way `str::trim` takes it\".\n\nConcrete failure: the whole point of the change is that three readers must trim one set, and the set is `White_Space ∪ {U+FEFF}`. A maintainer reading pane.ts:166 or unsupported.ts:140 learns that this set *is* `str::trim`, which is the licence to collapse `trimmed` back to `value.trim()` on the Rust side (or to drop U+FEFF from `PADDING` on the JS side, since `String.trim` already covers it) — reintroducing exactly the U+0085/U+FEFF divergence between CLI preflight and engine `valid_pipe_name` that this change exists to close. The Rust doc gets it right and the two TypeScript docs get it backwards, so the reader has no way to tell which is authoritative except by re-deriving the sets.",
+      "fix": "Head both TypeScript comments with the set rather than with `str::trim`: e.g. \"The Unicode `White_Space` property, plus U+FEFF — `agwinterm.rs`'s `trimmed`, which is what `str::trim` is not.\" Same for the two one-liners at pane.ts:181 and unsupported.ts:151, and correct unsupported.ts:140 to name `agwinterm.rs`'s `trimmed` rather than `str::trim`.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "quality"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "docs+tests-1",
+      "file": "cli/src/pane.ts",
+      "line": 288,
+      "end_line": 288,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "The trim fix on `nonempty` (AGWINTERM_PIPE / AGWINTERM_SESSION_ID) has no test in either language",
+      "body": "The change routes `nonempty` through the new union trim in all three readers — `cli/src/pane.ts:288`, `cli/src/unsupported.ts:157-159`, and `engine/crates/pixel-core/src/agwinterm.rs:385-389` — and `docs/design/07-as-built.md:386-389` states the guarantee explicitly: \"it is the same trim `AGWINTERM_PIPE` and `AGWINTERM_SESSION_ID` go through, since a pane addressed by one reader and drawn by another has to be one pane.\" Nothing tests that half.\n\nEvery `\\u{feff}` / `\\u{85}` occurrence under `tools/`, `cli/src/` and `engine/crates/pixel-core/src/` was grepped, and all six hits are on the allow-list path: `tools/cli/pane-clear.test.mjs:229-230` (`pipeAllowed`), `tools/cli/unsupported.test.mjs:278` (a `HOST_CASES` row's `TERMINAL_BROWSER_ALLOW_PIPE`), and `agwinterm.rs:1756-1773`. The Rust cases drive `pipe_refusal(Some(list), pipe, ...)` directly, so they exercise `allows_pipe`'s per-entry trim and never reach `nonempty`. The existing padding coverage in `tools/cli/pane-clear.test.mjs:101,122` uses only ASCII spaces, and the two `HOST_CASES` loops (`unsupported.test.mjs:303-313`) assert `=== null` / `!== null` rather than the resolved value, so neither would see a wrong target.\n\nConcrete defect that returns silently: revert `nonempty` in `pane.ts` to `env[key]?.trim()` (or `agwinterm.rs`'s to `str::trim`) and the whole suite stays green — the surviving allow-list assertions are unaffected, since `nonempty(env, ALLOW_PIPE_VAR)` sees a value beginning `other,` in every fixture and the discriminating trim there is the per-entry one. Meanwhile `AGWINTERM_SESSION_ID=\"s1\\u{85}\"` splits the readers again: `String.trim` does not strip U+0085 (NEL is category Cc, neither a Zs nor an ECMAScript LineTerminator) and `str::trim` does, so the CLI builds a clear request addressed to `\"s1\\u{85}\"` while the engine drew on `\"s1\"`. The host never clears the pane, and `sameMark`'s `mark.target === pane.target` then fails against the engine's own marker, so `pane-clear` also declines to adopt its own wreck. `AGWINTERM_PIPE=\"\\u{feff}agwinterm-dev\"` splits it the other way: pre-fix the CLI trimmed the BOM and passed `PIPE_NAME`, the engine kept it and failed `valid_pipe_name`.\n\nRaised by the tests lens; the docs lens is what makes it visible, since 07-as-built.md asserts the property as settled.",
+      "fix": "Add one assertion to `tools/cli/pane-clear.test.mjs` in the `paneClearRequest` addressing describe (near lines 106-122), asserting the *resolved* value rather than non-nullness: `assert.equal(pane.paneClearRequest(inPane({ AGWINTERM_SESSION_ID: \"s1\\u{85}\" })).target, \"s1\")` plus the U+FEFF pair on `AGWINTERM_PIPE`'s `endpoint`. Mirror it in `agwinterm.rs` alongside the existing `HostTarget::from_env` tests (agwinterm.rs:1556-1567), driving a `SessionEnv` whose `SESSION_VAR` carries a leading U+FEFF and asserting `target.session()` comes back bare.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "tests",
+        "docs"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "arch+quality-2",
+      "file": "docs/design/06-acceptance.md",
+      "line": 292,
+      "end_line": 293,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "\"The six rounds below\" now precedes seven round paragraphs",
+      "body": "The change adds two round paragraphs — \"A seventh round moved one\" (06-acceptance.md:355) and \"An eighth round moved none\" (06-acceptance.md:371) — but bumps the running count in the lead-in sentence by only one, from \"The five rounds below\" to \"The six rounds below\" (06-acceptance.md:292-293).\n\nThe paragraphs that actually follow are second (line 295), third (304), fourth (313), fifth (322), sixth (340), seventh (355) and eighth (371) — seven of them. `git show HEAD:docs/design/06-acceptance.md` confirms the previous text was internally consistent: five paragraphs and \"The five rounds below\", so the prior state cannot distinguish \"rounds below\" from \"rounds that moved a count\" — all five moved counts. The eighth round says \"moved none\", so six is defensible under the second reading, but the sentence's referent is literally \"the rounds below\", and this is the first revision where the two readings diverge.\n\nConcrete failure: a reader auditing the test-count arithmetic in this section — which is the section's entire purpose, since it reconciles 13 → 74 for `pane-clear.test.mjs` against the 365 in the table — counts seven rounds where the prose promises six and cannot tell whether a round is undocumented or the number is simply stale. No tooling consumes this number (nothing under `tools/` matches on it), so the cost is confined to a human reader.",
+      "fix": "Change \"The six rounds below\" to \"The seven rounds below\" at 06-acceptance.md:292, or make the counting rule explicit — e.g. \"The six rounds below that moved a count carry them the rest of the way; an eighth moved none.\"",
+      "sources": [
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "quality",
+        "docs"
+      ],
+      "verdict": "confirmed"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [],
+  "immaterial": [
+    {
+      "id": "arch+quality-3",
+      "file": "cli/src/unsupported.ts",
+      "line": 204,
+      "end_line": 204,
+      "severity": "minor",
+      "confidence": 70,
+      "title": "`asciiLower` is an undocumented closure inside `pipeRefusal` while every other shared rule in the file is a documented top-level binding",
+      "body": "This module's stated organizing principle is that each rule it shares with `agwinterm.rs` and `pane.ts` is a named top-level binding whose doc comment points at its two counterparts. Every one of them follows it: `PIPE_NAME` (unsupported.ts:164-165, \"`agwinterm.rs`'s `valid_pipe_name`, and `pane.ts`'s `PIPE_NAME`\"), `DEFAULT_PIPE` (167-168), `ALLOW_PIPE_VAR` (170-171), and the two this same change added — `PADDING` (139-149) and `trimmed` (151-153).\n\n`asciiLower`, added by the same change, breaks the pattern: it is an anonymous arrow assigned to a `const` inside the body of `pipeRefusal` (unsupported.ts:204), with no doc comment, reachable by nothing else. Its counterpart in `pane.ts` is a documented module-level `function asciiLower` (pane.ts:186-197), and the as-built doc names it as one of the three readers' folds: \"an `asciiLower` in the two TypeScript copies\" (docs/design/07-as-built.md, \"The fold is **ASCII-only** in all three readers\").\n\nConcrete failure: the parity test that guards this file against drift reads source text out of `agwinterm.rs` and looks for named declarations in the two TypeScript copies (`tools/cli/unsupported.test.mjs:315-340` matches `ALLOW_PIPE_VAR: \u0026str = \"...\"` and `/^[A-Za-z0-9._-]+$/`). A rule buried in a function body is the one that cannot be reached that way, and it is the one whose ASCII-vs-Unicode distinction the change spends four doc paragraphs justifying. It also re-evaluates the `/[A-Z]/g` literal on every call, unlike the module-level `PADDING` beside it.\n\nThis is an organization/consistency defect, not a behavioural one — the fold itself is correct and equivalent to `pane.ts`'s and to `eq_ignore_ascii_case`.",
+      "fix": "Hoist it to module scope beside `PADDING` and `trimmed`, with a doc comment naming its two counterparts the way `PIPE_NAME` and `DEFAULT_PIPE` name theirs — e.g. \"`pane.ts`'s `asciiLower`, and `agwinterm.rs`'s `eq_ignore_ascii_case`: `A`-`Z` and nothing else.\"",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "architecture"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "2026-08-24T22:17:03.0879816+03:00",
+    "finished_at": "2026-08-24T22:27:56.8956042+03:00",
+    "duration_ms": 653807,
+    "tokens": 8510976,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 457611
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 41020,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 155172,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}

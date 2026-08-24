@@ -1,0 +1,156 @@
+{
+  "scope": {
+    "task": "ralphex-20260822-post-port-corrections",
+    "run": "20260824-213636",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260822-post-port-corrections\\20260824-213636\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 1883019,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 1549632,
+        "raised": 0,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2159169,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 61160,
+        "raised": 3,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [],
+  "open_questions": [],
+  "pre_existing": [
+    {
+      "id": "adversarial-3",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 393,
+      "end_line": 393,
+      "severity": "minor",
+      "confidence": 94,
+      "title": "Age-based sweeping removes ownership evidence from live idle publishers",
+      "body": "The change under review touches only the comments describing this behaviour, not the sweeping logic itself. If browser A publishes a frame and remains static for an hour, starting browser B calls `sweep_stale` and can remove A's directory even though A is alive. If A is then force-terminated before another repaint, its placement remains displayed but `pane-clear` has neither frames nor a pane marker with which to attribute and clear it. `write_frame` and `remark` only repair the directory on a later repaint, so they do not cover this window. The trigger requires an hour-idle publisher, another publisher starting, and termination before repaint, keeping the impact minor.",
+      "fix": "Sweep using a renewable liveness lease or heartbeat rather than the timestamp of the last frame.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": ""
+    }
+  ],
+  "immaterial": [
+    {
+      "id": "adversarial-1",
+      "file": "cli/src/pane.ts",
+      "line": 199,
+      "end_line": 199,
+      "severity": "minor",
+      "confidence": 94,
+      "title": "Unicode lowercasing admits allow-list entries the Rust guard rejects",
+      "body": "With `AGWINTERM_PIPE=agwinterm-kiosk` and an allow-list spelling `AGWINTERM-KIOSK` with its first `K` replaced by U+212A KELVIN SIGN, both TypeScript guards lowercase the entry to the ASCII pipe name and permit launch. The debug engine then compares the same entry using ASCII-only `eq_ignore_ascii_case` at `agwinterm.rs:349` and refuses it. The launch therefore passes CLI preflight but fails when the engine tries to draw. The new comments explicitly confirm this mismatch, but documenting it does not satisfy the plan's same-guard contract. This is introduced by the changed TypeScript comparison; it affects only unusual non-ASCII configuration and debug builds, so the impact is minor.",
+      "fix": "Make both TypeScript copies use ASCII-only comparison, for example by requiring non-wildcard entries to match `PIPE_NAME` before lowercasing them.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "immaterial"
+    },
+    {
+      "id": "adversarial-2",
+      "file": "cli/src/pane.ts",
+      "line": 725,
+      "end_line": 725,
+      "severity": "minor",
+      "confidence": 88,
+      "title": "`Pick` does not reject `pane` on a pre-typed options value",
+      "body": "The narrowed parameter rejects `pane` only during excess-property checking of a fresh object literal. A caller can still declare `const options: OwnedFramesOptions = { root, pane: \"any\" }` and pass `options` to `clearOwnedPaneFrame`; TypeScript's structural assignability accepts the wider value. The function then overwrites that `pane` in both branches at lines 739-745, leaving the caller with the same silent no-op the new comment says is now a type error. The ignored runtime option is pre-existing; this change only partially mitigates it.",
+      "fix": "Add `pane?: never` to the accepted parameter type so values typed as `OwnedFramesOptions` are rejected when they can contain `pane`.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "2026-08-24T21:36:36.400471+03:00",
+    "finished_at": "2026-08-24T21:46:29.2179807+03:00",
+    "duration_ms": 592817,
+    "tokens": 6025983,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 429860
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 31442,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 131510,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}
