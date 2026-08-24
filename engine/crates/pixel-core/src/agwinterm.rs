@@ -38,9 +38,11 @@
 //! ## Where cell pixel metrics come from
 //!
 //! The decision the port plan's Task 6 owes is recorded in
-//! `docs/design/04-cell-metrics.md`; [`cell_size`] is it in code. In short: the
-//! host is asked for [`METRICS_CMD`], an explicit [`CELL_PX_VAR`] overrides it, and
-//! the last resort is [`FALLBACK_CELL`] with a warning that names the fix. What
+//! `docs/design/04-cell-metrics.md`; [`cell_size`] is it in code. In short: an
+//! explicit [`CELL_PX_VAR`] is consulted first, then the host is asked for
+//! [`METRICS_CMD`], and the last resort is [`FALLBACK_CELL`] with a warning that
+//! names the fix. The override is first on purpose — it is how a user corrects a
+//! host that reports the wrong thing after a mixed-DPI move. What
 //! matters more than the number is that *one* number reaches both the canvas and
 //! the pointer, which is why this returns a value rather than an `Option`.
 

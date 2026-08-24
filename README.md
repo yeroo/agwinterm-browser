@@ -13,8 +13,11 @@ Both are covered in [`docs/design/00-port-brief.md`](docs/design/00-port-brief.m
 
 So the port **keeps** upstream's Electron browser, its React chrome and its `pixel-core` compositor
 — 43 of `pixel-core`'s 46 source files use no unix API at all, and 40 of them ended up
-byte-identical (the other three have a written reason in
-[`UPSTREAM.md`](docs/design/UPSTREAM.md)), because taffy, tiny-skia and fontdue are already
+byte-identical (the other three have a written reason, tabulated in
+[`06-acceptance.md` §5](docs/design/06-acceptance.md#5-the-keep-unchanged-files) — two of them are
+numbered divergences in [`UPSTREAM.md`](docs/design/UPSTREAM.md), and `lib.rs` is covered by that
+file's preamble instead, since replacing its modules is what the port *is*), because taffy,
+tiny-skia and fontdue are already
 portable — and replaces the layer underneath: the tty module is split and its Windows half
 rewritten, and frames leave over agwinterm's control pipe instead of through the terminal's own
 output. In one line: **split one module, port one, drop one, keep forty-three.**

@@ -22,7 +22,7 @@ The agwinterm source tree lives at `C:\Users\boris\source\agwinterm`.
 > |---|---|
 > | frames travel over a shared-memory ring (`image.frameshm`) | **PNG over `image.frame`.** The fast path's contract was never published, so it was not built. [§ Chosen transport](#chosen-transport) |
 > | where the engine process lives is unresolved | **resolved:** the foreground process, one browser per pane. [`03-process-model.md`](03-process-model.md) |
-> | 43 files kept unchanged | **40 byte-identical, 3 with a written reason.** "No unix API" turned out not to mean "portable". [`UPSTREAM.md`](UPSTREAM.md) |
+> | 43 files kept unchanged | **40 byte-identical, 3 with a written reason.** "No unix API" turned out not to mean "portable". [`06-acceptance.md` §5](06-acceptance.md#5-the-keep-unchanged-files) tabulates all three; [`UPSTREAM.md`](UPSTREAM.md) numbers two of them. |
 > | `herdr.rs`: port to named pipes, or gate off for v1 | **gated off permanently**, and the reason is not effort. [§ the unix dependency](#the-unix-dependency-is-concentrated-not-pervasive) |
 >
 > Everything the brief got right is left standing without comment, including the load-bearing
@@ -237,6 +237,12 @@ which uses stock Electron's `paint` event: `image.toBitmap()` →
 `surface.present({ bgra, width, height, damage })`, coalesced by `BitmapPresenter`. That path
 runs on **stock Electron on Windows with no patch**, and `Surface.present` is the exact seam the
 Windows backend plugs into.
+
+> ⚠️ **As built.** `presentBitmap` itself is never reached on Windows. The controller calls
+> `presentPaint` only when `event.texture || shmFrame` (`browser/src/page/controller.ts:175`), and
+> on stock Electron neither is ever set, so every frame takes the `BitmapPresenter` branch and that
+> class calls `surface.present` directly. The coalescing described above is real; the function name
+> is not the one on the path.
 
 Optimising past the bitmap copy is deliberately deferred. Stock Electron on Windows can expose a
 D3D11 shared-texture handle, and agwinterm renders with Direct2D, so a genuine zero-copy path

@@ -1,9 +1,10 @@
 @echo off
 rem Task 10 bring-up: launch the browser into the agwinterm pane this runs in.
 rem
-rem Not a product entry point -- `cli/src/main.ts` is, and it still only spawns the
-rem daemon (Task 13). This is the smallest thing that exercises the whole Windows
-rem path end to end: Electron OSR -> pixel-core composite -> frame_file -> image.frame.
+rem Not a product entry point -- `cli/src/main.ts` is, and since Task 13 it runs the
+rem browser in the foreground itself. This is the smallest thing that exercises the
+rem whole Windows path end to end with no CLI in the way: Electron OSR -> pixel-core
+rem composite -> frame_file -> image.frame.
 rem
 rem Run it from inside a pane (agwinterm exports AGWINTERM_* into the shell), e.g.
 rem   agwintermctl --pipe agwinterm-dev session new --command "...\run-milestone.cmd <url>"

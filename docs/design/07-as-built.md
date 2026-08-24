@@ -114,7 +114,7 @@ it would clear someone else's pane.
 | `ghostty.rs` | `SIGUSR2` signalling to a ghostty host | no Windows analogue for either half — no signals, no ghostty. `#[cfg(unix)]` in `lib.rs`; the **file is byte-identical** to upstream and still builds and tests on unix. |
 | `herdr.rs` | an alternate graphics host reached over a unix socket | **permanently disabled, not pending.** It negotiates `pane.graphics.info` and refuses to speak unless the host answers `file_frame_transport: "direct-kitty"` (`herdr.rs:56`). Kitty escapes are exactly what ConPTY strips, so porting the socket would produce a client that connects and then cannot draw. The host does not run on Windows either. |
 | the Swift native-scroll helper | a background macOS app reporting trackpad and pointer events the terminal cannot | dropped by a gate **upstream already had**: `build.rs` returns early unless `CARGO_CFG_TARGET_OS` is `macos`, and `native.rs:87` spawns nothing unless `NATIVE_SCROLL_HELPER` names a binary. `native-scroll-helper.swift` is vendored and byte-identical; it simply never compiles here. Its absence costs smooth/precise scrolling, and it is what makes `reports_pixel_mouse() == false` change nothing that runs (§3). |
-| the patched-Electron fast paths | `useSharedTexture` (darwin), `useSharedMemory` (linux) | they need an Electron fork built from `zenbu-labs/electron-releases`, which the Constraints forbid. `presentPaint` already falls through to `presentBitmap` (`browser/src/page/paint.ts:104`), which is stock Electron's `paint` event, and that is the path this port runs. |
+| the patched-Electron fast paths | `useSharedTexture` (darwin), `useSharedMemory` (linux) | they need an Electron fork built from `zenbu-labs/electron-releases`, which the Constraints forbid. `presentPaint` falls through to `presentBitmap` (`browser/src/page/paint.ts:104`), but the controller only calls `presentPaint` when a texture or an shm frame is present (`controller.ts:175`), and on stock Electron here neither ever is. So every Windows frame goes to the throttled `BitmapPresenter` (`paint.ts:132`) instead, which coalesces a burst on `setImmediate`, unions the damage rects and calls `surface.present` itself; `presentBitmap` is the fallback behind it and is never invoked on this platform. |
 | `CpuThrottle` | frame pacing | not dropped by this port — `supported()` is `cfg!(target_os = "macos")` upstream, so it is inert here and was inert before. Named so the 26 fps in [02](02-frame-budget.md) is not read as a throttled number. |
 
 ### Dropped or refused in the CLI
@@ -215,7 +215,7 @@ in [`04-cell-metrics.md`](04-cell-metrics.md) and whose client — `ControlClien
 not ask about again. ⚠️ Note the override can only ever be close: the host's cell size is a
 float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The verb can be exact.
 
-### Two lesser ones, named so they are not surprises
+### The lesser ones, named so they are not surprises
 
 - **No key releases.** Only the kitty keyboard protocol reports them, and agwinterm
   implements none, so `kitty_keyboard()` is false. Left alone this held Chromium with

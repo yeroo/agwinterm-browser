@@ -238,3 +238,44 @@ test("the accepted ceilings are still where the docs say they are", () => {
     "reports_pixel_mouse is no longer unconditionally false — ceiling 1 has moved",
   );
 });
+
+/**
+ * The dropped-fast-paths row, against the branch the controller actually takes.
+ *
+ * `tools/offscreen/present.test.mjs` already pins the code: the controller reaches
+ * `presentPaint` only when `event.texture || shmFrame`, and on stock Electron here
+ * neither is ever set, so every Windows frame goes to the throttled `BitmapPresenter`.
+ * That test passed for the whole port while this doc said the opposite — "`presentPaint`
+ * already falls through to `presentBitmap` ... and that is the path this port runs" —
+ * because nothing ever compared the two. A reader chasing frame pacing opened
+ * `paint.ts:104`, found no throttling in it, and would have concluded the port has no
+ * coalescing at all: the exact opposite of the truth.
+ *
+ * So this asserts the doc names the class that runs, and does not promise the reader a
+ * function this platform never reaches.
+ */
+test("the dropped fast paths name the presenter Windows actually runs", () => {
+  const dropped = read("docs/design/07-as-built.md").split("### Dropped or refused in the CLI")[0];
+  const row = dropped
+    .split("\n")
+    .find((line) => line.includes("the patched-Electron fast paths"));
+  assert.ok(row, "the as-built doc should still have its patched-Electron row");
+
+  assert.ok(
+    row.includes("BitmapPresenter"),
+    "the row should name BitmapPresenter, which is what every Windows frame goes through",
+  );
+  assert.doesNotMatch(
+    row,
+    /`presentBitmap`[^|]*is the path this port runs/,
+    "the row claims presentBitmap is the Windows path; the controller never reaches it",
+  );
+
+  // The gate the row's correction rests on. If this moves, the row needs rewriting.
+  const controller = read("browser/src/page/controller.ts");
+  assert.match(
+    controller,
+    /event\.texture \|\| shmFrame\s*\?\s*presentPaint\(/,
+    "the controller's presentPaint gate moved — re-check the as-built row against it",
+  );
+});

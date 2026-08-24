@@ -250,11 +250,16 @@ describe("the environment a foreground browser is started with", () => {
   });
 
   it("carries the caller's environment through, and adds the two", () => {
-    const env = launch.foregroundSpawnEnv({ PATH: "/x", TERM: "dumb" }, 4242, "C:\work\site");
+    // Backslashes doubled: `\w` and `\s` are unrecognised escapes, so "C:\work\site"
+    // written singly collapses to "C:worksite" on both sides and the assertion passes
+    // while testing nothing about a path. CALLER_CWD_VAR is always backslash-separated.
+    const cwd = "C:\\work\\site";
+    assert.ok(cwd.includes("\\"), "the fixture must keep its separators to be worth asserting");
+    const env = launch.foregroundSpawnEnv({ PATH: "/x", TERM: "dumb" }, 4242, cwd);
     assert.equal(env.PATH, "/x");
     assert.equal(env.TERM, "dumb");
     assert.equal(env[launch.CONSOLE_PID_VAR], "4242");
-    assert.equal(env[launch.CALLER_CWD_VAR], "C:\work\site");
+    assert.equal(env[launch.CALLER_CWD_VAR], cwd);
   });
 
   it("does not mutate the environment it was handed", () => {

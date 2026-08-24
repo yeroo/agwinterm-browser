@@ -147,8 +147,11 @@ describe("Windows: Ctrl is the accelerator", () => {
       console: "ctrl+alt+j",
     });
     const find = win32.parseKeyBindings(win32.defaultKeys.find);
+    // What a user pressing Ctrl+Shift+F actually sends — the console drops the shift,
+    // so it arrives as plain ctrl+f and still finds. That is the point of the remap.
     assert.equal(win32.matchesBinding(press("f", "ctrl"), find), true);
-    // What the user pressing Ctrl+Shift+F actually sends, which now still finds.
+    // A synthetic ctrl+shift event, which this console can never emit, does not match:
+    // `matchesMods` compares shift exactly, and that exactness is why the default moved.
     assert.equal(win32.matchesBinding(press("f", "ctrl", "shift"), find), false);
     const devtools = win32.parseKeyBindings(win32.defaultKeys.devtools);
     assert.equal(win32.matchesBinding(press("f12"), devtools), true);
