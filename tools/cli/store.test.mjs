@@ -162,7 +162,10 @@ describe("pruning a dead browser", () => {
   // be: a close that never completes because a connection is still up would have
   // held the pipe past the end of the file with nothing reporting it, and one
   // server that refuses must not skip the next one's teardown.
-  after(() => teardown(...servers.map((server) => () => closeServer(server))));
+  after(async () => {
+    const failures = await teardown(...servers.map((server) => () => closeServer(server)));
+    assert.deepEqual(failures, [], "teardown left a server listening");
+  });
 
   it("keeps a browser whose process is alive and whose endpoint answers", async () => {
     seed([{ key: "live", pid: process.pid, endpoint: await listening("live") }]);

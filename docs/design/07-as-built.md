@@ -158,6 +158,7 @@ user already knows. `cli/src/unsupported.ts` owns the wording and imports nothin
 | `shutdown` | there is no daemon in the Windows shape ([03](03-process-model.md)). This mattered more than a message: `shutdownDaemon` falls back to `daemonPid()`, which returns *the first live instance pid* — in the foreground shape, a browser somebody is using — and would have killed it while reporting that it stopped a daemon. | nothing. There is nothing to shut down. |
 | `setup`'s AppArmor step | **not unsupported — previously silent.** `apparmorSetup` returned 0 off Linux without a word, which reads as "a sandbox was configured". Chromium *is* sandboxed on Windows, by the OS, with nothing to install; the AppArmor profile is a Linux-only workaround for Ubuntu withholding unprivileged user namespaces. It now says so. | nothing. It is correct as it stands. |
 | `probeGraphics` | writes an APC escape and waits for a reply. ConPTY strips APC, so on Windows it can only time out — and it asks about the wrong channel anyway, since frames never go through the terminal's own output. Replaced by `windowsHostRefusal`, which asks the question that actually decides it: is this an agwinterm pane. | nothing. |
+| the pane's own agwinterm instance | two checks, both the engine's, applied before anything is spawned. `AGWINTERM_PIPE` must be a pipe name (`valid_pipe_name`'s `[A-Za-z0-9._-]`), because `\\.\` is a normalised device path and `..\` walks out of the pipe namespace into the filesystem; and under `TERMINAL_BROWSER_ALLOW_PIPE` it must be an instance the list names. Refused at launch rather than at the first frame, because a browser the CLI started and the engine then refused every frame from is a browser that starts and shows nothing. | unset `TERMINAL_BROWSER_ALLOW_PIPE`, add the pipe to it, or set it to `*`. The pipe-name half is not lifted — it is the guard against the device path. |
 | `--all` / "here" scoping | `--split` being unsupported makes the Windows shape one browser per pane, in the foreground, holding that pane's console for as long as it lives — so a CLI process running in that pane *at the same time* is impossible and `inCurrentTab` is false for every browser, always. Filtering on it would scope every command to nothing, so `scopeHere` returns the whole list and `--browser <key>` disambiguates. | `--split`, above. |
 
 ### Not copied from upstream at all
@@ -321,24 +322,41 @@ reporting still on. That is not hypothetical. It is how a pane of the production
 instance was found wrecked eighteen hours after the port run ended
 ([`06-acceptance.md`](06-acceptance.md), preamble).
 
-The guard is opt-in and **debug-only**, in that order for two different reasons. Opt-in
-because on Windows the shipped product *is* a checkout — `pnpm -r build` runs
-`cargo build -p pixel-node` with no `--release` — so a guard that refused an unlisted
-instance by default would refuse every ordinary run. Debug-only because a value left
-behind in a shell profile must never be able to stop a shipped browser drawing: a
-release build ignores the variable entirely. Set it, and a debug build publishes only
-into the instances it names (comma- or semicolon-separated, or `*`), and says the
-variable's name when it refuses.
+The guard is **opt-in**, because on Windows the shipped product *is* a checkout —
+`pnpm -r build` runs `cargo build -p pixel-node` with no `--release` — so a guard that
+refused an unlisted instance by default would refuse every ordinary run. Set it, and the
+browser addresses only the instances it names (comma- or semicolon-separated, or `*`),
+and says the variable's name when it refuses.
 
-It is enforced **twice, on purpose**. `cli/src/pane.ts` imports nothing from the
-workspace — that is a deliberate constraint, so the CLI can address a pane with no build
-and no engine — which means it carries its own copy of the fallback pipe name, and a
-guard on the engine alone would leave the CLI publishing into production. The
-duplication is the same one the addressing rules already have, for the same reason, and
-it is pinned the same way: `HOST_CASES` now carries `AGWINTERM_PIPE` rows so all three
-readers of a pipe name — `inAgwintermPane`, `paneClearRequest` and the engine — are held
-to one character set and cannot drift apart again. The dev workflow the variable belongs
-to is in [the README](../../README.md#working-on-the-browser).
+It is enforced in **three** places, and only one of them can be debug-only. The engine's
+copy (`agwinterm.rs`'s `pipe_refusal`) takes `cfg!(debug_assertions)`, so a `--release`
+engine ignores the variable outright. The CLI's two copies cannot: `tsc` emits the same
+JavaScript for every build, so there is no build kind for them to consult, and they
+honour the variable whenever it is set. They are not the same weight and the difference
+is worth stating —
+
+| reader | what it withholds | build-gated |
+|---|---|---|
+| `agwinterm.rs` `HostTarget::from_env` | the frame — the engine refuses to start against the instance | yes, `debug_assertions` |
+| `cli/src/unsupported.ts` `inAgwintermPane` | the **launch** — `open` fails before Electron is spawned | no |
+| `cli/src/pane.ts` `paneClearRequest` | the `image.clear` on the way out, and `pane-clear`'s | no |
+
+The ungated launch refusal is the one with a user-visible edge: a value left behind in a
+shell profile stops `open` in a shipped build. It is mitigated by the same fact that made
+the guard opt-in — the shipped build is that unoptimised checkout, so its engine reads
+the variable too and would have refused every frame anyway. Refusing at the launch, with
+a message naming the variable and the way out, is the legible form of a browser that
+would otherwise start and show nothing.
+
+The duplication itself is the same one the addressing rules already have, for the same
+reason: `cli/src/pane.ts` imports nothing from the workspace — a deliberate constraint,
+so the CLI can address a pane with no build and no engine — which means it carries its
+own copy of the fallback pipe name, and a guard on the engine alone would leave the CLI
+publishing into production. It is pinned the same way: `HOST_CASES` now carries
+`AGWINTERM_PIPE` rows so all three readers of a pipe name — `inAgwintermPane`,
+`paneClearRequest` and the engine — are held to one character set and cannot drift apart
+again. The dev workflow the variable belongs to is in
+[the README](../../README.md#working-on-the-browser).
 
 ### A control-pipe exchange has a deadline
 

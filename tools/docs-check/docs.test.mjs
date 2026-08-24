@@ -393,24 +393,48 @@ test("the control-pipe deadline the docs derive is the one the engine uses", () 
 });
 
 /**
- * The dev guard, in **both** readers.
+ * The dev guard, in **all three** readers.
  *
- * `cli/src/pane.ts` imports nothing from the workspace on purpose, so it carries its
- * own copy of the fallback pipe name — which is why a guard on the engine alone left
- * the CLI publishing into production, the case that actually wrecked a pane. The
- * as-built doc says it is enforced twice; this is that claim, checked.
+ * `cli/src/pane.ts` and `cli/src/unsupported.ts` import nothing from the workspace on
+ * purpose, so each carries its own copy of the fallback pipe name — which is why a
+ * guard on the engine alone left the CLI publishing into production, the case that
+ * actually wrecked a pane. The as-built doc tabulates three readers and what each one
+ * withholds; this is that claim, checked. It said "twice" while a third had already
+ * been added, which is the drift a list of two sources could not catch.
  */
-test("the dev-build pipe guard is enforced in both readers, not just the engine", () => {
+test("the dev-build pipe guard is enforced in all three readers, not just the engine", () => {
   const doc = read("docs/design/07-as-built.md");
   assert.ok(
     doc.includes("TERMINAL_BROWSER_ALLOW_PIPE"),
     "the as-built doc should still name the guard variable",
   );
 
-  for (const source of ["engine/crates/pixel-core/src/agwinterm.rs", "cli/src/pane.ts"]) {
+  for (const source of [
+    "engine/crates/pixel-core/src/agwinterm.rs",
+    "cli/src/pane.ts",
+    "cli/src/unsupported.ts",
+  ]) {
     assert.ok(
       read(source).includes("TERMINAL_BROWSER_ALLOW_PIPE"),
-      `${source} no longer consults the guard — the docs say both halves do`,
+      `${source} no longer consults the guard — the docs say all three halves do`,
+    );
+    assert.ok(
+      doc.includes(source.split("/").pop()),
+      `${source} reads the guard and the as-built table does not name it`,
     );
   }
+
+  // Only the engine can gate on a build kind, and the docs must not claim otherwise:
+  // `tsc` emits the same JavaScript for every build, so the CLI's two copies honour
+  // the variable whenever it is set. A README that says a release build ignores it
+  // outright sends a user with a stale shell profile looking in the wrong place.
+  assert.ok(
+    read("engine/crates/pixel-core/src/agwinterm.rs").includes("cfg!(debug_assertions)"),
+    "the engine's copy is the build-gated one",
+  );
+  assert.doesNotMatch(
+    read("README.md"),
+    /a release\s+build ignores it entirely/,
+    "the README still claims the whole guard is release-inert; the CLI's copy is not",
+  );
 });

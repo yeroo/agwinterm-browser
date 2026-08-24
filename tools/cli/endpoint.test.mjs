@@ -255,15 +255,20 @@ async function close(server) {
   await closeServer(server);
 }
 
-after(() =>
-  teardown(
+// The failures are asserted on, not dropped. A `closeServer` that hits its own
+// deadline — a pipe a peer is still holding — is exactly the leak this file was
+// fixed for, and an `after` hook that swallows it reports a clean run over a
+// listening pipe.
+after(async () => {
+  const failures = await teardown(
     ...[...open].map((server) => () => close(server)),
     ...[...children].map((child) => () => {
       children.delete(child);
       child.kill();
     }),
-  ),
-);
+  );
+  assert.deepEqual(failures, [], "teardown left something open");
+});
 
 /** Listens on `endpoint` and answers every line with `{ok:true}`. */
 function serve(endpoint) {

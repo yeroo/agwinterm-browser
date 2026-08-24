@@ -118,6 +118,12 @@ its whole purpose, since it runs when things are already broken — and it **pri
 so "it worked" and "there was nothing wrong here" do not look identical on a pane that was already
 fine. It will not take down a picture this browser never drew: with no frame directory of ours on
 disk it reports that the placement is someone else's and leaves it alone, restoring the console
+either way. Having cleared one, it deletes the directory that proved it, so a second run reports an
+already-repaired pane as the nothing-to-do it is.
+
+Two cases it deliberately leaves painted, both reported rather than silent: a pane holding a
+placement no frame directory of ours accounts for, and a pane whose instance
+[`TERMINAL_BROWSER_ALLOW_PIPE`](#working-on-the-browser) does not list. The console is restored
 either way.
 
 Killing the **CLI** rather than the browser is the case it exists for. On Windows a child spawned
@@ -142,7 +148,7 @@ $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
 | `TERMINAL_BROWSER_CELL_PX` | `<width>x<height>` in device pixels. Consulted before the host, so it also corrects a host that answers wrongly. |
 | `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
 | `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
-| `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances a **debug** build may draw into: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard. See [Working on the browser](#working-on-the-browser). |
+| `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances this build may address: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard — and unset is what you want unless you are developing the browser. Set, it stops the **CLI** launching into an instance it does not name, in every build, and stops a **debug** engine drawing into one. See [Working on the browser](#working-on-the-browser). |
 
 ### Working on the browser
 
@@ -171,17 +177,29 @@ node cli\dist\main.js https://example.com
 
 Step 4 is the guard, and it is opt-in for a reason: on Windows the shipped product *is* a checkout —
 `pnpm -r build` runs `cargo build -p pixel-node` with no `--release` — so a guard that refused an
-unlisted instance by default would refuse every ordinary run. Setting the variable arms it; a release
-build ignores it entirely, so a value left in a shell profile can never stop a shipped browser
-drawing. `tools/milestone/run-milestone.cmd` defaults it to `agwinterm-dev` on your behalf.
+unlisted instance by default would refuse every ordinary run. Setting the variable arms it.
+`tools/milestone/run-milestone.cmd` defaults it to `agwinterm-dev` on your behalf.
+
+**Unset it when you are done.** The two halves read the variable differently and only one of them
+has a build to consult. The engine's copy is `debug_assertions`-only, so a `--release` engine ignores
+it; the CLI's cannot be — `tsc` emits the same JavaScript either way — so `terminal-browser open`
+honours it in every build and *refuses to launch* into an instance the list does not name. Since the
+shipped Windows build is that same unoptimised checkout, a stale value in a shell profile would have
+stopped the browser drawing regardless; refusing up front, with a message naming the variable and the
+way out, is the visible version of that. `pane-clear` withholds its `image.clear` for the same reason
+and says so.
 
 If a pane does end up wrecked anyway, [`pane-clear`](#recovering-a-pane) in that pane is the
-recovery.
+recovery — with one caveat, below: it will not clear a pane belonging to an instance the guard
+excludes, which is the pane a dev-instance guard makes most likely to be wrecked. Unset the variable
+(or set it to `*`) for that one command.
 
 ### What this port refuses
 
 `--ssh`, `upgrade`, `--split` and `shutdown` are refused on Windows, each naming its own obstacle,
-and `setup`'s AppArmor step now says out loud that there is nothing to install. None of them is a
+and `setup`'s AppArmor step now says out loud that there is nothing to install. `open` refuses two
+more from the pane's own environment: an `AGWINTERM_PIPE` that is not a pipe name, and — when
+[`TERMINAL_BROWSER_ALLOW_PIPE`](#working-on-the-browser) is set — an instance it does not list. None of them is a
 platform check standing in for a reason — the reasons are in
 [`docs/design/07-as-built.md`](docs/design/07-as-built.md#dropped-or-refused-in-the-cli).
 

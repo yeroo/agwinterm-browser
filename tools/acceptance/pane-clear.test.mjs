@@ -59,8 +59,9 @@ const { DISABLE_REPORTING, FRAME_DIR_PREFIX } = createRequire(import.meta.url)(
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "winterm-accept-"));
 const strays = [];
 after(async () => {
-  await teardown(...strays.map((pid) => () => forceKill(pid, { tree: true })));
+  const failures = await teardown(...strays.map((pid) => () => forceKill(pid, { tree: true })));
   fs.rmSync(scratch, { recursive: true, force: true });
+  assert.deepEqual(failures, [], "a child of this suite would not die");
 });
 
 /** How long a child of this suite gets before it is a hang rather than a run. */

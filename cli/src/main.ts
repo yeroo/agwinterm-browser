@@ -491,6 +491,12 @@ async function openInForeground(argv: string[]): Promise<number> {
     // whatever the pane was showing before it started. The engine names its frame
     // directory after this process, so this is the exact question, not the broad one
     // `pane-clear` has to settle for.
+    //
+    // A spawn that failed outright leaves `child.pid` undefined, and that is the most
+    // extreme case of the same thing: no process, so no frame, so nothing of ours to
+    // take back. `ownedFrames` reads the *present* `pid` key as the precise question
+    // and answers "nothing" — the one thing it must not do here is read a missing pid
+    // as "any pid", which would be the unconditional clear again under a new name.
     await clearOwnedPaneFrame(process.env, { pid: child.pid });
     // And the console with it. The engine put *this* process's console on the
     // alternate screen, hid the cursor and turned on mouse reporting; `ModeGuard`

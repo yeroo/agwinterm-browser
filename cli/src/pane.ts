@@ -93,6 +93,8 @@ export interface ClearRequest {
   endpoint: string;
   /** The single JSON line to write, newline included. */
   line: string;
+  /** The pane the line addresses, carried out rather than re-parsed back off it. */
+  target: string;
 }
 
 /**
@@ -129,6 +131,7 @@ export function paneClearRequest(env: PaneEnv): ClearRequest | null {
   return {
     endpoint: PIPE_PREFIX + pipe,
     line: `${JSON.stringify(request)}\n`,
+    target,
   };
 }
 
@@ -178,12 +181,17 @@ export function pipeAllowed(list: string | null | undefined, pipe: string): bool
  * reporting still on, eighteen hours later.
  *
  * One asymmetry with the engine, deliberately. `agwinterm.rs` consults the variable
- * only under `debug_assertions`, so a value inherited from a shell profile cannot
- * stop a shipped browser drawing. The CLI has no build kind to consult — `tsc`
- * produces the same JavaScript either way — so it honours the variable whenever it is
- * set. That is the safe direction: the only thing the CLI withholds is an
- * `image.clear` against an instance the guard says is not ours, and the report says
- * so rather than staying quiet.
+ * only under `debug_assertions`; the CLI has no build kind to consult — `tsc` produces
+ * the same JavaScript either way — so it honours the variable whenever it is set.
+ *
+ * Two things follow from that and they are not the same weight, so both are written
+ * down. `inAgwintermPane` (`cli/src/unsupported.ts`) refuses the *launch*, which is a
+ * visible failure a user could hit from a stale shell profile — mitigated only by the
+ * shipped Windows build being a checkout, where `debug_assertions` is on and the
+ * engine would have refused every frame anyway (see the README's "Working on the
+ * browser"). This copy is the milder half: it withholds an `image.clear` against an
+ * instance the guard says is not ours, and the report says so rather than staying
+ * quiet.
  *
  * Returns `null` when there is no pane at all; "nowhere to send" is a different
  * report line from "somewhere, and refused".
@@ -345,7 +353,10 @@ export interface OwnedFrames {
 }
 
 export interface OwnedFramesOptions {
-  /** Where publishers put their directories. Defaults to `os.tmpdir()`. */
+  /**
+   * Where publishers put their directories. Defaults to [`frameRoots`] — every temp
+   * directory the engine could have chosen, not only the one Node prefers.
+   */
   root?: string;
   /**
    * Only accept the directory this pid left behind.
@@ -354,8 +365,49 @@ export interface OwnedFramesOptions {
    * directory after that pid, so the exit path can ask the precise question. The
    * `pane-clear` verb runs when that process is long gone and its pid unknowable,
    * so it asks the broad one.
+   *
+   * The key being *present* is what selects the precise question, and a present key
+   * whose value is `undefined` owns **nothing** rather than everything. That is not
+   * pedantry: `spawn` leaves `child.pid` undefined when it could not start the
+   * process at all, so `{ pid: child.pid }` on that path would widen back to the
+   * machine-wide search and restore the unconditional clear this rule exists to
+   * remove — on precisely the case it was written for, a browser that failed before
+   * its first frame.
    */
   pid?: number;
+}
+
+/**
+ * Every temp directory a publisher could have put its frames in.
+ *
+ * The engine asks Rust for `std::env::temp_dir()`, which on Windows is
+ * `GetTempPath2`: `TMP` first, then `TEMP`, then the profile directory. Node's
+ * `os.tmpdir()` reads `TEMP` first. The two agree on any machine that sets the pair
+ * to one value, which is most of them and not the one that matters — a shell that
+ * sets only `TMP`, or sets the two apart, puts the engine's frame directory
+ * somewhere `os.tmpdir()` alone would never look, and the recovery verb would report
+ * "nothing of ours to clear" at a pane that is still painted. So both are searched,
+ * and the report names what it searched rather than a directory it assumed.
+ */
+function frameRoots(env: PaneEnv = process.env): string[] {
+  const roots: string[] = [];
+  for (const value of [os.tmpdir(), env.TMP, env.TEMP]) {
+    const root = value?.trim();
+    if (!root) continue;
+    const full = path.resolve(root);
+    if (!roots.some((seen) => samePath(seen, full))) roots.push(full);
+  }
+  return roots;
+}
+
+/** Path equality as the filesystem sees it, which on Windows ignores case. */
+function samePath(a: string, b: string): boolean {
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+/** The directories [`ownedFrames`] will read, in the order it reads them. */
+export function searchedRoots(options: OwnedFramesOptions = {}): string[] {
+  return options.root === undefined ? frameRoots() : [options.root];
 }
 
 /**
@@ -366,36 +418,40 @@ export interface OwnedFramesOptions {
  * actually looking at.
  */
 export function ownedFrames(options: OwnedFramesOptions = {}): OwnedFrames | null {
-  const root = options.root ?? os.tmpdir();
-  let names: string[];
-  try {
-    names = fs.readdirSync(root);
-  } catch {
-    return null;
-  }
+  // A pid the caller asked about and does not have is not a licence to ask the
+  // broad question. See [`OwnedFramesOptions.pid`].
+  if ("pid" in options && options.pid === undefined) return null;
   // The trailing `-` matters: without it a pid of 123 would adopt 1234's frames.
   const wanted =
     options.pid === undefined ? FRAME_DIR_PREFIX : `${FRAME_DIR_PREFIX}${options.pid}-`;
   let best: OwnedFrames | null = null;
   let bestAt = -Infinity;
-  for (const name of names) {
-    if (!name.startsWith(wanted)) continue;
-    const dir = path.join(root, name);
-    let frames = 0;
-    let at = -Infinity;
+  for (const root of searchedRoots(options)) {
+    let names: string[];
     try {
-      for (const entry of fs.readdirSync(dir)) if (FRAME_FILE.test(entry)) frames += 1;
-      at = fs.statSync(dir).mtimeMs;
+      names = fs.readdirSync(root);
     } catch {
       continue;
     }
-    // An empty directory is a browser that died before it drew anything, which is
-    // the engine's `written.is_empty()` case: nothing was placed, so nothing is ours.
-    if (frames === 0) continue;
-    if (at <= bestAt) continue;
-    const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
-    best = { dir, pid: Number.isFinite(pid) ? pid : null, frames };
-    bestAt = at;
+    for (const name of names) {
+      if (!name.startsWith(wanted)) continue;
+      const dir = path.join(root, name);
+      let frames = 0;
+      let at = -Infinity;
+      try {
+        for (const entry of fs.readdirSync(dir)) if (FRAME_FILE.test(entry)) frames += 1;
+        at = fs.statSync(dir).mtimeMs;
+      } catch {
+        continue;
+      }
+      // An empty directory is a browser that died before it drew anything, which is
+      // the engine's `written.is_empty()` case: nothing was placed, so nothing is ours.
+      if (frames === 0) continue;
+      if (at <= bestAt) continue;
+      const pid = Number.parseInt(name.slice(FRAME_DIR_PREFIX.length), 10);
+      best = { dir, pid: Number.isFinite(pid) ? pid : null, frames };
+      bestAt = at;
+    }
   }
   return best;
 }
@@ -408,6 +464,8 @@ export interface PaneClearOutcome {
   owned: OwnedFrames | null;
   /** True only when the host answered the clear. */
   cleared: boolean;
+  /** The temp directories that were actually read, so the report can name them. */
+  searched: string[];
 }
 
 /**
@@ -422,11 +480,26 @@ export async function clearOwnedPaneFrame(
   env: PaneEnv,
   options: OwnedFramesOptions & { timeoutMs?: number } = {},
 ): Promise<PaneClearOutcome> {
+  const searched = searchedRoots(options);
   const request = paneClearRequest(env);
   const owned = ownedFrames(options);
-  if (!request || !owned) return { request, owned, cleared: false };
+  if (!request || !owned) return { request, owned, cleared: false, searched };
   const cleared = await clearPaneFrame(env, options.timeoutMs ?? 1_000);
-  return { request, owned, cleared };
+  // The evidence goes with the placement it authorised. `FrameDir`'s `Drop` is what
+  // removes this directory on an ordinary exit, so one still standing is a browser
+  // that ran no destructor — and once the host has answered the clear, that is no
+  // longer true of it. Left in place it would report the same wreck as freshly found
+  // on every later run, which is the one distinction this verb exists to draw, and it
+  // would go on authorising clears against panes it never drew on until `sweep_stale`
+  // reaches it an hour later. Best-effort, because this runs on paths that must not
+  // fail: a directory that will not delete is `sweep_stale`'s problem, not the
+  // recovery's.
+  if (cleared) {
+    try {
+      fs.rmSync(owned.dir, { recursive: true, force: true });
+    } catch {}
+  }
+  return { request, owned, cleared, searched };
 }
 
 // -- the recovery verb ---------------------------------------------------------
@@ -491,23 +564,37 @@ export function paneClearReport(
   if (outcome.request) {
     const pipe = nonempty(env, "AGWINTERM_PIPE");
     const where = pipe ? `pipe ${pipe}` : `pipe ${DEFAULT_PIPE} (AGWINTERM_PIPE unset)`;
-    const target = (JSON.parse(outcome.request.line) as { target: string }).target;
-    lines.push(`pane-clear: ${where}, session ${target}`);
+    lines.push(`pane-clear: ${where}, session ${outcome.request.target}`);
   } else if (refusal) {
     lines.push(`pane-clear: this pane's instance is not addressable — ${refusal}`);
   } else {
     lines.push("pane-clear: no agwinterm pane in this environment");
   }
 
+  // Named rather than assumed: `os.tmpdir()` is not necessarily where the engine put
+  // them, which is the whole reason [`frameRoots`] searches more than one place.
+  const roots = outcome.searched.join(" or ");
   if (!outcome.owned) {
-    lines.push(
-      outcome.request
-        ? `  frame:   nothing of ours to clear — no ${FRAME_DIR_PREFIX}* directory under ` +
-          `${os.tmpdir()} holds a frame, so any picture on this pane was placed by ` +
-          "something else and was left alone"
-        : "  frame:   nothing to clear — no frames of ours were left behind, and there " +
+    if (outcome.request) {
+      lines.push(
+        `  frame:   nothing of ours to clear — no ${FRAME_DIR_PREFIX}* directory under ` +
+          `${roots} holds a frame, so any picture on this pane was placed by ` +
+          "something else and was left alone",
+      );
+    } else if (refusal) {
+      // "There is no pane here" would be a lie to someone standing in one. The pane
+      // exists and the guard above is why nothing was sent to it.
+      lines.push(
+        `  frame:   nothing of ours to clear — no ${FRAME_DIR_PREFIX}* directory under ` +
+          `${roots} holds a frame, and the guard above would have withheld the ` +
+          "image.clear in any case",
+      );
+    } else {
+      lines.push(
+        "  frame:   nothing to clear — no frames of ours were left behind, and there " +
           "is no pane here to address anyway",
-    );
+      );
+    }
   } else if (refusal) {
     lines.push(
       `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, and no ` +

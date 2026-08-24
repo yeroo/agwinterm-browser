@@ -84,18 +84,26 @@ describe("a wait that does complete", () => {
 
   it("does not hold the process open with a timer it no longer needs", async () => {
     // A helper meant to stop hangs must not become one: an uncleared 30s timer
-    // after a 1ms resolution keeps the event loop alive for 30 seconds. Measured
-    // rather than asserted on internals — the whole race resolves promptly.
-    const started = process.hrtime.bigint();
+    // after a 1ms resolution keeps the event loop alive for 30 seconds.
+    //
+    // Asserted on the live handle rather than on how long the call took. `race`
+    // settles on the resolved promise whether or not the timer was cleared, so an
+    // elapsed-time assertion passes with the `clearTimeout` deleted — it measures
+    // the thing that was never in doubt. The timer is what keeps the process up,
+    // so the timer is what is counted.
+    const timers = () => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const before = timers();
     await withDeadline(Promise.resolve(1), "an immediate value", 30_000);
-    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(elapsedMs < 1000, `the resolved wait took ${elapsedMs}ms`);
+    assert.equal(timers(), before, "the deadline's timer outlived the wait it bounded");
   });
 });
 
 describe("binding a server", () => {
   const open = new Set();
-  after(() => teardown(...[...open].map((server) => () => closeServer(server))));
+  after(async () => {
+    const failures = await teardown(...[...open].map((server) => () => closeServer(server)));
+    assert.deepEqual(failures, [], "teardown left a server listening");
+  });
 
   const track = (server) => (open.add(server), server);
 

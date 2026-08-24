@@ -1,4 +1,4 @@
-# The CLI on Windows: one endpoint abstraction, and five refusals
+# The CLI on Windows: one endpoint abstraction, and the refusals
 
 This is the port plan's Task 13. It covers the two control protocols the CLI speaks,
 where the application's own files live, and the commands that Windows cannot honour.
@@ -110,7 +110,7 @@ reason.
 The rule is the plan's: **do not leave a command that appears to work but does
 not.** Each of these names its obstacle rather than the platform.
 `cli/src/unsupported.ts` owns the wording, imports nothing, and is driven directly
-by `tools/cli/cli.test.mjs`.
+by `tools/cli/unsupported.test.mjs`.
 
 **`--ssh`** — the tunnel is multiplexed over an ssh control socket (`ssh -S`,
 `ssh -O exit`) and reused by every later command, including `tar` for `--ssh-bundle`.
@@ -144,6 +144,18 @@ instance pid* — in the foreground shape, a browser somebody is using — and t
 `kill`s it while reporting that it stopped a daemon. The Windows branch returns
 before that.
 
+**the pane's own agwinterm instance** — added after the port, by
+`20260822-post-port-corrections.md`'s Task 2. `open` refuses two things about the pane
+it was run in, both of them checks the engine already made, moved ahead of the spawn:
+an `AGWINTERM_PIPE` that is not a pipe name (`[A-Za-z0-9._-]`, because `\\.\` is a
+normalised device path and `..\` walks out of the pipe namespace), and — when
+`TERMINAL_BROWSER_ALLOW_PIPE` is set — an instance that list does not name. Refused
+here rather than at the first frame because a browser the CLI launched and the engine
+then refused every frame from is a browser that starts and shows nothing. The allow-list
+half is `debug_assertions`-gated in the engine and cannot be in the CLI; the asymmetry
+and its consequence are in
+[07](07-as-built.md#terminalbrowserallowpipe--a-dev-build-refuses-an-instance-it-was-not-named-at).
+
 **`herdr`** (`pixel-core/src/herdr.rs`, already `#[cfg(unix)]`) — permanently
 disabled, not pending. It is not a transport for the agwinterm path; it is a
 different host, found through `HERDR_SOCKET_PATH` and negotiated with
@@ -165,5 +177,24 @@ of relying on the process tree staying exactly one level deep.
 The graphics check is replaced rather than skipped. `probeGraphics` writes an APC
 escape and waits for a reply; ConPTY strips APC, so on Windows it can only time out,
 and the answer would be about the wrong channel anyway. `windowsHostRefusal` asks
-the question that decides it — is this an agwinterm pane — from the pane's own
-environment.
+the questions that decide it — is this an agwinterm pane, is its `AGWINTERM_PIPE` a
+pipe name, and is its instance one `TERMINAL_BROWSER_ALLOW_PIPE` names — from the
+pane's own environment. The last two were added after the port; see the refusals above.
+
+`openInForeground` also takes the pane back on its way out, which is the other half of
+`pane-clear` below: `clearOwnedPaneFrame` sends an `image.clear` only for a frame
+directory the process it spawned actually left behind, and `restorePaneConsole` undoes
+the alternate screen, the hidden cursor and mouse reporting.
+
+## `pane-clear`, when neither half ran
+
+The exits that run no destructor — a `taskkill /F` on the CLI, a console that went away
+underneath both — leave the pane holding a placement with mouse reporting on, and leave
+no process to take either back. `terminal-browser pane-clear` is that second chance,
+run in the wrecked pane, with no engine, no instance in the registry and no browser
+alive. It is dispatched ahead of every liveness check in `cli/src/main.ts` and always
+exits 0, because it is a repair tool run against something already broken. `cli/src/pane.ts`
+holds it and imports nothing from the workspace for exactly that reason. What decides
+whether it sends anything is the engine's rule read off the filesystem: the frame
+directory `FrameDir`'s `Drop` would have removed. See
+[07](07-as-built.md#taking-the-picture-back).

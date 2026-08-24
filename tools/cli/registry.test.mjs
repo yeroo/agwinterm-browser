@@ -26,7 +26,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
 import { requireBuilt } from "../lib/built.mjs";
-import { closeServer, listen, withDeadline } from "../lib/deadline.mjs";
+import { closeServer, listen, teardown, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -124,22 +124,48 @@ function host(key, overrides = {}) {
 let seq = 0;
 const uniqueKey = () => `${process.pid}-t${++seq}`;
 
-/** Opens a registry and guarantees it is disposed even if an assertion throws. */
-async function withRegistry(fn, overrides = {}) {
-  const key = uniqueKey();
+// Every registry this file constructs, so a test that throws before its own
+// `dispose` cannot leave a `net.Server` listening. A live server handle keeps the
+// event loop alive after the last test has reported, which `--test-timeout` can
+// notice but cannot drain — the run would fail *and* hang, which is worse than the
+// unbounded wait this suite was fixed for.
+const opened = new Set();
+after(async () => {
+  const failures = await teardown(...[...opened].map((registry) => () => registry.dispose()));
+  assert.deepEqual(failures, [], "a registry would not dispose");
+});
+
+/** A registry tracked for teardown, bound within a deadline. */
+async function openRegistry(key, overrides = {}) {
   const registry = new Registry(host(key, overrides));
+  opened.add(registry);
   // Binding is asynchronous: the endpoint is probed before it is taken, and the
   // row is written only once `listen` has actually succeeded, so that nothing
   // advertises a control channel it does not have. `ready` is that moment.
   //
   // Bounded, because a bind that never completes is the one thing this whole file
   // is downstream of: an unbounded `await` here hangs before a single assertion
-  // has run, and the failure would name the file rather than the pipe.
+  // has run, and the failure would name the file rather than the pipe. Tracked
+  // *before* the wait, because the bind that will not finish is exactly the one
+  // whose server has to be closed by the `after` hook.
   await withDeadline(registry.ready, `the registry for ${key} to bind`);
+  return registry;
+}
+
+/** Disposes a registry and stops tracking it. Idempotent, as `dispose` is. */
+function disposeRegistry(registry) {
+  opened.delete(registry);
+  registry.dispose();
+}
+
+/** Opens a registry and guarantees it is disposed even if an assertion throws. */
+async function withRegistry(fn, overrides = {}) {
+  const key = uniqueKey();
+  const registry = await openRegistry(key, overrides);
   try {
     return await fn(registry, key);
   } finally {
-    registry.dispose();
+    disposeRegistry(registry);
   }
 }
 
@@ -235,36 +261,32 @@ describe("the control protocol over that endpoint", () => {
 describe("disposal", () => {
   it("stops answering, and frees the name", async () => {
     const key = uniqueKey();
-    const registry = new Registry(host(key));
-    await withDeadline(registry.ready, `the registry for ${key} to bind`);
+    const registry = await openRegistry(key);
     const endpoint = registry.record().endpoint;
     assert.equal(await store.endpointAlive(endpoint, 1000), true);
-    registry.dispose();
+    disposeRegistry(registry);
     assert.equal(await store.endpointAlive(endpoint, 1000), false);
     // and the name is free for the next browser with the same key
-    const again = new Registry(host(key));
-    await withDeadline(again.ready, `the second registry for ${key} to bind`);
+    const again = await openRegistry(key);
     try {
       assert.equal(await store.endpointAlive(endpoint, 1000), true);
     } finally {
-      again.dispose();
+      disposeRegistry(again);
     }
   });
 
   it("drops its row on the way out", async () => {
     globalThis.__removed = [];
     const key = uniqueKey();
-    const registry = new Registry(host(key));
-    await withDeadline(registry.ready, `the registry for ${key} to bind`);
-    registry.dispose();
+    const registry = await openRegistry(key);
+    disposeRegistry(registry);
     assert.ok(globalThis.__removed.includes(key), "the row was not removed");
   });
 
   it("is idempotent, so a second close is not an error", async () => {
     const key = uniqueKey();
-    const registry = new Registry(host(key));
-    await withDeadline(registry.ready, `the registry for ${key} to bind`);
-    registry.dispose();
+    const registry = await openRegistry(key);
+    disposeRegistry(registry);
     registry.dispose();
   });
 });

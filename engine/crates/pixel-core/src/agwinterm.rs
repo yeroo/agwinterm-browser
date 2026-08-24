@@ -112,6 +112,16 @@ const ERROR_PIPE_BUSY: i32 = 231;
 const ERROR_NO_DATA: i32 = 232;
 /// `ERROR_PIPE_NOT_CONNECTED` — the server end has gone.
 const ERROR_PIPE_NOT_CONNECTED: i32 = 233;
+/// `ERROR_IO_INCOMPLETE` — the operation is still pending.
+///
+/// The *other* way a bounded collect reports "not yet", and the dangerous one:
+/// `GetOverlappedResultEx` answers `WAIT_TIMEOUT` when a non-zero wait expires and
+/// this when the wait was zero. Both leave the kernel holding the buffer, so both
+/// have to reach [`Connection::give_up`] — a return that skips it frees a
+/// [`PendingIo`] an in-flight read may still be writing into. [`millis_until`] keeps
+/// the wait off zero so this should be unreachable; it is handled because "should be"
+/// is not the standard the rest of this path is held to.
+const ERROR_IO_INCOMPLETE: i32 = 996;
 
 const OPEN_ATTEMPTS: u32 = 20;
 const BUSY_WAIT: Duration = Duration::from_millis(25);
@@ -586,7 +596,7 @@ impl Connection {
             return Ok(moved as usize);
         }
         let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(WAIT_TIMEOUT as i32) {
+        if !still_pending(&err) {
             return Err(err);
         }
         self.give_up(handle, overlapped, &mut moved);
@@ -616,7 +626,7 @@ impl Connection {
         // SAFETY: as above.
         let settled =
             unsafe { GetOverlappedResultEx(handle, overlapped, moved, CANCEL_GRACE_MS, 0) };
-        if settled == 0 && io::Error::last_os_error().raw_os_error() == Some(WAIT_TIMEOUT as i32) {
+        if settled == 0 && still_pending(&io::Error::last_os_error()) {
             // A cancellation that will not complete leaves the kernel holding
             // pointers into this connection. Freeing them is the one thing worse than
             // leaking them, so the connection is abandoned instead.
@@ -660,14 +670,40 @@ fn ended(err: &io::Error) -> bool {
         )
 }
 
-/// The deadline as the `dwMilliseconds` a Win32 wait takes, saturating at zero.
-fn millis_until(deadline: Instant) -> u32 {
-    u32::try_from(
-        deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis(),
+/// Whether a failed collect means the operation is still in the kernel's hands.
+///
+/// The two codes `GetOverlappedResultEx` reports for "not finished": `WAIT_TIMEOUT`
+/// when the wait it was given expired, [`ERROR_IO_INCOMPLETE`] when it was given no
+/// wait at all. Anything else is a completion — with a status, possibly a failure —
+/// and the buffers are the caller's again.
+fn still_pending(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(code) if code == WAIT_TIMEOUT as i32 || code == ERROR_IO_INCOMPLETE
     )
-    .unwrap_or(u32::MAX)
+}
+
+/// The deadline as the `dwMilliseconds` a Win32 wait takes.
+///
+/// Rounded **up**, and clamped away from both ends of the range:
+///
+///   - never zero, because a zero wait does not time out — it returns
+///     [`ERROR_IO_INCOMPLETE`] immediately, on a read that is still pending. One
+///     millisecond of over-wait is the price of every expiry taking the same path.
+///   - never `u32::MAX`, which is `INFINITE`: the fallback for an arithmetic result
+///     that does not fit would otherwise be "wait forever", which is the exact state
+///     this whole rewrite exists to remove. Unreachable while
+///     [`EXCHANGE_DEADLINE`] is a constant of 1040 ms, and a landmine the moment it
+///     is not.
+///   - rounded up rather than truncated so the collected wait is never *shorter*
+///     than what is left of the deadline, which is what makes "the exchange took at
+///     least `EXCHANGE_DEADLINE`" true rather than nearly true.
+fn millis_until(deadline: Instant) -> u32 {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let ms = left.as_millis() + u128::from(!left.subsec_nanos().is_multiple_of(1_000_000));
+    u32::try_from(ms)
+        .unwrap_or(u32::MAX - 1)
+        .clamp(1, u32::MAX - 1)
 }
 
 /// Whether a failed exchange is worth re-dialling for, as opposed to reporting.
@@ -1869,6 +1905,56 @@ mod tests {
             waited < EXCHANGE_DEADLINE * 3,
             "{waited:?} is not a bounded wait",
         );
+    }
+
+    #[test]
+    fn a_wait_is_never_zero_and_never_infinite() {
+        // The two values that break the give-up path, at opposite ends of the same
+        // `u32`. A zero wait does not time out — `GetOverlappedResultEx` answers
+        // `ERROR_IO_INCOMPLETE` immediately, which is not `WAIT_TIMEOUT` and so
+        // would return past `give_up` with a read still pending and free the buffer
+        // the kernel is holding. `u32::MAX` is `INFINITE`, which is the unbounded
+        // wait this whole client was rewritten to remove.
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            millis_until(past),
+            1,
+            "an expired deadline must still be a wait"
+        );
+        assert_eq!(millis_until(Instant::now()), 1);
+
+        let ahead = millis_until(Instant::now() + EXCHANGE_DEADLINE);
+        assert!(
+            ahead >= 1 && ahead != u32::MAX,
+            "{ahead} is INFINITE or zero"
+        );
+        // Rounded up, not truncated: the collected wait is never shorter than what
+        // is left, which is what makes the deadline a floor rather than nearly one.
+        assert!(
+            u128::from(ahead) >= EXCHANGE_DEADLINE.as_millis(),
+            "{ahead} ms is less than the {} ms remaining",
+            EXCHANGE_DEADLINE.as_millis(),
+        );
+    }
+
+    #[test]
+    fn both_of_windows_not_finished_yet_codes_reach_the_cancel_path() {
+        // `WAIT_TIMEOUT` when the wait expired, `ERROR_IO_INCOMPLETE` when there was
+        // no wait. Only the first was handled, and the difference is a `PendingIo`
+        // freed under an in-flight read rather than cancelled and waited out.
+        assert!(still_pending(&io::Error::from_raw_os_error(
+            WAIT_TIMEOUT as i32
+        )));
+        assert!(still_pending(&io::Error::from_raw_os_error(
+            ERROR_IO_INCOMPLETE
+        )));
+        // A completion — with a status, possibly a failure — is not still pending;
+        // treating one as pending would cancel an operation that already finished.
+        assert!(!still_pending(&io::Error::from_raw_os_error(ERROR_NO_DATA)));
+        assert!(!still_pending(&io::Error::from_raw_os_error(
+            ERROR_PIPE_NOT_CONNECTED
+        )));
+        assert!(!still_pending(&io::Error::other("not an OS error at all")));
     }
 
     #[test]

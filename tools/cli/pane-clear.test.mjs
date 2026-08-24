@@ -574,6 +574,60 @@ describe("whose placement it is", () => {
     assert.equal(pane.ownedFrames({ root, pid: 1234 }), null);
   });
 
+  it("owns nothing when the caller asked about a pid it does not have", (t) => {
+    // `spawn` leaves `child.pid` undefined when it could not start the process at
+    // all, and `openInForeground` passes `{ pid: child.pid }` regardless. Reading
+    // that as "any pid" would restore the unconditional clear on the one path the
+    // pid was added for: a browser that failed before its first frame -- a missing
+    // artifact, a refused pane, an instant crash -- taking down whatever the pane
+    // was showing before it started.
+    const root = freshRoot(t, "nopid");
+    leftoverFrames(root, 4242, 1);
+    assert.ok(pane.ownedFrames({ root }), "the broad question still finds it");
+    assert.equal(pane.ownedFrames({ root, pid: undefined }), null);
+  });
+
+  it("sends no clear when the process it asked about never started", async (t) => {
+    const host = hostOn(`winterm-owned-${process.pid}-nopid`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "nopidclear");
+    leftoverFrames(root, 4242, 1);
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, pid: undefined, timeoutMs: 500 },
+    );
+
+    assert.equal(outcome.owned, null);
+    assert.equal(outcome.cleared, false);
+    assert.deepEqual(host.lines, [], "a failed spawn cleared a placement it never made");
+  });
+
+  it("looks in every temp directory the engine could have chosen", (t) => {
+    // Rust's `std::env::temp_dir()` is `GetTempPath2` -- TMP first -- and Node's
+    // `os.tmpdir()` reads TEMP first. A shell that sets the two apart puts the
+    // engine's frames somewhere `os.tmpdir()` alone would never look, and the verb
+    // would report "nothing of ours to clear" at a pane that is still painted.
+    const roots = pane.searchedRoots();
+    for (const name of ["TMP", "TEMP"]) {
+      const value = process.env[name]?.trim();
+      if (!value) continue;
+      const resolved = path.resolve(value);
+      assert.ok(
+        roots.some((root) =>
+          process.platform === "win32"
+            ? root.toLowerCase() === resolved.toLowerCase()
+            : root === resolved,
+        ),
+        `${name} is not among the roots that would be searched`,
+      );
+    }
+    // An explicit root is still the only one, which is what every test here relies on.
+    const only = freshRoot(t, "onlyroot");
+    assert.deepEqual(pane.searchedRoots({ root: only }), [only]);
+  });
+
   it("does not let one pid adopt another's frames by prefix", (t) => {
     // Without the trailing separator, pid 424 would claim 4242's directory and clear
     // a placement it never made -- the exact rule this is here to keep.
@@ -629,6 +683,44 @@ describe("whose placement it is", () => {
     assert.equal(outcome.owned.frames, 2);
     assert.equal(host.lines.length, 1);
     assert.deepEqual(JSON.parse(host.lines[0]), { cmd: "image.clear", target: "pane-1" });
+  });
+
+  it("takes the evidence with the placement, so a repaired pane reads as repaired", async (t) => {
+    // The directory is `FrameDir`'s `Drop` not having run. Once the host has
+    // answered the clear that is no longer true of it, and leaving it would report
+    // the same wreck as freshly found on every later run -- which is the one
+    // distinction this verb exists to draw. It would also go on authorising clears
+    // against panes it never drew on until `sweep_stale` reaches it an hour later.
+    const host = hostOn(`winterm-owned-${process.pid}-consume`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "consume");
+    const dir = leftoverFrames(root, 4242, 2);
+    const env = inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" });
+
+    const first = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 1_000 });
+    assert.equal(first.cleared, true);
+    assert.equal(fs.existsSync(dir), false, "the frame directory outlived the clear");
+
+    const again = await pane.clearOwnedPaneFrame(env, { root, timeoutMs: 500 });
+    assert.equal(again.owned, null, "a second run found the wreck it had already fixed");
+    assert.equal(again.cleared, false);
+    assert.equal(host.lines.length, 1, "a second image.clear went to an already-clear pane");
+  });
+
+  it("keeps the evidence when the host never answered", async (t) => {
+    // Nothing was confirmed taken back, so nothing has been repaired. Deleting the
+    // directory here would throw away the only record that the pane is still wrong.
+    const root = freshRoot(t, "unanswered");
+    const dir = leftoverFrames(root, 4242, 1);
+
+    const outcome = await pane.clearOwnedPaneFrame(
+      inPane({ AGWINTERM_PIPE: `winterm-nobody-${process.pid}`, AGWINTERM_SESSION_ID: "pane-1" }),
+      { root, timeoutMs: 300 },
+    );
+
+    assert.equal(outcome.cleared, false);
+    assert.equal(fs.existsSync(dir), true, "the only record of the wreck was deleted");
   });
 });
 
@@ -770,7 +862,11 @@ describe("the pane-clear verb", () => {
     const thrower = () => {
       throw new Error("EPIPE");
     };
-    const report = pane.paneClearReport({}, { request: null, owned: null, cleared: false }, false);
+    const report = pane.paneClearReport(
+      {},
+      { request: null, owned: null, cleared: false, searched: pane.searchedRoots() },
+      false,
+    );
     assert.match(report.join("\n"), /console: could not be written to/);
     // And the command survives the stream that did it.
     assert.doesNotThrow(() => pane.restorePaneConsole({ write: thrower }, {}));
