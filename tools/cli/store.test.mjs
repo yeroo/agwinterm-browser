@@ -18,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
 
 import { requireBuilt } from "../lib/built.mjs";
+import { closeServer, listen, teardown, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -146,11 +147,8 @@ describe("pruning a dead browser", () => {
         ? store.pipeEndpoint("winterm-test", String(process.pid), name)
         : path.join(scratch, `${name}-${process.pid}.sock`);
     const server = net.createServer(() => {});
-    await new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(endpoint, resolve);
-    });
     servers.push(server);
+    await listen(server, endpoint);
     return endpoint;
   }
 
@@ -160,9 +158,11 @@ describe("pruning a dead browser", () => {
       ? store.pipeEndpoint("winterm-test", String(process.pid), `${name}-gone`)
       : path.join(scratch, `${name}-gone.sock`);
 
-  after(() => {
-    for (const server of servers) server.close();
-  });
+  // Awaited and bounded, unlike the fire-and-forget `server.close()` this used to
+  // be: a close that never completes because a connection is still up would have
+  // held the pipe past the end of the file with nothing reporting it, and one
+  // server that refuses must not skip the next one's teardown.
+  after(() => teardown(...servers.map((server) => () => closeServer(server))));
 
   it("keeps a browser whose process is alive and whose endpoint answers", async () => {
     seed([{ key: "live", pid: process.pid, endpoint: await listening("live") }]);
@@ -237,10 +237,13 @@ describe("pruning a dead browser", () => {
     });
     const held = [];
     try {
-      await new Promise((resolve, reject) => {
-        child.stdout.once("data", resolve);
-        child.once("exit", () => reject(new Error("the busy server never listened")));
-      });
+      await withDeadline(
+        new Promise((resolve, reject) => {
+          child.stdout.once("data", resolve);
+          child.once("exit", () => reject(new Error("the busy server never listened")));
+        }),
+        `the busy server on ${endpoint} to listen`,
+      );
       for (let at = 0; at < 6; at += 1) {
         const socket = net.connect(endpoint);
         socket.on("error", () => {});

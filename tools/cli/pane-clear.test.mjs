@@ -23,6 +23,8 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 
 import esbuild from "esbuild";
 
+import { closeServer, listen } from "../lib/deadline.mjs";
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
 
@@ -66,12 +68,12 @@ function hostOn(name, answer = '{"ok":true,"result":"cleared"}') {
     });
     socket.on("error", () => {});
   });
-  const listening = new Promise((resolve, reject) => {
-    server.once("listening", resolve);
-    server.once("error", reject);
-    server.listen(endpoint);
-  });
-  return { endpoint, name, lines, server, listening, close: () => server.close() };
+  // Both halves are bounded. The bind can fail (a name a previous run left held),
+  // and the close waits on every connection the client opened — the `answer: null`
+  // host below never ends one, so an unawaited `close()` would leave the pipe up
+  // for the rest of the run.
+  const listening = listen(server, endpoint);
+  return { endpoint, name, lines, server, listening, close: () => closeServer(server) };
 }
 
 /** A pane environment, with the three variables agwinterm sets. */

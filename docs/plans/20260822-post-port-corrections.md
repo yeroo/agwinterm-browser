@@ -141,15 +141,43 @@ mouse reporting ended up in a working pane for 18 hours.
 `tools/cli/registry.test.mjs` waits on a real named-pipe connection with no timeout of
 any kind. It hung for 18 hours and took `pnpm test` with it.
 
-- [ ] add `--test-timeout` to the `test` script in `package.json` so no run can hang
+- [x] add `--test-timeout` to the `test` script in `package.json` so no run can hang
       indefinitely regardless of which test is at fault
-- [ ] give every socket/pipe wait in `tools/cli/*.test.mjs` its own bounded timeout that
+- [x] give every socket/pipe wait in `tools/cli/*.test.mjs` its own bounded timeout that
       fails with a message naming what it was waiting for
-- [ ] audit the other `tools/*/*.test.mjs` for unbounded waits and bound them too
-- [ ] ensure servers and pipes are torn down in `after` hooks even when a test fails
-- [ ] write a test that a wait which never completes fails on the timeout rather than hanging
-- [ ] verify `pnpm test` completes from a clean checkout, and record the wall-clock time
-- [ ] run tests — must pass before Task 4
+- [x] audit the other `tools/*/*.test.mjs` for unbounded waits and bound them too
+- [x] ensure servers and pipes are torn down in `after` hooks even when a test fails
+- [x] write a test that a wait which never completes fails on the timeout rather than hanging
+- [x] verify `pnpm test` completes from a clean checkout, and record the wall-clock time
+- [x] run tests — must pass before Task 4
+
+Done 2026-08-24. `tools/lib/deadline.mjs` holds the rule the four `tools/cli/` suites now
+share — `withDeadline`, `listen`, `closeServer`, `onceWithin`, `teardown` — and
+`tools/lib/deadline.test.mjs` drives it against real pipes and real never-settling
+promises. `--test-timeout=120000` is the backstop for waits no suite knows about.
+
+Three things the work turned up:
+
+- **The hang was probably the teardown, not the wait.** `registry.test.mjs`'s mute-host
+  test called `server.close(resolve)` after destroying its connections, and `close` does
+  not complete until every accepted connection is fully gone. `closeServer` calls
+  `closeAllConnections()` first. `server.listen(endpoint, resolve)` in the same test was
+  the other candidate: `listen`'s callback is never invoked on a bind failure — that goes
+  to the `error` event — so a name a previous run left held would have hung there too.
+  Both are bounded now; the helpers subscribe to `error` as well as to success.
+- **`--test-timeout` only fires when something keeps the event loop alive.** With no live
+  handle, node's own "promise resolution is still pending but the event loop has already
+  resolved" check ends the test first, in milliseconds. Measured both ways: a bare
+  `new Promise(() => {})` is cancelled by the event-loop check; the same promise with a
+  `setInterval` alive beside it — which is the shape of a test holding a pipe — fails with
+  `failureType: 'testTimeoutFailure'` at exactly the deadline. The flag is the one that
+  covers the case that actually wedged.
+- **`execFileSync` cannot be raced against a promise**, so the three `git` calls in
+  `unchanged.test.mjs` take `timeout: 30_000` instead.
+
+Wall clock, this machine: `pnpm test` 4s, 333 tests in 17 files. A checkout with no
+`store/dist` fails in 2s — three suites report `requireBuilt`'s build command — rather
+than hanging, which is the behaviour `tools/lib/built.mjs` documents.
 
 ### Task 4: Run the review that never ran — **done 2026-08-24**
 

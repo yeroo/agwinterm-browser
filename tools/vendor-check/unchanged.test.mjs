@@ -63,11 +63,17 @@ const EXPECTED_DIFFS = {
     "divergence 6 in UPSTREAM.md: one added `#[test]`. No production line changed.",
 };
 
+// Every `git` here is synchronous and so cannot be raced against a promise
+// deadline; `timeout` is the only bound available, and without it a git that waits
+// on an index lock or a credential prompt blocks the whole run with no output. Long
+// enough that a cold object store on a slow disk is not a flake.
+const GIT_TIMEOUT_MS = 30_000;
+
 function changedSince(file) {
   const result = execFileSync(
     "git",
     ["diff", "--numstat", BASELINE, "HEAD", "--", `${SRC}/${file}`],
-    { cwd: REPO, encoding: "utf8" },
+    { cwd: REPO, encoding: "utf8", timeout: GIT_TIMEOUT_MS },
   ).trim();
   if (!result) return null;
   const [added, removed] = result.split(/\s+/, 2).map(Number);
@@ -87,6 +93,7 @@ describe("the forty-three", () => {
     const subject = execFileSync("git", ["log", "-1", "--format=%s", BASELINE], {
       cwd: REPO,
       encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
     }).trim();
     assert.match(subject, /vendor upstream/i, `${BASELINE} is not the vendoring commit`);
   });
@@ -117,7 +124,7 @@ describe("the forty-three", () => {
     const diff = execFileSync(
       "git",
       ["diff", "-U0", BASELINE, "HEAD", "--", `${SRC}/engine/mod.rs`],
-      { cwd: REPO, encoding: "utf8" },
+      { cwd: REPO, encoding: "utf8", timeout: GIT_TIMEOUT_MS },
     );
     const removed = diff
       .split("\n")

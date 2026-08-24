@@ -26,6 +26,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 
 import { requireBuilt } from "../lib/built.mjs";
+import { closeServer, listen, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -130,7 +131,11 @@ async function withRegistry(fn, overrides = {}) {
   // Binding is asynchronous: the endpoint is probed before it is taken, and the
   // row is written only once `listen` has actually succeeded, so that nothing
   // advertises a control channel it does not have. `ready` is that moment.
-  await registry.ready;
+  //
+  // Bounded, because a bind that never completes is the one thing this whole file
+  // is downstream of: an unbounded `await` here hangs before a single assertion
+  // has run, and the failure would name the file rather than the pipe.
+  await withDeadline(registry.ready, `the registry for ${key} to bind`);
   try {
     return await fn(registry, key);
   } finally {
@@ -231,14 +236,14 @@ describe("disposal", () => {
   it("stops answering, and frees the name", async () => {
     const key = uniqueKey();
     const registry = new Registry(host(key));
-    await registry.ready;
+    await withDeadline(registry.ready, `the registry for ${key} to bind`);
     const endpoint = registry.record().endpoint;
     assert.equal(await store.endpointAlive(endpoint, 1000), true);
     registry.dispose();
     assert.equal(await store.endpointAlive(endpoint, 1000), false);
     // and the name is free for the next browser with the same key
     const again = new Registry(host(key));
-    await again.ready;
+    await withDeadline(again.ready, `the second registry for ${key} to bind`);
     try {
       assert.equal(await store.endpointAlive(endpoint, 1000), true);
     } finally {
@@ -250,14 +255,15 @@ describe("disposal", () => {
     globalThis.__removed = [];
     const key = uniqueKey();
     const registry = new Registry(host(key));
-    await registry.ready;
+    await withDeadline(registry.ready, `the registry for ${key} to bind`);
     registry.dispose();
     assert.ok(globalThis.__removed.includes(key), "the row was not removed");
   });
 
   it("is idempotent, so a second close is not an error", async () => {
-    const registry = new Registry(host(uniqueKey()));
-    await registry.ready;
+    const key = uniqueKey();
+    const registry = new Registry(host(key));
+    await withDeadline(registry.ready, `the registry for ${key} to bind`);
     registry.dispose();
     registry.dispose();
   });
@@ -278,7 +284,7 @@ describe("a CLI reaching an endpoint nobody holds", () => {
       connection.on("error", () => {});
       accepted.push(connection);
     });
-    await new Promise((resolve) => server.listen(endpoint, resolve));
+    await listen(server, endpoint);
     try {
       await assert.rejects(
         () => control(endpoint, { cmd: "state" }, 300),
@@ -286,7 +292,7 @@ describe("a CLI reaching an endpoint nobody holds", () => {
       );
     } finally {
       for (const connection of accepted) connection.destroy();
-      await new Promise((resolve) => server.close(resolve));
+      await closeServer(server);
     }
   });
 });

@@ -21,6 +21,7 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { requireBuilt } from "../lib/built.mjs";
+import { closeServer, listen, teardown, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -236,19 +237,46 @@ describe("removing an endpoint", () => {
   });
 });
 
+/**
+ * Every server this file has bound and not yet closed.
+ *
+ * Each test closes its own in a `finally`, which covers a failed assertion but not
+ * a failure that skips the block entirely — an `await` that rejects before the
+ * `try`, or a `--test-timeout` firing mid-test. A pipe left listening then outlives
+ * the file and the next run collides with the name it holds, so the `after` hook
+ * below is the backstop.
+ */
+const open = new Set();
+/** The same, for the child processes `busyServer` starts. */
+const children = new Set();
+
+async function close(server) {
+  open.delete(server);
+  await closeServer(server);
+}
+
+after(() =>
+  teardown(
+    ...[...open].map((server) => () => close(server)),
+    ...[...children].map((child) => () => {
+      children.delete(child);
+      child.kill();
+    }),
+  ),
+);
+
 /** Listens on `endpoint` and answers every line with `{ok:true}`. */
 function serve(endpoint) {
   const server = net.createServer((connection) => {
     connection.on("error", () => {});
     connection.on("data", () => connection.end('{"ok":true}\n'));
   });
-  server.on("error", () => {});
-  return new Promise((resolve) => {
-    server.listen(endpoint, () => resolve(server));
-  });
+  // No blanket `error` swallow here: a bind that fails is the case the callback
+  // form of `listen` cannot report, and swallowing it would turn a name this suite
+  // could not take into a wait with nothing to end it. `listen` subscribes to both.
+  open.add(server);
+  return listen(server, endpoint);
 }
-
-const close = (server) => new Promise((resolve) => server.close(resolve));
 
 describe("stale-endpoint cleanup, against a real pipe", () => {
   it("reports a listening endpoint as alive and a free name as not", async () => {
@@ -337,9 +365,21 @@ async function busyServer(endpoint) {
   const child = spawn(process.execPath, [path.join(HERE, "busy-pipe-server.mjs"), endpoint], {
     stdio: ["ignore", "pipe", "inherit"],
   });
-  await new Promise((resolve, reject) => {
-    child.stdout.once("data", resolve);
-    child.once("exit", () => reject(new Error("the busy server never listened")));
+  children.add(child);
+  // Two ways this ends badly and one way it ends well: the child dies (rejects
+  // immediately, naming that), the child lives but never prints (rejects on the
+  // deadline), or it prints. Only the last leaves a process to clean up later, so
+  // the two failures kill it here rather than leaking it into the run.
+  await withDeadline(
+    new Promise((resolve, reject) => {
+      child.stdout.once("data", resolve);
+      child.once("exit", () => reject(new Error("the busy server never listened")));
+    }),
+    `the busy server on ${endpoint} to listen`,
+  ).catch((error) => {
+    children.delete(child);
+    child.kill();
+    throw error;
   });
   const held = [];
   for (let at = 0; at < 6; at += 1) {
@@ -390,6 +430,7 @@ describe("why a probe failed, which is not the same question as whether it did",
       assert.equal(await endpointAlive(endpoint, 400), false);
     } finally {
       for (const socket of held) socket.destroy();
+      children.delete(child);
       child.kill();
     }
   });
@@ -408,6 +449,7 @@ describe("why a probe failed, which is not the same question as whether it did",
       assert.equal(await reclaimEndpoint(endpoint, 400), false);
     } finally {
       for (const socket of held) socket.destroy();
+      children.delete(child);
       child.kill();
     }
   });
