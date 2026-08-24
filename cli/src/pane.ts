@@ -325,6 +325,23 @@ export interface PaneInput {
 }
 
 /**
+ * Which of the two restores actually happened.
+ *
+ * Two flags rather than one because the halves fail independently and for unrelated
+ * reasons, and the verb's whole value is a report that tells "it worked" from "it did
+ * nothing". A redirected stdin has no `setRawMode` to call, so the console modes stay
+ * exactly as the engine left them — and the old single boolean, set from the write
+ * alone, made the report claim the console was "out of raw mode" on precisely that
+ * run. Saying so is what tells the user to run it again with stdin on the pane.
+ */
+export interface ConsoleRestore {
+  /** `DISABLE_REPORTING` reached the output stream. */
+  escapes: boolean;
+  /** `SetConsoleMode` was actually called — echo, line input and VT input are back. */
+  modes: boolean;
+}
+
+/**
  * Puts the console back the way the engine found it, and never throws.
  *
  * The companion to `clearPaneFrame`, and it runs for the same reason and on the same
@@ -348,12 +365,13 @@ export interface PaneInput {
 export function restorePaneConsole(
   out: PaneOutput = process.stdout,
   input: PaneInput = process.stdin,
-): boolean {
-  let written = false;
+): ConsoleRestore {
+  let escapes = false;
   try {
     out.write(DISABLE_REPORTING);
-    written = true;
+    escapes = true;
   } catch {}
+  let modes = false;
   try {
     if (input.isTTY && typeof input.setRawMode === "function") {
       input.setRawMode(false);
@@ -361,9 +379,10 @@ export function restorePaneConsole(
       // tty handle it has now constructed — without it a stdin touched this late
       // can hold the event loop open past the return.
       input.pause?.();
+      modes = true;
     }
   } catch {}
-  return written;
+  return { escapes, modes };
 }
 
 // -- whose placement is it -----------------------------------------------------
@@ -709,7 +728,7 @@ export async function paneClearCommand(options: PaneClearOptions = {}): Promise<
 export function paneClearReport(
   env: PaneEnv,
   outcome: PaneClearOutcome,
-  consoleRestored: boolean,
+  consoleRestored: ConsoleRestore,
 ): string[] {
   const lines: string[] = [];
   // A pane that exists and is being refused is not the same report as no pane, and
@@ -788,12 +807,28 @@ export function paneClearReport(
     );
   }
 
-  lines.push(
-    consoleRestored
-      ? "  console: mouse reporting off, bracketed paste off, cursor shown, back on the " +
-        "primary buffer and out of raw mode"
-      : "  console: could not be written to — nothing was restored",
-  );
+  // Each half named separately, because they fail apart. Claiming the input modes
+  // were put back when there was no tty to ask is the one report that sends a user
+  // away from a console that still does not echo.
+  if (!consoleRestored.escapes) {
+    lines.push(
+      consoleRestored.modes
+        ? "  console: could not be written to — the input modes are back, but mouse " +
+          "reporting, the cursor and the alternate screen were left as they were"
+        : "  console: could not be written to — nothing was restored",
+    );
+  } else if (consoleRestored.modes) {
+    lines.push(
+      "  console: mouse reporting off, bracketed paste off, cursor shown, back on the " +
+        "primary buffer and out of raw mode",
+    );
+  } else {
+    lines.push(
+      "  console: mouse reporting off, bracketed paste off, cursor shown, back on the " +
+        "primary buffer — but stdin here is not a console, so echo and line input " +
+        "were left as the browser set them; run this again with stdin on the pane",
+    );
+  }
   return lines;
 }
 

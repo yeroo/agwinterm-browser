@@ -209,7 +209,7 @@ describe("the development-instance guard", () => {
     assert.equal(outcome.request, null, "no clear may be sent to a refused instance");
     assert.equal(outcome.cleared, false);
 
-    const report = pane.paneClearReport(env, outcome, true).join("\n");
+    const report = pane.paneClearReport(env, outcome, { escapes: true, modes: true }).join("\n");
     assert.match(report, /not addressable/);
     assert.match(report, /TERMINAL_BROWSER_ALLOW_PIPE/);
     assert.match(report, /1 frame\(s\) left in/, "it still says what was found");
@@ -401,7 +401,7 @@ describe("giving the console back, which is the other half of giving the pane ba
         pause: () => calls.push("pause"),
       },
     );
-    assert.equal(restored, true);
+    assert.deepEqual(restored, { escapes: true, modes: true });
     assert.deepEqual(written, [pane.DISABLE_REPORTING]);
     // `uv_tty_set_mode(NORMAL)` rewrites the input mode outright, which is what puts
     // back echo and line input and takes `ENABLE_VIRTUAL_TERMINAL_INPUT` off again --
@@ -409,13 +409,23 @@ describe("giving the console back, which is the other half of giving the pane ba
     assert.deepEqual(calls, ["raw:false", "pause"]);
   });
 
-  it("leaves a stdin that is not a console alone", () => {
+  it("leaves a stdin that is not a console alone, and says it did not touch it", () => {
     // `terminal-browser open > out.txt` still has a console to reset the modes on,
-    // and no tty to ask.
+    // and no tty to ask. The half that did not run is reported as not having run:
+    // `SetConsoleMode` is reachable only through Node's raw-mode setter, so a
+    // redirected stdin leaves echo and line input exactly as the engine set them,
+    // and a report claiming otherwise sends the user away from a broken console.
     const calls = [];
-    pane.restorePaneConsole({ write: () => {} }, { isTTY: false, setRawMode: () => calls.push(1) });
+    const redirected = pane.restorePaneConsole(
+      { write: () => {} },
+      { isTTY: false, setRawMode: () => calls.push(1) },
+    );
     assert.deepEqual(calls, []);
-    pane.restorePaneConsole({ write: () => {} }, {});
+    assert.deepEqual(redirected, { escapes: true, modes: false });
+    assert.deepEqual(pane.restorePaneConsole({ write: () => {} }, {}), {
+      escapes: true,
+      modes: false,
+    });
   });
 
   it("never throws, whatever the streams do", () => {
@@ -424,10 +434,13 @@ describe("giving the console back, which is the other half of giving the pane ba
     const thrower = () => {
       throw new Error("EPIPE");
     };
-    assert.equal(pane.restorePaneConsole({ write: thrower }, {}), false);
-    assert.equal(
+    assert.deepEqual(pane.restorePaneConsole({ write: thrower }, {}), {
+      escapes: false,
+      modes: false,
+    });
+    assert.deepEqual(
       pane.restorePaneConsole({ write: () => {} }, { isTTY: true, setRawMode: thrower }),
-      true,
+      { escapes: true, modes: false },
     );
   });
 
@@ -768,7 +781,7 @@ describe("whose placement it is", () => {
     assert.equal(fs.existsSync(dir), true, "the evidence was consumed by a clear that failed");
 
     // And the report says so, rather than announcing a repair that did not happen.
-    const report = pane.paneClearReport(env, outcome, true).join("\n");
+    const report = pane.paneClearReport(env, outcome, { escapes: true, modes: true }).join("\n");
     assert.match(report, /the host refused the image\.clear/);
     assert.match(report, /no session/);
     assert.ok(!/frame: +cleared/.test(report), report);
@@ -956,11 +969,26 @@ describe("the pane-clear verb", () => {
     const report = pane.paneClearReport(
       {},
       { request: null, owned: null, cleared: false, searched: pane.searchedRoots() },
-      false,
+      { escapes: false, modes: false },
     );
     assert.match(report.join("\n"), /console: could not be written to/);
     // And the command survives the stream that did it.
     assert.doesNotThrow(() => pane.restorePaneConsole({ write: thrower }, {}));
+  });
+
+  it("does not claim the input modes are back when there was no tty to ask", () => {
+    // `terminal-browser pane-clear | tee log.txt` gets the escapes and not the
+    // `SetConsoleMode` half, because Node's raw-mode setter is the only handle this
+    // process has on it. Reporting the full restore there is the one wording that
+    // tells a user with a console that still does not echo that it was fixed.
+    const outcome = { request: null, owned: null, cleared: false, searched: pane.searchedRoots() };
+    const half = pane.paneClearReport({}, outcome, { escapes: true, modes: false }).join("\n");
+    assert.match(half, /console: mouse reporting off/);
+    assert.match(half, /stdin here is not a console/);
+    assert.ok(!/out of raw mode/.test(half), half);
+
+    const whole = pane.paneClearReport({}, outcome, { escapes: true, modes: true }).join("\n");
+    assert.match(whole, /out of raw mode/);
   });
 });
 

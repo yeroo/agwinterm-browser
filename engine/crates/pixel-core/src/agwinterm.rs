@@ -725,15 +725,24 @@ fn millis_until(deadline: Instant) -> u32 {
 /// The rounding above makes the *requested* milliseconds no fewer than what is left
 /// of the deadline. It does not make the wait that long: `GetOverlappedResultEx`
 /// measures its interval against the system timer, `Instant` against the performance
-/// counter, and the two disagree by a fraction of a millisecond — a 1040 ms wait was
-/// measured here returning after 1039.6 ms of `Instant` time, on about one run in
-/// five. Without this the "at least [`EXCHANGE_DEADLINE`]" above is a near-floor
-/// rather than a floor, and the test that asserts it is flaky rather than wrong.
+/// counter, and the two disagree. Without this the "at least [`EXCHANGE_DEADLINE`]"
+/// above is a near-floor rather than a floor, and the test that asserts it is flaky
+/// rather than wrong.
 ///
-/// Two rather than one so the margin is not itself borderline. It is charged once
-/// per wait against a deadline of a second, which is nothing, and never against an
-/// expired one.
-const WAIT_SLACK_MS: u128 = 2;
+/// **One system timer tick, not a fudge factor.** The disagreement is sub-tick
+/// rounding: a wait is satisfied on a tick boundary, so it can return up to one tick
+/// short of the interval `Instant` was measuring over. The default tick is 15.625 ms
+/// and 16 is the next whole millisecond above it. An earlier version of this constant
+/// was 2, tuned against the 0.4 ms shortfall that happened to be observed at the
+/// time; the real spread reaches most of a tick — 1040 ms waits were measured here
+/// returning after 1035.99 ms and 1038.64 ms, twice in forty runs — and a margin
+/// tuned to one sample is how a flaky test comes back. The rate falls when other
+/// tests run alongside, because they raise the timer resolution, which is why the
+/// failure prefers a single-test run to a full suite.
+///
+/// It is charged once per wait against a deadline of a second, which is nothing, and
+/// never against an expired one.
+const WAIT_SLACK_MS: u128 = 16;
 
 /// Whether a failed exchange is worth re-dialling for, as opposed to reporting.
 ///

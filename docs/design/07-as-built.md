@@ -111,7 +111,10 @@ screen buffer on, the cursor hidden and mouse reporting live, so the shell comes
 cursorless, echoless, and typing `\x1b[<…M` at the prompt on every pointer move.
 `restorePaneConsole` undoes that by **two** mechanisms rather than one — the escape
 sequences, written to stdout, and raw mode, taken back off stdin — because a recovery
-that sent only the escapes would hand back a shell that still does not echo. It runs
+that sent only the escapes would hand back a shell that still does not echo. It reports
+them separately for the same reason: they fail apart, and a redirected stdin has no
+`setRawMode` to call, so the run that sends the escapes and never reaches
+`SetConsoleMode` is exactly the run whose console still does not echo afterwards. It runs
 before anything is printed, too: `DISABLE_REPORTING` ends with `?1049l`, so a report
 written first would land on the alternate screen and be thrown away with it, which is
 the one arrangement in which the verb genuinely looks like it did nothing.

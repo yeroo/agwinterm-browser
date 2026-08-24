@@ -207,7 +207,7 @@ the table a claim about a tree that no longer exists.
 |---|---|
 | `cargo nextest run --workspace` | **446 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 389 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **352 passed**, 87 suites, 8.3 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **353 passed**, 87 suites, 8.3 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -271,7 +271,7 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 63 |
+| `terminal_windows.rs` | 53 | | `cli/pane-clear.test.mjs` | 64 |
 | `agwinterm.rs` | 46 | | `vendor-check/inventory.test.mjs` | 37 |
 | `frame_file.rs` | 36 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
@@ -280,8 +280,8 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 121 |
 
-Counted on 2026-08-24; the node column sums to the 352 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 63),
+Counted on 2026-08-24; the node column sums to the 353 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 64),
 `agwinterm.rs` (29 → 46, the exchange deadline) and `terminal_windows.rs` (38 → 53).
 The last five of each are the review round that followed the plan: the frame roots the
 engine could have chosen, a pid the caller asked about and does not have, the evidence
@@ -296,6 +296,15 @@ marker the engine now writes beside the first frame a host accepts, and the rule
 repair — and the wreck belonging to the pane next door.
 Two suites in the table did not exist then — `tools/lib/deadline.test.mjs` and
 `tools/acceptance/pane-clear.test.mjs` — and are inside "the rest".
+
+A third round moved one more, and it is about what the recovery verb *says*.
+`restorePaneConsole` returns both halves now rather than one boolean set from the write
+alone, so `pane-clear` no longer reports a console "out of raw mode" on a run where
+stdin was redirected and `SetConsoleMode` was never reached — the one wording that sends
+a user away from a console that still does not echo. The same round raised the Win32
+wait slack in `agwinterm.rs` from 2 ms to one system timer tick, which is what the
+deadline test was actually losing to; it needed no new test, only the one it already had
+passing forty times out of forty instead of thirty-eight.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep
