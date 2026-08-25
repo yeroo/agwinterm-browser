@@ -129,13 +129,42 @@ describe("application-data locations", () => {
     assert.equal(paths.dbFile, path.win32.join(root, "data", "terminal-browser.db"));
   });
 
-  it("falls back to the profile when LOCALAPPDATA is missing or relative", () => {
-    for (const value of [undefined, "", "AppData\\Local"]) {
+  it("falls back to the profile when LOCALAPPDATA does not name a fixed place", () => {
+    // `\AppData\Local` is the one that is not obvious: `path.win32.isAbsolute` calls
+    // it absolute and `join` keeps the leading separator, but it resolves against
+    // whatever drive the *reading* process is on -- and the CLI and the browser do
+    // not share one, because `launch.ts` spawns the browser with `cwd: browserDir`.
+    // Taking it would split the store, the registry and the recordings across two
+    // trees, which is the trap `browser/src/record/paths.ts` records for
+    // `/tmp/recordings` and the reason this variable exists.
+    // `\\srv` is the other one: two separators and a host is not a place, and taking
+    // it would make the application name the *share* (`\\srv\<app>\data`), so a
+    // malformed variable would go looking on the network instead of falling back.
+    for (const value of [
+      undefined,
+      "",
+      "AppData\\Local",
+      "\\AppData\\Local",
+      "/AppData/Local",
+      "\\\\srv",
+      "\\\\srv\\",
+      "//srv",
+    ]) {
       const paths = appPaths({ ...windows, env: { LOCALAPPDATA: value } });
       assert.ok(
         paths.dataDir.startsWith(path.win32.join("C:\\Users\\ada", "AppData", "Local", APP)),
         `${value} produced ${paths.dataDir}`,
       );
+    }
+  });
+
+  it("takes a share as a root, because a share names one place from anywhere", () => {
+    // Only the *drive-relative* spelling above is refused. A redirected profile on a
+    // UNC path resolves the same from every process, so refusing it would be
+    // collateral rather than a guard.
+    for (const value of ["\\\\srv\\profiles\\ada", "\\\\srv\\p", "//srv/profiles/ada"]) {
+      const paths = appPaths({ ...windows, env: { LOCALAPPDATA: value } });
+      assert.ok(paths.dataDir.startsWith(path.win32.join(value, APP)), paths.dataDir);
     }
   });
 

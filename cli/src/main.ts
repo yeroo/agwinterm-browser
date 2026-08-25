@@ -31,7 +31,12 @@ import {
 } from "./launch";
 import type { LaunchPlan } from "./launch";
 import { lsCommand } from "./ls";
-import { clearOwnedPaneFrame, paneClearCommand, restorePaneConsole } from "./pane";
+import {
+  clearOwnedPaneFrame,
+  paneClearCommand,
+  restorePaneConsole,
+  windowsSystemRoot,
+} from "./pane";
 import { instances } from "./registry";
 import { apparmorSetup, deniedRefusal, linuxSandboxError, sandboxRefusal } from "./sandbox";
 import { openSshTunnel, startBundle, validateBundleDir, validateSshTarget } from "./ssh";
@@ -341,10 +346,13 @@ async function kill(pid: number, why: string): Promise<number> {
  *
  * `execFileSync` blocks the event loop, so an unbounded one is not "slow" but
  * *stuck*: the two recovery steps that run after it — `clearOwnedPaneFrame` and
- * `restorePaneConsole` in `openInForeground`'s `finally` — would never run, and the
- * pane would keep the dead browser's frame and its raw console, which is the exact
- * wreck this path exists to prevent. Matches `cookConsoleModes`'s bound in
- * `pane.ts`, the other blocking spawn on the same exit path.
+ * `restorePaneConsole`, in `openInForeground`'s `try`, not its `finally`, which
+ * holds only the listener removal — would never run, and the pane would keep the
+ * dead browser's frame and its raw console, which is the exact wreck this path
+ * exists to prevent. Being in the `try` is also why `terminateTree` is written never
+ * to throw: an exception out of it would skip them just as surely as a hang.
+ * Matches `cookConsoleModes`'s bound in `pane.ts`, the other blocking spawn on the
+ * same exit path.
  */
 const TASKKILL_TIMEOUT_MS = 2_000;
 
@@ -359,7 +367,9 @@ const TASKKILL_TIMEOUT_MS = 2_000;
  * would leave them behind still holding this pane's console.
  *
  * Never throws: the browser being gone already is the outcome this wants, and a
- * failure here must not become the exit code the pane reports.
+ * failure here must not become the exit code the pane reports. Swallowing is not the
+ * same as giving up, though — see the `catch`, which still has a second route to try
+ * and still owes the caller the wait.
  *
  * @see taskkillPath, for why the killer is spelled out in full.
  * @see TASKKILL_TIMEOUT_MS, for why the spawn is bounded.
@@ -376,7 +386,18 @@ async function terminateTree(child: ChildProcess): Promise<void> {
       });
     } else child.kill("SIGKILL");
   } catch {
-    return;
+    // Most arrivals here are the outcome this wanted: `taskkill` exits 128 when the
+    // pid is already gone. The one that is not — a refusal, or the bound above
+    // expiring with the tree alive — used to `return`, which skipped the wait below
+    // as well and told the caller a live browser was stopped. The caller then retires
+    // this pane's frame and cooks its console, and the CLI exits: libuv's job object
+    // takes the browser down with it (see `pane.ts`'s header), *after* the evidence
+    // and the repair are both gone. So try the other route Node has — one pid rather
+    // than the tree, but the Electron parent is the one holding this console — and
+    // fall through to the wait either way.
+    try {
+      child.kill();
+    } catch {}
   }
   await Promise.race([dead, new Promise<void>((resolve) => setTimeout(resolve, 1_000).unref())]);
 }
@@ -394,12 +415,12 @@ async function terminateTree(child: ChildProcess): Promise<void> {
  * Which is why `%SystemRoot%` is checked and not merely defaulted: `??` only rejects
  * an *unset* variable, so an empty or relative one joins to a relative
  * `System32\taskkill.exe` and hands the search straight back to the current
- * directory. `path.isAbsolute` is what makes the fallback cover that too.
+ * directory. [`windowsSystemRoot`] is what makes the fallback cover that too, and it
+ * is shared with `cookConsoleModes` rather than copied — the guard was on one copy
+ * and not the other once already.
  */
 function taskkillPath(): string {
-  const named = process.env.SystemRoot ?? process.env.windir;
-  const root = named && path.isAbsolute(named) ? named : "C:\\Windows";
-  return path.join(root, "System32", "taskkill.exe");
+  return path.join(windowsSystemRoot(), "System32", "taskkill.exe");
 }
 
 /**
@@ -525,8 +546,30 @@ async function openInForeground(argv: string[]): Promise<number> {
     // alternate screen, hid the cursor and turned on mouse reporting; `ModeGuard`
     // undoes that on an ordinary exit and not on any of the exits above, so the
     // shell was getting the pane back unreadable — cursorless, echoless, and typing
-    // escape bytes on every mouse move. Idempotent, so it runs either way.
-    restorePaneConsole();
+    // escape bytes on every mouse move.
+    //
+    // Unconditional, and not because it is free. The escapes half is a no-op against
+    // a console already on the primary buffer, but the modes half is a `cmd.exe`
+    // child that *sets* the input mode to cmd's cooked default rather than restoring
+    // a saved one — so on an exit that did run `ModeGuard::drop`, which restores the
+    // exact mode read at entry (`terminal_windows.rs`), this overwrites a correct
+    // restore with a merely-ordinary one, and any non-default bit the caller's
+    // console had (QuickEdit off, mouse or window input on) is lost. It runs anyway
+    // because nothing here can tell the two exits apart — `clearOwnedPaneFrame`'s
+    // evidence is a frame directory, and a browser can set the modes and die before
+    // its first frame — and the two mistakes are not the same size: a console left
+    // at cmd's default is one a shell is happy in, and a console left raw is one the
+    // user cannot type into. See `restorePaneConsole`, which says the same thing
+    // from the other end.
+    //
+    // With one exception, and it is the same expression the clear above reads. A
+    // spawn that failed outright never produced a process, so nothing ever ran
+    // `SetConsoleMode` on this console — there is no bad restore to prefer over a
+    // worse one, only the cook itself, which would take QuickEdit, mouse input and
+    // window input off a console the engine never touched as collateral of an error
+    // message. That is the one exit where the gating question the paragraph above
+    // says does not exist does exist, and it is already answered.
+    if (child.pid !== undefined) restorePaneConsole();
     return code;
   } finally {
     // A registered signal listener keeps Node's event loop alive, and `main`

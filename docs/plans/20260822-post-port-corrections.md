@@ -278,8 +278,9 @@ landed, and `06-acceptance.md` §6 is where that count is kept current.
 
 ### Task 6: Verify acceptance criteria
 
-- [x] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
+- [ ] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
       restores the pane fully — no frame, cursor visible, no mouse bytes on move
+      **— REOPENED 2026-08-25: fails against a real pane, see below**
 - [x] kill the **CLI** rather than the browser and confirm the same, since that is the
       case the current code does not cover
 - [x] confirm a dev build refuses to publish into the production instance, **from the CLI
@@ -299,6 +300,30 @@ and is then ended with `taskkill /F`, which is what `Stop-Process -Force` does a
 runs no destructor. Only the eye is left over — whether the pane *looks* right — and the
 bytes that make it look right are asserted against `DISABLE_REPORTING` as loaded from
 the same build the child ran.
+
+> **⚠️ Reopened 2026-08-25.** The first criterion was ticked on the strength of
+> `tools/acceptance/pane-clear.test.mjs`, which spawns the CLI against a *fake* named
+> pipe. Run against a **real** agwinterm pane holding a real orphaned frame — the
+> `ralphex-corrections` pane, wrecked by a browser that died during this plan's own
+> execution — `node cli\dist\main.js pane-clear`:
+>
+> - printed nothing beyond node's startup warnings: no report, no "nothing to fix",
+>   none of the two-half summary the help promises
+> - never returned to the prompt, and the shell stopped accepting input entirely —
+>   `echo` typed into the pane produced nothing
+> - left the console *worse* than it found it. Sending the escape half by hand
+>   (`[?1006l[?1003l[?1002l[?1000l[?25h`) did not revive the
+>   shell, because echo and line input are the `SetConsoleMode` half and cannot be
+>   restored from outside the process — which is exactly the two-half design this plan's
+>   Constraints say not to weaken
+> - recovery required `image.clear` over the control pipe for the frame and **destroying
+>   and recreating the session** for the shell
+>
+> So the verb hangs on the path it exists for, and a user who runs it on a wrecked pane
+> is left with a pane that is wrecked differently. The fake-pipe tests pass because
+> nothing in them can hang. What is missing is a test where the pipe accepts and then
+> stalls — the same defect class as Task 5, which bounded the *engine's* control-pipe
+> exchanges but not the CLI's. `cli/src/pane.ts` is the place to look.
 
 | criterion | how it is now checked |
 |---|---|
@@ -497,7 +522,12 @@ deliverables rather than new scope:
 - `engine/crates/pixel-core/src/clipboard_image.rs` — the UNC refusal
   (`UPSTREAM.md` divergence 4) had two doors left open: `~/` in front of a share
   expanded *past* the gate, because `Path::join` replaces its base rather than
-  appending, and the `CF_HDROP` file-list path applied no gate at all.
+  appending, and the `CF_HDROP` file-list path applied no gate at all. The expansion
+  itself then took `~/` only, so `~\pics\a.png` — the spelling Windows prefers, and
+  the one `browser/src/url.ts` was widened for in this same round — was admitted by
+  `looks_absolute` and then probed as a relative literal against the browser's working
+  directory, so an image that exists pasted as text. Now `strip_home`, Windows-only
+  for `url.ts`'s reason, with the home re-decision (`under_home`) covering both.
 - `engine/crates/pixel-core/src/terminal_windows.rs` — an unterminated string sequence
   at the head of the tail (`ESC ]`, which is how conhost spells Alt+`]`) now expires
   instead of swallowing every later byte. Keystrokes and mouse reports share that

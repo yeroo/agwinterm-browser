@@ -69,10 +69,33 @@ function xdgBase(env: NodeJS.ProcessEnv, home: string, variable: string, fallbac
   return value && path.posix.isAbsolute(value) ? value : path.posix.join(home, fallback);
 }
 
-/** `%LOCALAPPDATA%`, or where it would be if the variable is missing or relative. */
+/**
+ * `%LOCALAPPDATA%`, or where it would be if the variable does not name a fixed place.
+ *
+ * *Fixed* is more than `path.win32.isAbsolute`, which is why the test is spelled out.
+ * `isAbsolute` answers `true` for `\Users\ada\AppData\Local`, and `join` keeps that
+ * leading separator — a path that resolves against whatever drive the *reading
+ * process* is on. Every process here would then get a different root: `cli/src/launch.ts`
+ * spawns the browser with `cwd: browserDir`, so the CLI would resolve against the
+ * user's pane drive and the browser against the install drive, and preferences, the
+ * registry, recordings and everything an uninstall removes would split into two
+ * trees. `browser/src/record/paths.ts` records that same trap as the bug the port
+ * fixed for `/tmp/recordings`, and this is the variable it fixed it *into*.
+ *
+ * A drive (`C:\`) or a share (`\\server\share`) both name one place from anywhere, so
+ * both are taken; nothing else is, and the profile-derived fallback covers it.
+ *
+ * Both halves of a share are required, and `\\server` alone is the reason: two
+ * separators and a host name is not a place, and `join` would make the application
+ * name the share (`\\srv\terminal-browser-…\data`) rather than a directory on one —
+ * so a malformed variable would reach out to whatever `srv` publishes under that name
+ * instead of falling back. That shape was accepted by the `isAbsolute` test this
+ * replaced too; it is refused here because this test is the one that claims to know
+ * the difference.
+ */
 function windowsBase(env: NodeJS.ProcessEnv, home: string): string {
   const local = env.LOCALAPPDATA;
-  return local && path.win32.isAbsolute(local)
+  return local && /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/])/.test(local)
     ? local
     : path.win32.join(home, "AppData", "Local");
 }

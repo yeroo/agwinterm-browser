@@ -56,9 +56,10 @@ and the second is dropped. Both present as "the browser stopped updating", in no
 The image *id* stays fixed for the opposite reason — it keeps the emulator's image
 table at one entry rather than growing per frame. Files past the last three are reaped
 as the next frame goes out, the directory is removed on drop, and a fresh publisher
-sweeps directories older than an hour left by processes that died before they could. The
-`pane` marker (see *Taking the picture back*) is written beside the first frame the host
-*does* place, is exempt from that reaping, and is rewritten if something removes the
+sweeps directories older than an hour left by processes that died before they could — a
+week, once the directory names a pane (`MARKED_STALE_AFTER`), for the reason *Taking the
+picture back* gives. The `pane` marker (see there) is written beside the first frame the
+host *does* place, is exempt from that reaping, and is rewritten if something removes the
 directory out from under a live publisher.
 
 ### Why the fast path is not here

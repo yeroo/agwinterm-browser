@@ -117,7 +117,12 @@ fails loudly rather than at the Task 10 milestone.
      `/C:/pics/a.png`, which reads as absolute and then fails `is_file` silently, on
      the one spelling every real producer writes. Now `file_url_path`, which unwraps
      the empty-authority form and leaves a named authority alone.
-   - `~/` expanded through `HOME`, which Windows spells `USERPROFILE`. Now `home_dir`.
+   - `~/` expanded through `HOME`, which Windows spells `USERPROFILE`. Now `home_dir`
+     — and through `strip_home`, which takes `~\` as well: `looks_absolute` admits a
+     leading `~` in either separator, so the spelling a Windows user types reached the
+     expansion and fell out of it as a relative literal, probed against the browser's
+     working directory and never found. The same widening `browser/src/url.ts` makes
+     for `~\` and `.\`, on the same reasoning and Windows-only for the same one.
    - `unescape` treated every backslash as a quote character, turning
      `C:\Users\me\a.png` into `C:Usersmea.png`. On Windows it now unescapes only an
      escaped space or tab — the case the function exists for — and leaves every other

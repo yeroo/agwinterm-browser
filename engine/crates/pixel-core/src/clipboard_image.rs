@@ -111,13 +111,33 @@ fn admitted_path(path: &str) -> Option<PathBuf> {
     if !looks_absolute(path) {
         return None;
     }
-    match path.strip_prefix("~/") {
+    match strip_home(path) {
         Some(rest) => Some(Path::new(&home_dir()?).join(under_home(rest)?)),
         None => Some(PathBuf::from(path)),
     }
 }
 
-/// The remainder of a `~/…` paste, if it really is *under* the home directory.
+/// The remainder after the `~` that names the home directory, in the separator the
+/// running platform spells it with.
+///
+/// Both on Windows, for [`looks_absolute`]'s reason and `browser/src/url.ts`'s:
+/// `~\pics\a.png` is the spelling a Windows user types, `looks_absolute` admits it on
+/// the leading `~` like any other, and expanding only `~/` left it falling through as
+/// a *relative* literal path beginning with `~` — probed against the browser's
+/// working directory, where it is never a file, so an image that exists silently
+/// pasted as text. Not on unix, where a backslash is an ordinary filename character
+/// and `~\pics` names a file called `\pics` under the home directory.
+fn strip_home(path: &str) -> Option<&str> {
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Some(rest);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    path.strip_prefix(r"~\")
+}
+
+/// The remainder of a `~`-prefixed paste, if it really is *under* the home directory.
 ///
 /// [`looks_absolute`] runs on the text as pasted, and a leading `~` satisfies it
 /// outright — so the UNC refusal it exists for is decided before the `~` is
@@ -372,25 +392,36 @@ mod tests {
     /// `admitted_path`, for the reason the sibling test gives: the resolved path is
     /// the only place the difference is visible, and `is_file` on an unreachable
     /// share answers `false` exactly as a refusal does.
+    ///
+    /// Both home prefixes, because Windows has two and [`strip_home`] expands two:
+    /// widening the expansion without widening the re-decision would reopen this
+    /// exact door on the spelling a Windows user actually types.
     #[cfg(windows)]
     #[test]
     fn a_tilde_does_not_smuggle_a_share_past_the_gate() {
-        for rest in [
-            r"\\attacker.example\s\a.png",
-            "//attacker.example/s/a.png",
-            r"\\?\UNC\attacker.example\s\a.png",
-            r"C:\pics\a.png",
-            "C:a.png",
-            r"\pics\a.png",
-        ] {
-            let paste = format!("~/{rest}");
-            assert!(
-                looks_absolute(&paste),
-                "{paste} no longer reaches the expansion this test guards",
-            );
-            assert_eq!(admitted_path(&paste), None, "{paste} escaped the home");
+        for prefix in ["~/", r"~\"] {
+            for rest in [
+                r"\\attacker.example\s\a.png",
+                "//attacker.example/s/a.png",
+                r"\\?\UNC\attacker.example\s\a.png",
+                r"C:\pics\a.png",
+                "C:a.png",
+                r"\pics\a.png",
+            ] {
+                let paste = format!("{prefix}{rest}");
+                assert!(
+                    looks_absolute(&paste),
+                    "{paste} no longer reaches the expansion this test guards",
+                );
+                assert_eq!(admitted_path(&paste), None, "{paste} escaped the home");
+            }
         }
-        // And an ordinary `~/` paste still resolves under the home directory.
+        // And an ordinary home-relative paste still resolves under the home
+        // directory, in either separator. `~\pics\a.png` is the spelling a Windows
+        // user types (`browser/src/url.ts` says the same); expanding only `~/` left
+        // it a relative literal beginning with `~`, probed against the browser's
+        // working directory, where it is never a file — so an image that exists
+        // pasted as text with nothing said.
         let home = home_dir().expect("USERPROFILE");
         assert_eq!(
             admitted_path(r"~/pics\a.png"),
@@ -398,6 +429,14 @@ mod tests {
         );
         assert_eq!(
             admitted_path("~/pics/a.png"),
+            Some(Path::new(&home).join("pics/a.png")),
+        );
+        assert_eq!(
+            admitted_path(r"~\pics\a.png"),
+            Some(Path::new(&home).join(r"pics\a.png")),
+        );
+        assert_eq!(
+            admitted_path(r"~\pics/a.png"),
             Some(Path::new(&home).join("pics/a.png")),
         );
     }

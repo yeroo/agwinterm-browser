@@ -16,3 +16,20 @@ external_review_tool = custom
 # external command" and takes the whole review phase down with it. Verified by
 # exec'ing all four spellings; only the backslash forms run.
 custom_review_script = .\tools\ralphex-revmux.cmd
+
+# Convergence criterion for the external review loop. Without these two the loop
+# ran 10 revmux rounds per run and never stopped on its own: three runs, ~11 hours,
+# 19 rounds, and every one ended by hitting the Claude session limit rather than by
+# converging. The last five rounds produced only Minor/Pre-existing/Immaterial
+# findings, so the cost was buying nothing.
+#
+# max_external_iterations: 0 means auto = max(3, max_iterations/5), which at
+# --max-iterations 50 is 10. Each round is a full comprehensive revmux panel — three
+# claude opus:high agents plus a codex peer — so 10 rounds is enormous. Pin it to 3.
+max_external_iterations = 3
+
+# review_patience: stop after N consecutive rounds that change nothing. 0 disables it,
+# which is what let the loop grind to the iteration cap on findings nobody was acting
+# on. 2 is the standard loop-until-dry criterion: one quiet round can be luck, two is
+# convergence.
+review_patience = 2

@@ -402,6 +402,23 @@ describe("the CLI's foreground wait", () => {
     assert.ok(kill < clear, "the pane is taken back before the browser is stopped");
   });
 
+  it("does not cook a console no browser ever touched", () => {
+    // `spawn` does not throw on a missing or unrunnable Electron binary: it returns
+    // a `ChildProcess` with `pid === undefined` and emits `error` later. Nothing ran,
+    // so nothing called `SetConsoleMode` -- and `restorePaneConsole`'s modes half
+    // *sets* cmd's cooked default rather than putting a saved mode back, so running
+    // it there would take QuickEdit, mouse input and window input off the user's own
+    // console as collateral of an error message. The frame half already reads this
+    // same pid; this is the one exit where the modes half has an answer too.
+    const calls = body.match(/restorePaneConsole\(\)/g) ?? [];
+    assert.equal(calls.length, 1, "the console is not restored exactly once");
+    assert.match(
+      body,
+      /if \(child\.pid !== undefined\) restorePaneConsole\(\);/,
+      "a spawn that never produced a process cooks the console anyway",
+    );
+  });
+
   it("terminates the whole tree, because kill() on Windows is one pid", () => {
     // Electron's GPU and renderer processes are children. `ChildProcess.kill` maps
     // to `TerminateProcess` against the parent alone, which would leave them behind
@@ -418,9 +435,10 @@ describe("the CLI's foreground wait", () => {
   it("bounds that kill, because the two recovery steps run after it", () => {
     // `execFileSync` blocks the event loop, so an unbounded one is not slow but
     // stuck -- and what is downstream of it is `clearOwnedPaneFrame` and
-    // `restorePaneConsole` in the `finally` below. A `taskkill.exe` that never
-    // returns would leave the pane holding the dead browser's frame and its raw
-    // console, which is the wreck this whole path exists to prevent.
+    // `restorePaneConsole`, in `openInForeground`'s `try` (the `finally` holds only
+    // the listener removal). A `taskkill.exe` that never returns would leave the
+    // pane holding the dead browser's frame and its raw console, which is the wreck
+    // this whole path exists to prevent.
     const helper = mainSource.slice(
       mainSource.indexOf("async function terminateTree"),
       mainSource.indexOf("The Windows shape of `open`"),
@@ -434,6 +452,35 @@ describe("the CLI's foreground wait", () => {
       mainSource,
       /const TASKKILL_TIMEOUT_MS = [\d_]+;/,
       "the bound is no longer a named constant",
+    );
+  });
+
+  it("still tries the other route, and still waits, when taskkill fails", () => {
+    // The `catch` is not "give up": `taskkill` exits 128 when the pid is already
+    // gone, but it also arrives here on a refusal or on the bound above expiring
+    // with the tree alive. That used to `return`, which skipped the wait as well
+    // and told the caller a live browser was stopped -- so `clearOwnedPaneFrame`
+    // and `restorePaneConsole` ran, the CLI exited, and libuv's job object took the
+    // browser down *after* the evidence and the repair were both gone. So the catch
+    // owes two things: a second route (`child.kill`, one pid rather than the tree,
+    // but the Electron parent is the one holding this console) and the wait.
+    const helper = mainSource.slice(
+      mainSource.indexOf("async function terminateTree"),
+      mainSource.indexOf("The Windows shape of `open`"),
+    );
+    const caught = helper.indexOf("} catch {");
+    const race = helper.indexOf("Promise.race");
+    assert.ok(caught > 0, "the taskkill spawn is no longer guarded");
+    assert.match(
+      helper.slice(caught),
+      /child\.kill\(\)/,
+      "a failed taskkill no longer has a second route to try",
+    );
+    assert.ok(race > caught, "the wait no longer runs after the failure path");
+    assert.doesNotMatch(
+      helper.slice(caught, race),
+      /^\s*return\b/m,
+      "the failure path returns early again, so the caller is told a live browser is stopped",
     );
   });
 
@@ -520,24 +567,40 @@ describe("giving the console back, which is the other half of giving the pane ba
     // console that was perfectly restorable, and let a caller point the spawn
     // somewhere else by naming `SystemRoot` itself.
     const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
-    const body = between(source, "function cookConsoleModes(", "\n}");
+    const body = between(source, "export function windowsSystemRoot(", "\n}");
     assert.match(body, /process\.env\.SystemRoot/, "the child's path is not this process's");
     assert.ok(!/(?<!process\.)env\.SystemRoot/.test(body), "the pane env still decides the path");
-    // And an absolute one, for `taskkillPath`'s reason: `path.join` on a relative
-    // root resolves `System32\cmd.exe` against the directory the CLI was launched in.
-    assert.match(body, /path\.isAbsolute/, "a relative %SystemRoot% still reaches path.join");
+    assert.match(
+      between(source, "function cookConsoleModes(", "\n}"),
+      /windowsSystemRoot\(\)/,
+      "the cooking child no longer takes its root from the shared helper",
+    );
+  });
+
+  it("requires a drive-qualified %SystemRoot%, not merely an absolute one", () => {
+    // `??` rejects an *unset* variable and nothing else, so an empty or relative one
+    // joined to a relative `System32\...` and handed the spawn back to exactly the
+    // current-directory-first search the absolute path exists to avoid. But
+    // `path.isAbsolute` only closed half of that: it answers `true` for `\Windows`,
+    // which is drive-*relative* and resolves against whatever drive the process is
+    // on -- `record/paths.ts`'s `/tmp/recordings` trap -- and for `\\host\share`,
+    // which makes a pane's exit path an outbound SMB connect. No Windows spells
+    // `%SystemRoot%` either way, so the drive test costs nothing and closes both.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
+    const body = between(source, "export function windowsSystemRoot(", "\n}");
+    assert.ok(!body.includes("path.isAbsolute"), "the absoluteness test is back");
+    const guard = /\/\^\[A-Za-z\]:\[\\\\\/\]\//;
+    assert.match(body, guard, "the root is no longer required to name a drive");
   });
 
   it("spells taskkill's path out absolutely, the way cookConsoleModes cites it for", () => {
-    // `cookConsoleModes` above takes its guard from `taskkillPath` by name, but the
-    // guard was only ever on the copy. `??` rejects an *unset* `%SystemRoot%` and
-    // nothing else, so an empty or relative one joined to a relative
-    // `System32\taskkill.exe` -- handing the force-kill back to exactly the
-    // current-directory-first search the absolute path exists to avoid, on the
-    // ordinary path where a browser outlives its Ctrl+C.
+    // `cookConsoleModes` took its guard from `taskkillPath` by name and the guard was
+    // only ever on the copy, which is why there is one function now rather than two
+    // spellings of the same rule -- and why this asserts the sharing rather than the
+    // regex, which lives with `windowsSystemRoot` above.
     const source = fs.readFileSync(path.join(REPO, "cli", "src", "main.ts"), "utf8");
     const body = between(source, "function taskkillPath(", "\n}");
-    assert.match(body, /path\.isAbsolute/, "a relative %SystemRoot% still reaches path.join");
+    assert.match(body, /windowsSystemRoot\(\)/, "the guard is a second copy again");
     assert.match(body, /taskkill\.exe/, "the killer is no longer named by full path");
   });
 
@@ -1537,9 +1600,10 @@ describe("the pane-clear verb", () => {
   });
 
   it("reports the escapes that never went out while the input modes did go back", () => {
-    // The halves fail apart in both directions. A console whose stdout is a closed
-    // pipe still has a `setRawMode` to call, and claiming the full restore there
-    // sends a user away from a pane still on the alternate screen.
+    // The halves fail apart in both directions. A console whose stdout is a redirect
+    // still has a console for the cooking child to inherit -- the modes half can land
+    // where the escapes half did not -- and claiming the full restore there sends a
+    // user away from a pane still on the alternate screen.
     const half = pane
       .paneClearReport(
         {},

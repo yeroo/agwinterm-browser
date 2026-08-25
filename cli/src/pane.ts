@@ -442,6 +442,36 @@ export interface ConsoleRestoreOptions {
 const CONSOLE_COOK_TIMEOUT_MS = 2_000;
 
 /**
+ * The Windows directory the CLI's own helper spawns are addressed from.
+ *
+ * Read from **this process's** environment and never from the pane environment the
+ * rest of this file is threaded with. The two answer unrelated questions — one names
+ * the pane to address, the other names the Windows this CLI is running on — and
+ * reading a child's path out of the caller's addressing would let a caller that
+ * named a pane without naming a Windows silently lose the modes half, and a caller
+ * that named `SystemRoot` point the spawn wherever it liked.
+ *
+ * *Drive-qualified* is the test, and `path.isAbsolute` is not it. `??` rejects an
+ * *unset* variable and nothing else, so an empty or relative one joins to a relative
+ * `System32\…` and hands the spawn back to the current-directory-first search that
+ * [`taskkillPath`] spells its path out to avoid — but `isAbsolute` only closes half
+ * of that. It answers `true` for `\Windows`, which is drive-*relative*: `path.join`
+ * keeps the leading separator and the spawn resolves against whatever drive the
+ * process happens to be on, which is the same trap `browser/src/record/paths.ts`
+ * records for the inherited `/tmp/recordings`. It also answers `true` for
+ * `\\host\share`, which turns a local spawn into an outbound SMB connect on the exit
+ * path of a pane. No Windows supplies either spelling, so requiring `X:\` costs
+ * nothing real and leaves the `C:\Windows` fallback covering every other answer.
+ *
+ * @see taskkillPath in `main.ts`, which shares this and is where the
+ * current-directory-first hazard is written out in full.
+ */
+export function windowsSystemRoot(): string {
+  const named = process.env.SystemRoot ?? process.env.windir;
+  return named && /^[A-Za-z]:[\\/]/.test(named) ? named : "C:\\Windows";
+}
+
+/**
  * Puts the console input modes back — from a *child process*, which is the only
  * place it can be done.
  *
@@ -471,23 +501,15 @@ const CONSOLE_COOK_TIMEOUT_MS = 2_000;
  * *this* console, and `cmd` cooks the console behind its own standard input. Which
  * is also why this is gated on `isTTY` rather than attempted blind.
  *
- * `%SystemRoot%` is read from **this process's** environment and never from the pane
- * environment the rest of this file is threaded with. The two answer unrelated
- * questions — one names the pane to address, the other names the Windows this CLI is
- * running on — and reading the child's path out of the caller's addressing would let
- * a caller that named a pane without naming a Windows silently lose the modes half,
- * and a caller that named `SystemRoot` point the spawn wherever it liked. The
- * fallback is `taskkillPath`'s, for the same reason it has one.
+ * The child's path comes from [`windowsSystemRoot`], which is where the reasons for
+ * spelling it out — and for reading it from this process rather than from the pane
+ * environment threaded through the rest of this file — are written down.
  *
  * @see taskkillPath in `main.ts`, for why the path is spelled out in full.
  */
 function cookConsoleModes(): boolean {
   if (process.platform !== "win32") return false;
-  const named = process.env.SystemRoot ?? process.env.windir;
-  // A relative `%SystemRoot%` would make `path.join` resolve `System32\cmd.exe`
-  // against whatever directory the user launched the CLI from — the same
-  // current-directory-first hazard `taskkillPath` spells its path out to avoid.
-  const root = named && path.isAbsolute(named) ? named : "C:\\Windows";
+  const root = windowsSystemRoot();
   try {
     execFileSync(path.join(root, "System32", "cmd.exe"), ["/c", "exit"], {
       stdio: "inherit",
@@ -510,10 +532,27 @@ function cookConsoleModes(): boolean {
  * `openInForeground` does not survive either — a `taskkill /F` on the CLI, which
  * takes the browser down with it.
  *
- * Safe to run after an ordinary quit as well, which is why the call site does not
- * try to tell the two apart: mode resets are idempotent, and asking a console that
- * is already on the primary buffer with a visible cursor to go there again is a
- * no-op. Sending nothing when the engine *did* die badly is not.
+ * Run after an ordinary quit as well, which is why the call site does not try to tell
+ * the two apart — but only one of the halves is actually free there. Asking a console
+ * already on the primary buffer with a visible cursor to go there again is a no-op.
+ * The modes half is not: [`cookConsoleModes`] *sets* the input mode to cmd's cooked
+ * default, it does not put a saved one back, so after an exit that did run
+ * `ModeGuard::drop` — which restores the exact mode read at entry, and says so
+ * (`terminal_windows.rs`) — this replaces that exact mode with an ordinary one, and
+ * a caller whose console had QuickEdit off, or mouse or window input on, gets cmd's
+ * answer instead of its own.
+ *
+ * Accepted rather than gated, because there is nothing here to gate on. (There is one
+ * question the *caller* can answer, and `openInForeground` asks it: a spawn that
+ * never produced a process left no console for this to put back, so it skips the call
+ * entirely rather than cooking a console the engine never touched. Everything that
+ * reaches here had a browser behind it.) The frame
+ * half has an ownership question to ask; the modes half has none — the engine sets
+ * the modes before it publishes anything, so a browser that died between the two
+ * leaves no evidence and still needs this. And the two errors are not the same size:
+ * a console at cmd's default is one every shell is happy in, a console left raw is
+ * one the user cannot type into. Sending nothing when the engine *did* die badly is
+ * the failure this function exists for.
  *
  * Two halves, because the escape string cannot reach the second one. `?1049l` and
  * friends are answered by the terminal; echo, line input and
