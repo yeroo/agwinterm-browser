@@ -186,9 +186,18 @@ export class Registry {
 
   private serve(connection: net.Socket) {
     let buffer = "";
+    let answered = false;
     connection.setEncoding("utf8");
     connection.on("error", () => {});
     connection.on("data", (chunk: string) => {
+      // `connection.end` half-closes: the readable side stays open, so a peer that
+      // keeps sending gets this handler again. Without the flag the second line was
+      // dispatched — a second `open-tab`, with real side effects — and the second
+      // `connection.end` threw `ERR_STREAM_WRITE_AFTER_END` into the error handler
+      // above, where it was swallowed. On Windows the endpoint is a name any local
+      // process can dial, so "one request per connection" has to be enforced rather
+      // than assumed.
+      if (answered) return;
       buffer += chunk;
       // A request is one line. `cli/src/control.ts` caps its side of this protocol
       // for the reason that applies with more force here: on Windows the endpoint
@@ -202,10 +211,11 @@ export class Registry {
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       const line = buffer.slice(0, newline);
-      // Keep whatever followed the newline. Only one request is answered per
-      // connection (`handle` ends it), so this is about not discarding bytes that
-      // would have to be re-read, not about pipelining.
-      buffer = buffer.slice(newline + 1);
+      // One request per connection. Whatever followed the newline is dropped along
+      // with the buffer: there is no second answer to give it, and holding it would
+      // only keep the bytes alive for a handler that now returns early.
+      answered = true;
+      buffer = "";
       void this.handle(line)
         .then((data) => {
           connection.end(`${JSON.stringify({ ok: true, data })}\n`);

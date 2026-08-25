@@ -15,8 +15,16 @@ export function openStore(file: string = DB_FILE) {
   if (file === DB_FILE) ensureDataDir();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const sqlite = new DatabaseSync(file);
-  sqlite.exec("PRAGMA journal_mode = WAL");
+  // `busy_timeout` first, and the order is load-bearing rather than tidy. A new
+  // connection starts with no busy timeout at all, and the very next statement is
+  // the one that needs an exclusive lock: converting a fresh database out of
+  // rollback journalling into WAL. Two panes opening the store in the same instant
+  // -- which is ordinary on Windows, where every pane runs its own browser
+  // (`migrate.ts` documents the same race for the migrations themselves) -- meant
+  // the loser got `SQLITE_BUSY` immediately rather than waiting, `openStore` threw,
+  // and the pane died with "database is locked" on the machine's first run.
   sqlite.exec("PRAGMA busy_timeout = 5000");
+  sqlite.exec("PRAGMA journal_mode = WAL");
   migrate(sqlite, migrations);
   const db = drizzle(
     async (sql, params, method) => {

@@ -208,9 +208,9 @@ and leaving them would have made the table a claim about a tree that no longer e
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **460 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 403 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **376 passed**, 88 suites, 9.1 s wall clock |
+| `cargo nextest run --workspace` | **464 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 407 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **379 passed**, 88 suites, 9.2 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -274,16 +274,16 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 55 | | `cli/pane-clear.test.mjs` | 84 |
+| `terminal_windows.rs` | 57 | | `cli/pane-clear.test.mjs` | 85 |
 | `agwinterm.rs` | 50 | | `vendor-check/inventory.test.mjs` | 37 |
-| `frame_file.rs` | 41 | | `cli/endpoint.test.mjs` | 32 |
+| `frame_file.rs` | 43 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
-| | | | the rest | 124 |
+| | | | the rest | 126 |
 
-Counted on 2026-08-25; the node column sums to the 376 above. The three biggest
+Counted on 2026-08-25; the node column sums to the 379 above. The three biggest
 movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 84),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
@@ -456,6 +456,33 @@ where the CLI would not look, and *both* halves of the ownership rule declined i
 silence. The acceptance suite reads its child through pipes, which is exactly the
 redirected case, so its console assertions now name the branch every run it can make
 actually takes.
+
+A twelfth round moved three, and none of them is in a file the port wrote first. Two
+panes opening the store in the same instant is ordinary on Windows — every pane runs its
+own browser — and `store/src/migrate.ts` was hardened for exactly that; but `client.ts`
+set `PRAGMA busy_timeout` *after* `PRAGMA journal_mode = WAL`, and the conversion out of
+rollback journalling is the statement that needs the exclusive lock. So the loser of a
+first-ever open got `SQLITE_BUSY` with no wait at all and the pane died with "database is
+locked". `store.test.mjs` now holds the lock from a second process (`busy-db-holder.mjs`)
+and opens against it. `browser/src/registry.ts` answered more than one request per
+connection whenever a peer pipelined — `connection.end` half-closes, so the `data`
+handler ran again, dispatched a second `open-tab`, and threw
+`ERR_STREAM_WRITE_AFTER_END` into the handler that swallows errors — which on Windows is
+a name any local process can dial; `registry.test.mjs` sends two lines in one write.
+And `terminateTree`'s `execFileSync(taskkill…)` was the one blocking spawn on the exit
+path with no `timeout`, so a `taskkill.exe` that did not return would have stopped the
+event loop before `clearOwnedPaneFrame` and `restorePaneConsole` — the two recovery steps
+this plan exists for — ever ran.
+
+The same round moved `frame_file.rs` (42 → 43) without changing what reaches the pane:
+`publish_encoded` recorded the frame in the budget file *above* the `frame:0/0` guard,
+so a host that cannot open the frame directory — a permanently blank pane — produced a
+full-rate file, and [`02-frame-budget.md`](02-frame-budget.md)'s numbers are read off
+that file. The `Err` arm never recorded, and the paragraph beside the guard already said
+`frame:0/0` is treated exactly as a refusal is. The table above also corrects two counts
+this section had let drift: `terminal_windows.rs` gained `Inbox::abandoned` and
+`ConsoleHandle::read_while` in an earlier round without the row moving, and
+`frame_file.rs` gained the marked wreck's week-long retention the same way.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

@@ -337,6 +337,18 @@ async function kill(pid: number, why: string): Promise<number> {
 }
 
 /**
+ * How long `terminateTree` will wait for `taskkill.exe`.
+ *
+ * `execFileSync` blocks the event loop, so an unbounded one is not "slow" but
+ * *stuck*: the two recovery steps that run after it — `clearOwnedPaneFrame` and
+ * `restorePaneConsole` in `openInForeground`'s `finally` — would never run, and the
+ * pane would keep the dead browser's frame and its raw console, which is the exact
+ * wreck this path exists to prevent. Matches `cookConsoleModes`'s bound in
+ * `pane.ts`, the other blocking spawn on the same exit path.
+ */
+const TASKKILL_TIMEOUT_MS = 2_000;
+
+/**
  * Ends a browser that outlived the signal meant to stop it.
  *
  * Forceful on purpose: this is only reached after `FOREGROUND_SIGNAL_GRACE_MS` of a
@@ -350,6 +362,7 @@ async function kill(pid: number, why: string): Promise<number> {
  * failure here must not become the exit code the pane reports.
  *
  * @see taskkillPath, for why the killer is spelled out in full.
+ * @see TASKKILL_TIMEOUT_MS, for why the spawn is bounded.
  */
 async function terminateTree(child: ChildProcess): Promise<void> {
   const pid = child.pid;
@@ -357,7 +370,10 @@ async function terminateTree(child: ChildProcess): Promise<void> {
   const dead = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   try {
     if (WINDOWS) {
-      execFileSync(taskkillPath(), ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+      execFileSync(taskkillPath(), ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: TASKKILL_TIMEOUT_MS,
+      });
     } else child.kill("SIGKILL");
   } catch {
     return;

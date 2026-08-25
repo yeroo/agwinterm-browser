@@ -109,6 +109,46 @@ describe("the endpoint column", () => {
     sqlite.close();
   });
 
+  it("opens against a database another process has locked, rather than dying on it", async () => {
+    // The Windows shape makes this ordinary: every pane runs its own browser and
+    // each one opens the store on startup, so two panes started together open the
+    // same file in the same instant. `openStore`'s first statement used to be
+    // `PRAGMA journal_mode = WAL` — a fresh database is in rollback journalling and
+    // the conversion needs an exclusive lock — with `PRAGMA busy_timeout` set only
+    // afterwards, so the loser got `SQLITE_BUSY` with no wait at all and the pane
+    // died with "database is locked" on the machine's very first run.
+    const file = dbFile();
+    // Created, and left in rollback journalling, which is what makes the conversion
+    // inside `openStore` a statement that needs the lock the holder is about to take.
+    const seeded = new DatabaseSync(file);
+    seeded.exec("CREATE TABLE placeholder (x INTEGER)");
+    seeded.close();
+
+    const holder = spawn(process.execPath, [path.join(HERE, "busy-db-holder.mjs"), file, "700"], {
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    try {
+      await withDeadline(
+        new Promise((resolve, reject) => {
+          holder.stdout.once("data", resolve);
+          holder.once("exit", () => reject(new Error("the holder never took the lock")));
+        }),
+        `another process to lock ${file}`,
+      );
+      // Synchronous, and that is the point: it blocks here for as long as the lock
+      // is held. Without the timeout it does not block, it throws.
+      const opened = store.openStore(file);
+      assert.equal(
+        opened.sqlite.prepare("PRAGMA journal_mode").get().journal_mode,
+        "wal",
+        "the conversion did not happen, only the throw did not",
+      );
+      opened.sqlite.close();
+    } finally {
+      holder.kill();
+    }
+  });
+
   it("is applied once, so reopening an already-migrated database is a no-op", () => {
     const file = dbFile();
     for (let run = 0; run < 3; run++) {

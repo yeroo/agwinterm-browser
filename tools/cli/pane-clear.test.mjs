@@ -415,6 +415,28 @@ describe("the CLI's foreground wait", () => {
     assert.match(helper, /"\/F"/, "taskkill is not asked to force");
   });
 
+  it("bounds that kill, because the two recovery steps run after it", () => {
+    // `execFileSync` blocks the event loop, so an unbounded one is not slow but
+    // stuck -- and what is downstream of it is `clearOwnedPaneFrame` and
+    // `restorePaneConsole` in the `finally` below. A `taskkill.exe` that never
+    // returns would leave the pane holding the dead browser's frame and its raw
+    // console, which is the wreck this whole path exists to prevent.
+    const helper = mainSource.slice(
+      mainSource.indexOf("async function terminateTree"),
+      mainSource.indexOf("The Windows shape of `open`"),
+    );
+    assert.match(
+      helper,
+      /timeout: TASKKILL_TIMEOUT_MS/,
+      "the force-kill spawn is unbounded again",
+    );
+    assert.match(
+      mainSource,
+      /const TASKKILL_TIMEOUT_MS = [\d_]+;/,
+      "the bound is no longer a named constant",
+    );
+  });
+
   it("takes the listeners off again, so a clean quit does not hang", () => {
     // A registered signal listener keeps Node's event loop alive, and `main` only
     // calls `process.exit` for a non-zero code -- so leaving them on would hang

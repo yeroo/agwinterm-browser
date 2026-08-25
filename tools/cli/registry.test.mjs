@@ -256,6 +256,86 @@ describe("the control protocol over that endpoint", () => {
       for (const reply of replies) assert.equal(reply.endpoint, endpoint);
     });
   });
+
+  it("answers one request per connection, and dispatches only that one", async () => {
+    // The two lines have to arrive as two `data` events, and the first answer must
+    // still be in flight when the second does — which is the whole shape of the bug
+    // and the reason this test holds `targets` open. Both lines in one `write` prove
+    // nothing: the handler consumes one line per event and leaves the rest in the
+    // buffer, so a single chunk never reaches the second dispatch.
+    //
+    // `connection.end` only half-closes; the readable side stays open. So before the
+    // guard the second line reached `handle` — a second tab, opened by a request
+    // whose answer nobody could receive — and the second `connection.end` threw
+    // `ERR_STREAM_WRITE_AFTER_END` into the error handler that swallows it. On
+    // Windows the endpoint is a name any local process can dial.
+    const opens = [];
+    let release;
+    const answering = new Promise((resolve) => {
+      release = resolve;
+    });
+    await withRegistry(
+      async (registry) => {
+        const endpoint = registry.record().endpoint;
+        const socket = net.createConnection(endpoint);
+        const line = (url) => `${JSON.stringify({ cmd: "open-tab", url })}\n`;
+        try {
+          await withDeadline(
+            new Promise((resolve, reject) => {
+              socket.once("connect", resolve);
+              socket.once("error", reject);
+            }),
+            `a connection to ${endpoint}`,
+          );
+          let text = "";
+          socket.setEncoding("utf8");
+          socket.on("data", (chunk) => {
+            text += chunk;
+          });
+          const ended = new Promise((resolve, reject) => {
+            socket.once("end", resolve);
+            socket.once("error", reject);
+          });
+
+          socket.write(line("https://first.example"));
+          await withDeadline(
+            (async () => {
+              while (opens.length === 0) await new Promise((r) => setTimeout(r, 5));
+            })(),
+            "the first request to be dispatched",
+          );
+          // The answer is parked inside `targets`, so the connection is still open
+          // in both directions when this lands.
+          socket.write(line("https://second.example"));
+          await new Promise((r) => setTimeout(r, 100));
+          release();
+          await withDeadline(ended, `the reply from ${endpoint}`);
+
+          assert.deepEqual(
+            opens,
+            ["https://first.example"],
+            "a second request on the same connection was dispatched",
+          );
+          const lines = text.split("\n").filter((each) => each !== "");
+          assert.equal(lines.length, 1, "the server answered more than once on one connection");
+          assert.equal(JSON.parse(lines[0]).data.openedTab, 7);
+        } finally {
+          release();
+          socket.destroy();
+        }
+      },
+      {
+        openTab: (url) => {
+          opens.push(url);
+          return 7;
+        },
+        targets: async () => {
+          await answering;
+          return [];
+        },
+      },
+    );
+  });
 });
 
 describe("disposal", () => {

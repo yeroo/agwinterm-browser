@@ -713,7 +713,6 @@ impl FramePublisher {
         {
             Ok(result) => {
                 cost.publish = started.elapsed();
-                self.budget.record(cost);
                 // `frame:0/0` is "nothing was placed" wearing an `ok:true` envelope,
                 // and ownership is a claim about placements rather than about
                 // protocol success. Marking the directory would tell `pane-clear`
@@ -727,6 +726,13 @@ impl FramePublisher {
                     let _ = fs::remove_file(&path);
                     return Ok(png.len());
                 }
+                // Below the guard, so the budget file agrees with the paragraph
+                // above: a `frame:0/0` is treated exactly as a refusal is, and the
+                // `Err` arm records nothing. Recording it here meant a pane that was
+                // never painted — a host that cannot open the frame directory answers
+                // `0/0` for every frame — produced a full-rate budget file, and
+                // `docs/design/02-frame-budget.md`'s numbers are read off that file.
+                self.budget.record(cost);
                 // The first frame the host took is what makes this directory a
                 // placement on a named pane rather than a pid on disk. See
                 // [`PANE_FILE`].
@@ -1499,8 +1505,8 @@ mod tests {
 
     #[test]
     fn a_frame_the_host_could_not_open_at_all_is_complained_about_too() {
-        // Two other tests below publish to a host that places nothing, so they write
-        // the very line this one counts. See [`SHARED_LOG`].
+        // Three other tests below publish to a host that places nothing, so they
+        // write the very line this one counts. See [`SHARED_LOG`].
         let _alone = alone_with_the_log();
         // `frame:0/0` is the *other* silent failure, and the one a
         // `transmitted < placed` test steps straight over because `0 < 0` is false.
@@ -1935,6 +1941,37 @@ mod tests {
             text.lines()
                 .all(|line| line.starts_with('#') || line.is_empty()),
             "a refused frame was counted:\n{text}"
+        );
+
+        fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn a_frame_the_host_placed_nowhere_is_not_in_the_budget_either() {
+        // `frame:0/0` is the same state as a refusal wearing an `ok:true` envelope,
+        // and `publish_encoded` says so in as many words. The budget has to agree, or
+        // a pane that was never painted at all — which is what a host that cannot open
+        // the frame directory answers, on every frame — produces a full-rate file, and
+        // `docs/design/02-frame-budget.md` is read off that file.
+        // This writes the warning the "complained about too" test counts, so the two
+        // do not run at once. See [`SHARED_LOG`].
+        let _alone = alone_with_the_log();
+        let scratch = scratch_dir("budget-placed-nowhere");
+        let path = scratch.join("frames.tsv");
+        let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&budget_to(&path)).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("nothing placed is not an error the engine can act on");
+        drop(publisher);
+
+        let text = fs::read_to_string(&path).expect("the header is written on open");
+        assert!(
+            text.lines()
+                .all(|line| line.starts_with('#') || line.is_empty()),
+            "a frame that reached no pane was counted:\n{text}"
         );
 
         fs::remove_dir_all(&scratch).ok();
