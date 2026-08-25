@@ -393,6 +393,38 @@ test("the three documented paths that send image.clear all still exist", () => {
 });
 
 /**
+ * The mechanism the console half actually uses, against the one the as-built doc
+ * narrates. This paragraph went stale silently: it explained the restore as
+ * `setRawMode` on stdin for a whole round after that call was measured to reach no
+ * syscall and replaced by a child process, and nothing here noticed — the checks above
+ * pin function *names*, and `restorePaneConsole` kept its name through the rewrite.
+ */
+test("the console restore the as-built doc explains is the one the CLI performs", () => {
+  const doc = read("docs/design/07-as-built.md");
+  const at = doc.indexOf("The console is the half that is easy to forget");
+  assert.ok(at > 0, "the as-built doc lost the paragraph that explains the console half");
+  const section = doc.slice(at).split(/^### /m)[0];
+  const pane = read("cli/src/pane.ts");
+
+  // The claim that has to move with the code: a *child process* is what restores the
+  // input modes, because nothing this process can call survives its own stdio teardown.
+  assert.match(
+    pane,
+    /function cookConsoleModes\(\)/,
+    "cookConsoleModes moved — the as-built doc names it as the modes half",
+  );
+  assert.match(section, /cookConsoleModes/, "the doc no longer names the mechanism");
+  assert.match(section, /cmd\.exe/, "the doc no longer says what the child is");
+  assert.ok(
+    !/raw mode, taken back off stdin/.test(section),
+    "the doc still explains the restore as a call that reaches no syscall",
+  );
+  // And the gate, which is the reason the two halves are reported apart.
+  assert.match(pane, /if \(input\.isTTY\)/, "the modes half is no longer gated on a tty");
+  assert.match(section, /isTTY/, "the doc no longer explains why a redirect skips the half");
+});
+
+/**
  * The deadline, as a number, in both places. `07-as-built.md` §4 explains why 1040 ms
  * and not a rounder number — the derivation is the documentation — so a constant that
  * moves without the prose moving turns a reasoned figure back into a guess.

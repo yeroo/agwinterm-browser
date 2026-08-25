@@ -38,6 +38,7 @@
 // `main.ts`'s imports are static and top-level, so all of them are evaluated before
 // the `pane-clear` branch is ever reached.
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -382,10 +383,17 @@ export interface PaneOutput {
   write(chunk: string): unknown;
 }
 
-/** Just enough of `process.stdin` to put the console back into cooked mode. */
+/**
+ * Just enough of `process.stdin` to tell a console from a redirect, and to let go
+ * of it again.
+ *
+ * No `setRawMode`: see [`cookConsoleModes`] for why this process cannot be the one
+ * that calls it. Touching `process.stdin` at all constructs the tty handle, though,
+ * and a handle constructed this late can hold the event loop open past the return —
+ * which is what `pause` is for.
+ */
 export interface PaneInput {
   isTTY?: boolean;
-  setRawMode?(raw: boolean): unknown;
   pause?(): unknown;
 }
 
@@ -394,16 +402,89 @@ export interface PaneInput {
  *
  * Two flags rather than one because the halves fail independently and for unrelated
  * reasons, and the verb's whole value is a report that tells "it worked" from "it did
- * nothing". A redirected stdin has no `setRawMode` to call, so the console modes stay
- * exactly as the engine left them — and the old single boolean, set from the write
- * alone, made the report claim the console was "out of raw mode" on precisely that
- * run. Saying so is what tells the user to run it again with stdin on the pane.
+ * nothing". A redirected stdin is not the console the cooking child would have to
+ * inherit, so on that run the modes stay exactly as the engine left them — and the
+ * old single boolean, set from the write alone, made the report claim the console was
+ * "out of raw mode" on precisely that run. Saying so is what tells the user to run it
+ * again with stdin on the pane.
  */
 export interface ConsoleRestore {
   /** `DISABLE_REPORTING` reached the output stream. */
   escapes: boolean;
-  /** `SetConsoleMode` was actually called — echo, line input and VT input are back. */
+  /** A process that could call `SetConsoleMode` ran, and exited cleanly. */
   modes: boolean;
+}
+
+/**
+ * Seams for [`restorePaneConsole`], so the modes half is testable without a pane.
+ *
+ * `cook` stands in for the child process. A test that let the real one run would be
+ * spawning `cmd.exe` against the test runner's own console and asserting on a
+ * platform, which is the one thing this file is arranged not to need.
+ */
+export interface ConsoleRestoreOptions {
+  cook?: () => boolean;
+}
+
+/** How long the cooking child gets before it is given up on. */
+const CONSOLE_COOK_TIMEOUT_MS = 2_000;
+
+/**
+ * Puts the console input modes back — from a *child process*, which is the only
+ * place it can be done.
+ *
+ * The obvious call is `process.stdin.setRawMode(false)`, and it does nothing at all.
+ * `uv_tty_set_mode` returns early when the requested mode equals the one it has
+ * recorded, and a `uv_tty_t` is born `UV_TTY_MODE_NORMAL` — so a CLI that never
+ * turned raw mode *on* (this one never does; the engine did it, in another process,
+ * through `SetConsoleMode` directly) asks for NORMAL, matches, and no syscall is
+ * made. Measured on Windows 11: a console left at `1008` — echo, line input and
+ * processed input off, `ENABLE_VIRTUAL_TERMINAL_INPUT` on, which is exactly what
+ * `raw_input_mode` leaves — is still `1008` after that call and after the process
+ * exits.
+ *
+ * Nor does forcing the transition help. `setRawMode(true)` then `setRawMode(false)`
+ * does reach `SetConsoleMode`, but the first call is also where libuv saves the mode
+ * it found, and `uv_tty_reset_mode` puts that saved mode back when Node tears down
+ * stdio — restoring the broken one. Measured the same way: `1008` again.
+ *
+ * So the restore has to outlive this process's exit, which means it has to happen in
+ * a different one. `cmd.exe` sets the console to cooked mode when it starts, on the
+ * console it inherits, and nothing undoes that when it leaves: `1008` becomes `999`
+ * — echo, line input and processed input back on, mouse reporting off. That is the
+ * reported symptom ("the shell comes back cursorless and echoless") and it is a
+ * Windows built-in doing what shells do, not a trick.
+ *
+ * `stdio: "inherit"` is load-bearing twice over: the child has to be looking at
+ * *this* console, and `cmd` cooks the console behind its own standard input. Which
+ * is also why this is gated on `isTTY` rather than attempted blind.
+ *
+ * `%SystemRoot%` is read from **this process's** environment and never from the pane
+ * environment the rest of this file is threaded with. The two answer unrelated
+ * questions — one names the pane to address, the other names the Windows this CLI is
+ * running on — and reading the child's path out of the caller's addressing would let
+ * a caller that named a pane without naming a Windows silently lose the modes half,
+ * and a caller that named `SystemRoot` point the spawn wherever it liked. The
+ * fallback is `taskkillPath`'s, for the same reason it has one.
+ *
+ * @see taskkillPath in `main.ts`, for why the path is spelled out in full.
+ */
+function cookConsoleModes(): boolean {
+  if (process.platform !== "win32") return false;
+  const named = process.env.SystemRoot ?? process.env.windir;
+  // A relative `%SystemRoot%` would make `path.join` resolve `System32\cmd.exe`
+  // against whatever directory the user launched the CLI from — the same
+  // current-directory-first hazard `taskkillPath` spells its path out to avoid.
+  const root = named && path.isAbsolute(named) ? named : "C:\\Windows";
+  try {
+    execFileSync(path.join(root, "System32", "cmd.exe"), ["/c", "exit"], {
+      stdio: "inherit",
+      timeout: CONSOLE_COOK_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -425,13 +506,13 @@ export interface ConsoleRestore {
  * Two halves, because the escape string cannot reach the second one. `?1049l` and
  * friends are answered by the terminal; echo, line input and
  * `ENABLE_VIRTUAL_TERMINAL_INPUT` are console *modes*, which `SetConsoleMode`
- * changed and only `SetConsoleMode` restores. Node's raw-mode setter is this
- * process's handle on that call: `uv_tty_set_mode(NORMAL)` rewrites the input mode
- * outright rather than clearing a bit, which is exactly the restore that was missed.
+ * changed and only `SetConsoleMode` restores — and Node has no binding for it that
+ * survives this process's own exit. [`cookConsoleModes`] is where that goes, and why.
  */
 export function restorePaneConsole(
   out: PaneOutput = process.stdout,
   input: PaneInput = process.stdin,
+  options: ConsoleRestoreOptions = {},
 ): ConsoleRestore {
   let escapes = false;
   try {
@@ -440,14 +521,15 @@ export function restorePaneConsole(
   } catch {}
   let modes = false;
   try {
-    if (input.isTTY && typeof input.setRawMode === "function") {
-      input.setRawMode(false);
-      // Reading was never started, but `pause` is what tells Node to `readStop` a
-      // tty handle it has now constructed — without it a stdin touched this late
-      // can hold the event loop open past the return.
-      input.pause?.();
-      modes = true;
-    }
+    if (input.isTTY) modes = (options.cook ?? cookConsoleModes)();
+  } catch {}
+  // Its own `try`, and after the one above rather than inside it. Reading was never
+  // started, but `pause` is what tells Node to `readStop` a tty handle that reading
+  // `isTTY` has now constructed — without it a stdin touched this late can hold the
+  // event loop open past the return. Sharing a `try` with the cook would let a cook
+  // that threw skip it, which is the one exit this function is on: the CLI's.
+  try {
+    input.pause?.();
   } catch {}
   return { escapes, modes };
 }
@@ -857,6 +939,8 @@ export interface PaneClearOptions {
   input?: PaneInput;
   timeoutMs?: number;
   root?: string;
+  /** @see ConsoleRestoreOptions.cook */
+  cook?: () => boolean;
 }
 
 /**
@@ -886,7 +970,9 @@ export async function paneClearCommand(options: PaneClearOptions = {}): Promise<
   // `?1049l`, so a report written first lands on the alternate screen and is thrown
   // away with it — the one arrangement in which this command genuinely looks like it
   // did nothing.
-  const restored = restorePaneConsole(out, options.input ?? process.stdin);
+  const restored = restorePaneConsole(out, options.input ?? process.stdin, {
+    cook: options.cook,
+  });
   for (const line of paneClearReport(env, outcome, restored)) out.write(`${line}\n`);
   return 0;
 }
@@ -998,10 +1084,16 @@ export function paneClearReport(
         "primary buffer and out of raw mode",
     );
   } else {
+    // Three ways to land here and one report for all of them, because they are the
+    // same fact to the user: a redirected stdin with no console to ask, a platform
+    // with no `SetConsoleMode` to call, and a cooking child that would not run.
+    // Naming which one would be naming a cause for a console that is still broken
+    // either way; what the user needs is to know it is, and where to run this next.
     lines.push(
       "  console: mouse reporting off, bracketed paste off, cursor shown, back on the " +
-        "primary buffer — but stdin here is not a console, so echo and line input " +
-        "were left as the browser set them; run this again with stdin on the pane",
+        "primary buffer — but the input modes could not be put back from here, so " +
+        "echo and line input were left as the browser set them; run this again with " +
+        "stdin on the pane that was drawn on",
     );
   }
   return lines;

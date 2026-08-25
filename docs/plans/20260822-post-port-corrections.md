@@ -445,11 +445,45 @@ its own rather than as review fallout:
   picks a different profile, so the user appears logged out. The `will-quit`-only cleanup
   is upstream's; the port's new foreground path is what makes it routine. Confidence 95.
 
-**Also deferred:** `engine/crates/pixel-core/src/clipboard_image.rs:84` accepts `file://`
-URLs without converting them to Windows paths, so `file:///C:/…` becomes `/C:/…` and a UNC
-URL becomes a relative path; both fail `is_file`, and pasting a valid local image URL is
-silently treated as ordinary text. The existing test constructs the nonstandard
-`file://C:\…` form and so misses it. Confidence 88.
+**Was deferred, then done — and resolved narrower than the finding asked.**
+`engine/crates/pixel-core/src/clipboard_image.rs:84` accepted `file://` URLs without
+converting them to Windows paths, so `file:///C:/…` became `/C:/…` and a UNC URL became a
+relative path; both failed `is_file`, and pasting a valid local image URL was silently
+treated as ordinary text. The existing test constructed the nonstandard `file://C:\…` form
+and so missed it. Confidence 88.
+
+Fixed 2026-08-25 in a review round after Task 7, by `file_url_path`, which unwraps the
+empty-authority form (`file:///C:/…`) and leaves a named authority alone. The finding also
+asked for the **UNC authority forms**, and that half was **declined on purpose**:
+`looks_absolute` now refuses UNC entirely, because `is_file` on `\\host\share\…` is an
+outbound SMB/WebDAV connect with implicit authentication made synchronously on the
+`handle_event` thread — a page that puts `\\attacker.example\s\a.png` on the clipboard
+would get a credential handshake out of the machine on the next Ctrl+V. The
+extended-length spelling of a local path (`\\?\C:\…`) is still admitted. Pinned by
+`a_file_url_with_an_empty_authority_resolves`, `a_unc_share_is_never_probed` and
+`an_extended_length_local_path_is_still_local`; the reason is carried in `UPSTREAM.md`
+divergence 4, which now records it as a divergence in intent rather than a portability fix.
+
+**Other work landed after Task 7 closed**, all of it review-round fallout on the plan's own
+deliverables rather than new scope:
+
+- `cli/src/pane.ts` — the console-modes half of `restorePaneConsole` (Task 1) was
+  `process.stdin.setRawMode(false)`, which was measured to reach no syscall at all and
+  could not be honest about it. Replaced by `cookConsoleModes`, a `cmd.exe /c exit` child
+  spawned with `stdio: "inherit"`, gated on `isTTY`, with `%SystemRoot%` read from this
+  process rather than from the pane's addressing environment. `07-as-built.md` §1 carries
+  the measurement.
+- `engine/crates/pixel-core/src/agwinterm.rs` — the Task 5 connection now opens with
+  `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`, so a process that squatted the
+  predictable `agwinterm` pipe name cannot impersonate this user. `07-as-built.md` §4.
+- `engine/crates/pixel-core/src/frame_file.rs` — a write that fails part-way now unlinks
+  its file, because a truncated frame with no `PANE_FILE` marker is exactly the shape the
+  CLI's ownership rule (Task 1) adopts as "a browser left a picture here".
+- `engine/crates/pixel-core/src/terminal_windows.rs` — a console control event interrupts
+  a blocked read by succeeding with zero bytes; reading that as end of input left the
+  browser drawing with no thread that could deliver a keystroke. And a mode-2048 resize
+  baseline now stores zero pixels, because `window_size` reports zero always and a
+  baseline that kept the reported extent could never compare equal to the poll.
 
 **Accepted, not planned:** `TerminalBackend`'s `pub use` in `pixel-core/src/lib.rs:92` has
 no caller outside tests, but `lib.rs` is already a written divergence for other reasons, so

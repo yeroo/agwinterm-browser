@@ -121,14 +121,32 @@ The console is the half that is easy to forget. A dead browser also leaves the a
 screen buffer on, the cursor hidden and mouse reporting live, so the shell comes back
 cursorless, echoless, and typing `\x1b[<…M` at the prompt on every pointer move.
 `restorePaneConsole` undoes that by **two** mechanisms rather than one — the escape
-sequences, written to stdout, and raw mode, taken back off stdin — because a recovery
-that sent only the escapes would hand back a shell that still does not echo. It reports
-them separately for the same reason: they fail apart, and a redirected stdin has no
-`setRawMode` to call, so the run that sends the escapes and never reaches
-`SetConsoleMode` is exactly the run whose console still does not echo afterwards. It runs
-before anything is printed, too: `DISABLE_REPORTING` ends with `?1049l`, so a report
-written first would land on the alternate screen and be thrown away with it, which is
-the one arrangement in which the verb genuinely looks like it did nothing.
+sequences, written to stdout, and the console *input modes*, which only `SetConsoleMode`
+restores — because a recovery that sent only the escapes would hand back a shell that
+still does not echo.
+
+The second mechanism is not the obvious one, and the obvious one does not work.
+`process.stdin.setRawMode(false)` reaches no syscall at all: `uv_tty_set_mode` returns
+early when the requested mode equals the one it recorded, and a `uv_tty_t` is born
+NORMAL, so a CLI that never turned raw mode *on* — this one never does; the engine did
+it, in another process — asks for NORMAL, matches, and nothing happens. Forcing the
+transition is worse: `setRawMode(true)` is also where libuv saves the mode it *found*,
+and `uv_tty_reset_mode` puts that broken mode back when Node tears down stdio. Both
+measured on Windows 11 — a console left at `1008` is still `1008` afterwards, either way.
+So the restore has to outlive this process, which means it has to happen in another one:
+`cookConsoleModes` spawns `%SystemRoot%\System32\cmd.exe /c exit` with `stdio: "inherit"`,
+and `cmd` cooking the console it inherits takes `1008` to `999`. That is a Windows
+built-in doing what shells do, not a trick.
+
+The two halves are reported separately because they fail apart, and the modes half has
+three ways to fail: a redirected stdin, which is not the console the child would have to
+inherit (so it is gated on `isTTY` rather than attempted blind); a platform with no
+`SetConsoleMode`; and a child that would not run or would not exit cleanly. All three
+are one report — the user needs to know echo was left as the browser set it and where to
+run this next, not which of the three it was. It runs before anything is printed, too:
+`DISABLE_REPORTING` ends with `?1049l`, so a report written first would land on the
+alternate screen and be thrown away with it, which is the one arrangement in which the
+verb genuinely looks like it did nothing.
 
 All three ask the same question first: **is this placement ours?** `FramePublisher::clear`
 answers it from its own state — it never published, so there is nothing of its to take
@@ -451,6 +469,18 @@ an idle machine and the tail this must not clip is a loaded one; no more than th
 because the wait is charged to the render thread and, through the join, to shutdown. The
 odd number carries its derivation — a round second would read as a guess and would not
 move if the round trip were re-measured.
+
+The same open pins the impersonation level, which is a different concern that happens to
+live on the same flags word. A named-pipe *client* gets `SecurityImpersonation` unless it
+asks otherwise, so the server may `ImpersonateNamedPipeClient` and act with this user's
+token — and the Win32 pipe namespace is first-come, so any local process can create
+`agwinterm` before the real host does, against a client that dials a predictable name and
+authenticates nothing. `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION` lets the host
+learn who is calling and not act as them. It is the default `NamedPipeClientStream`
+applies, which is why `agwintermctl` was already hardened and this client was not. The
+three flags are a named constant (`CLIENT_FLAGS`) rather than terms in the builder chain
+because dropping one of them fails *open*: the handle still connects and the exchange
+still works, so a test is the only thing that can see it.
 
 "One deadline for the whole exchange" is a claim about the *loop*, not only about each
 wait, and it takes a second test to be one. `millis_until` answers an expired deadline

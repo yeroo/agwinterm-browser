@@ -57,8 +57,10 @@ const EXPECTED_DIFFS = {
     "module declarations only: the port's six new modules, the `#[cfg]` gates on " +
     "ghostty/herdr, and the `TerminalBackend` re-export. Tasks 3-7.",
   "clipboard_image.rs":
-    "divergence 4 in UPSTREAM.md: three POSIX path assumptions widened behind " +
-    "`cfg!(windows)`. Found by its own vendored tests failing, not by reading it.",
+    "divergence 4 in UPSTREAM.md: four POSIX path assumptions widened behind " +
+    "`cfg!(windows)`, and UNC narrowed — `is_file` on a share is an authenticated " +
+    "outbound connect on the event-loop thread. The widening was found by its own " +
+    "vendored tests failing; the narrowing is a divergence in intent, not portability.",
   "engine/mod.rs":
     "divergence 6 in UPSTREAM.md: one added `#[test]`. No production line changed.",
 };

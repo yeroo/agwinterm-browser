@@ -182,7 +182,7 @@ commit (`45b5e43`):
 |---|---|
 | `terminal.rs` | one of the three replaceable modules — the port *is* this diff |
 | `lib.rs` | module declarations: six new modules, two `#[cfg(unix)]` gates, one re-export |
-| `clipboard_image.rs` | divergence 4 — POSIX path assumptions widened behind `cfg!(windows)` |
+| `clipboard_image.rs` | divergence 4 — POSIX path assumptions widened behind `cfg!(windows)`, and UNC narrowed |
 | `engine/mod.rs` | divergence 6 — one added `#[test]`, no production line touched |
 
 So of the 43 the plan calls keep-unchanged, **40 are byte-identical** and three have
@@ -191,7 +191,7 @@ a written reason. `ghostty.rs` and `herdr.rs` are byte-identical too: "drop one"
 
 ⚠️ The plan expected **one** diff here (the Task 3 re-export shim). Task 4 predicted
 the list would grow and said why: `inventory.test.mjs` screens for unix *APIs*, and
-`clipboard_image.rs` had none while assuming unix *paths* in three places. **"No unix
+`clipboard_image.rs` had none while assuming unix *paths* in four places. **"No unix
 API" is not "portable."** The two other path-handling files in the 43 —
 `image_cache.rs` and `native.rs` — pass their tests today, and that is the only
 evidence there is about them.
@@ -201,16 +201,16 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 
 ## 6. Tests, lints and coverage
 
-Re-run on **2026-08-24**, after the six tasks of
-[the corrections plan](../plans/20260822-post-port-corrections.md). The numbers this
-table carried on 2026-08-21 were 421 / 364+57 / 266, and leaving them would have made
-the table a claim about a tree that no longer exists.
+Re-run on **2026-08-25**, after the six tasks of
+[the corrections plan](../plans/20260822-post-port-corrections.md) and the review rounds
+that followed them. The numbers this table carried on 2026-08-21 were 421 / 364+57 / 266,
+and leaving them would have made the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **453 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 396 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **366 passed**, 88 suites, 8.5 s wall clock |
+| `cargo nextest run --workspace` | **460 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 403 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **372 passed**, 88 suites, 8.5 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -274,17 +274,17 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 54 | | `cli/pane-clear.test.mjs` | 75 |
-| `agwinterm.rs` | 49 | | `vendor-check/inventory.test.mjs` | 37 |
-| `frame_file.rs` | 40 | | `cli/endpoint.test.mjs` | 32 |
+| `terminal_windows.rs` | 55 | | `cli/pane-clear.test.mjs` | 80 |
+| `agwinterm.rs` | 50 | | `vendor-check/inventory.test.mjs` | 37 |
+| `frame_file.rs` | 41 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
-| | | | the rest | 123 |
+| | | | the rest | 124 |
 
-Counted on 2026-08-24; the node column sums to the 366 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 75),
+Counted on 2026-08-25; the node column sums to the 372 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 80),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
 five of each are that round's: the frame roots the engine could have chosen, a pid the
@@ -398,6 +398,35 @@ through the third reader. The same round took `str::trim` out of the two TypeScr
 doc comments, which named it as the set both languages had to agree on while their own
 bodies explained it is not — the engine spells `trimmed` out precisely because
 `str::trim` is the wrong half.
+
+A tenth round moved twelve, and they divide into two kinds. The first is a repair that
+was never made: `restorePaneConsole`'s modes half was `process.stdin.setRawMode(false)`,
+measured to reach no syscall at all and to be undone by libuv's own teardown when forced
+— so the verb reported a console it had not touched. `pane-clear.test.mjs` (75 → 80)
+now drives the `cmd.exe` child through the seam the verb forwards, both ways round, and
+pins that `%SystemRoot%` is read from this process rather than from the pane's addressing
+environment, which is a different question and was silently losing the half. The
+acceptance suite's console assertions were anchored on the wording the two report
+branches *share*, so they matched whichever one ran; they now name the branch a
+redirected stdin actually takes. And `docs-check` gained the check that would have caught
+the paragraph in [`07-as-built.md`](07-as-built.md) that went on explaining the restore as
+`setRawMode` for a whole round after it stopped being that — the checks there pinned
+function *names*, and `restorePaneConsole` kept its name through the rewrite.
+
+The second kind is a probe that must not happen. `clipboard_image.rs` (5 → 9) gained the
+`file://` URL every real producer writes — `file:///C:/…` kept the empty authority's slash
+and died on `is_file` — and the UNC share that must never reach `is_file` at all, because
+on Windows that call is an outbound SMB connect with implicit credentials on the
+event-loop thread. Both of those tests assert on the *gate*, not on the outcome: `is_file`
+on an unreachable share is `false` too, so the obvious check passes with the guard
+deleted. The same file's `percent_decode` was slicing a `&str` by byte index and panicked
+on any `%` a multi-byte character followed, which is reachable from arbitrary clipboard
+text. `terminal_windows.rs` (54 → 55), `agwinterm.rs` (49 → 50) and `frame_file.rs`
+(40 → 41) each gained the one test their half of the round had none of: a successful
+zero-byte read that a stale `ERROR_OPERATION_ABORTED` would have turned into an unbounded
+spin, the client handle's `SECURITY_IDENTIFICATION` — a control that fails *open*, so
+nothing but an assertion can see it — and the partially-written frame that is unlinked
+rather than left for the CLI's ownership rule to adopt.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

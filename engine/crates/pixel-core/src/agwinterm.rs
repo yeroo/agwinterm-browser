@@ -53,7 +53,9 @@ use std::os::windows::io::AsRawHandle;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, HANDLE, WAIT_TIMEOUT};
-use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, ReadFile, WriteFile};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_FLAG_OVERLAPPED, ReadFile, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+};
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResultEx, OVERLAPPED};
 
 use crate::terminal::SessionEnv;
@@ -463,6 +465,26 @@ unsafe impl Send for PendingIo {}
 /// take every real one in a single read rather than to stream a large one well.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// What the client handle is opened with, named so it can be asserted on.
+///
+/// `FILE_FLAG_OVERLAPPED` is not a performance choice. It is what makes a bounded
+/// wait possible at all: a synchronous handle has no way to ask for a read that gives
+/// up. See [`Connection`].
+///
+/// The SQOS half is a different concern, and it is the one a named-pipe *client* has
+/// to opt into. Without `SECURITY_SQOS_PRESENT` the server may
+/// `ImpersonateNamedPipeClient` and act with this user's token; the Win32 pipe
+/// namespace lets any local process create `agwinterm` first, and this client dials a
+/// predictable name it never authenticates. So it is pinned to
+/// `SECURITY_IDENTIFICATION`, which lets the host learn who is calling and not act as
+/// them — the same default .NET's `NamedPipeClientStream` applies, which is why
+/// `agwintermctl` is hardened here and this client was not.
+///
+/// A constant rather than three terms inside the builder chain because dropping one
+/// of them fails *open*: the handle still connects, the exchange still works, and the
+/// only difference is one a test has to be able to see.
+const CLIENT_FLAGS: u32 = FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION;
+
 impl Connection {
     fn open(path: &str) -> io::Result<Self> {
         let mut attempt = 1;
@@ -470,10 +492,7 @@ impl Connection {
             match OpenOptions::new()
                 .read(true)
                 .write(true)
-                // Not a performance choice. It is what makes a bounded wait possible
-                // at all: a synchronous handle has no way to ask for a read that
-                // gives up. See [`Connection`].
-                .custom_flags(FILE_FLAG_OVERLAPPED)
+                .custom_flags(CLIENT_FLAGS)
                 .open(path)
             {
                 Ok(file) => {
@@ -2127,6 +2146,31 @@ mod tests {
         assert!(
             waited < EXCHANGE_DEADLINE * 3,
             "{waited:?} is not the bound the module documents",
+        );
+    }
+
+    #[test]
+    fn the_client_handle_declines_to_be_impersonated() {
+        // A security control that fails open. Drop `SECURITY_SQOS_PRESENT` and the
+        // client still connects, the exchange still works, and the only difference is
+        // that a process which squatted the predictable `agwinterm` name may now
+        // `ImpersonateNamedPipeClient` and act with this user's token. There is no
+        // behaviour to observe from here, so the flags are asserted directly — which
+        // is what the constant exists for.
+        assert_eq!(
+            CLIENT_FLAGS & SECURITY_SQOS_PRESENT,
+            SECURITY_SQOS_PRESENT,
+            "the impersonation level is unspecified, so the server's default wins",
+        );
+        assert_eq!(
+            CLIENT_FLAGS & 0x000F_0000,
+            SECURITY_IDENTIFICATION,
+            "the level is present but is not SECURITY_IDENTIFICATION",
+        );
+        assert_eq!(
+            CLIENT_FLAGS & FILE_FLAG_OVERLAPPED,
+            FILE_FLAG_OVERLAPPED,
+            "without overlapped I/O no wait here can be bounded at all",
         );
     }
 

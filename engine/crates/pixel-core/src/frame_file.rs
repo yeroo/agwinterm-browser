@@ -794,8 +794,38 @@ fn write_all_new(path: &Path, png: &[u8]) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(path)?;
-    file.write_all(png)?;
-    file.flush()
+    // A write that fails part-way leaves a truncated file behind, and the caller's
+    // `?` returns from `publish_encoded` before either of its `remove_file` cleanups
+    // can run. The path never reaches `self.written`, so `reap` never sees it either
+    // — it is litter no later frame can account for.
+    //
+    // Which matters because the CLI reads ownership off the filesystem. A browser
+    // whose only write failed placed nothing and wrote no `PANE_FILE` marker; on the
+    // pid path `allOwnedFrames` adopts exactly that shape — frames present, marker
+    // absent — as "a browser left a picture here", and clearing on that evidence
+    // takes down a placement some other producer owns. That is the very thing
+    // `FramePublisher::clear`'s `written.is_empty()` guard exists to refuse.
+    let written = file.write_all(png).and_then(|()| file.flush());
+    discard_partial(path, file, written)
+}
+
+/// The cleanup half of [`write_all_new`], given the handle and what the write said.
+///
+/// Separate because the failure it exists for cannot be provoked through
+/// `write_all_new` — a `File` that opened `create_new` writes a few kilobytes of PNG
+/// or the volume is full — and an untested cleanup is a cleanup that quietly stops
+/// happening. `Ok` is passed straight back, so the successful path is this function
+/// too and the test that pins "a good write keeps its file" is pinning the real one.
+fn discard_partial(path: &Path, file: fs::File, written: io::Result<()>) -> io::Result<()> {
+    match written {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // Closed first: Windows refuses to unlink a file with a live handle.
+            drop(file);
+            let _ = fs::remove_file(path);
+            Err(err)
+        }
+    }
 }
 
 /// `{"images":[{…}]}` — the `args` of one `image.frame` request.
@@ -1219,6 +1249,53 @@ mod tests {
             Vec::<String>::new(),
             "a frame nobody read is litter, not history",
         );
+    }
+
+    #[test]
+    fn a_write_that_failed_part_way_takes_its_file_with_it() {
+        // The one litter a later frame cannot account for: `publish_encoded` returns
+        // through `?` before either of its own `remove_file` cleanups, and the path
+        // never reached `self.written`, so `reap` will never see it either. It
+        // matters because the CLI reads ownership off the filesystem — frames present
+        // with no `PANE_FILE` marker is exactly the shape `allOwnedFrames` adopts on
+        // the pid path, and clearing on that evidence takes down a placement some
+        // other producer owns.
+        let dir = std::env::temp_dir().join(format!("pixel-partial-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("a temp directory");
+        let path = dir.join("frame-00000000.png");
+
+        let file = fs::File::create(&path).expect("a file to write into");
+        assert!(
+            path.exists(),
+            "the test did not create what it is about to lose"
+        );
+        let err = discard_partial(
+            &path,
+            file,
+            Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "the volume filled",
+            )),
+        )
+        .expect_err("a failed write is a failed frame");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::WriteZero,
+            "the error was swallowed"
+        );
+        assert!(
+            !path.exists(),
+            "a truncated frame was left for the CLI to adopt"
+        );
+
+        // And the successful path is the same function, so this pins the one that runs.
+        let file = fs::File::create(&path).expect("a file to write into");
+        discard_partial(&path, file, Ok(())).expect("a good write");
+        assert!(
+            path.exists(),
+            "a frame that was written fine was removed anyway"
+        );
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

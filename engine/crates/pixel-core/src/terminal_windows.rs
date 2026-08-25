@@ -84,8 +84,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, GENERIC_READ,
-    GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, ERROR_OPERATION_ABORTED,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, SetLastError,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile, WriteFile,
@@ -233,34 +233,61 @@ impl ConsoleHandle {
     /// Blocks until at least one byte is available. `Ok(0)` is end of input.
     #[allow(unsafe_code)]
     fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut read: u32 = 0;
-        // SAFETY: `buf` is a live slice for the duration of the call and `read` a
-        // valid out-param; the last argument is the documented null for a
-        // synchronous handle.
-        let ok = unsafe {
-            ReadFile(
-                self.0,
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-                &mut read,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            // A pipe whose writer has gone reports `ERROR_BROKEN_PIPE` rather than
-            // a zero-byte read; a console never does, but the tests drive this loop
-            // over a real pipe and both mean the same thing to the caller.
-            let err = io::Error::last_os_error();
-            return match err.raw_os_error() {
-                Some(code)
-                    if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_HANDLE_EOF as i32 =>
-                {
-                    Ok(0)
-                }
-                _ => Err(err),
+        loop {
+            let mut read: u32 = 0;
+            // The abort check below reads `GetLastError` after a *successful* call,
+            // where Windows does not promise to have set it — so it is cleared first.
+            // Without this a stale `ERROR_OPERATION_ABORTED` left by any earlier API
+            // call on this thread turns an honest zero-byte read into an unbounded
+            // spin on the reader thread.
+            // SAFETY: a plain thread-local store with no pointer arguments.
+            unsafe { SetLastError(0) };
+            // SAFETY: `buf` is a live slice for the duration of the call and `read` a
+            // valid out-param; the last argument is the documented null for a
+            // synchronous handle.
+            let ok = unsafe {
+                ReadFile(
+                    self.0,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut read,
+                    std::ptr::null_mut(),
+                )
             };
+            if ok == 0 {
+                // A pipe whose writer has gone reports `ERROR_BROKEN_PIPE` rather than
+                // a zero-byte read; a console never does, but the tests drive this loop
+                // over a real pipe and both mean the same thing to the caller.
+                let err = io::Error::last_os_error();
+                return match err.raw_os_error() {
+                    Some(code)
+                        if code == ERROR_BROKEN_PIPE as i32 || code == ERROR_HANDLE_EOF as i32 =>
+                    {
+                        Ok(0)
+                    }
+                    _ => Err(err),
+                };
+            }
+            // `ReadFile` on `CONIN$` is `ReadConsole`, and a console control event
+            // interrupts a blocked read by *succeeding* with zero bytes and
+            // `ERROR_OPERATION_ABORTED`. Ctrl+Break raises one whether or not
+            // `raw_input_mode` cleared `ENABLE_PROCESSED_INPUT`. Reading that as end
+            // of input is permanent: [`spawn_reader`] closes the inbox, every later
+            // `poll_event` is `UnexpectedEof`, and the browser goes on drawing with
+            // no thread left that could deliver a keystroke. Rust's own std carries
+            // this same retry in its Windows stdin path.
+            //
+            // Guarded on a non-empty buffer, so a caller asking for zero bytes still
+            // gets an answer rather than a spin: only a read that had room for a byte
+            // and came back with none can be the interrupted one.
+            if read == 0
+                && !buf.is_empty()
+                && io::Error::last_os_error().raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32)
+            {
+                continue;
+            }
+            return Ok(read as usize);
         }
-        Ok(read as usize)
     }
 
     /// Writes every byte, looping over short writes.
@@ -1365,7 +1392,20 @@ impl Terminal {
             RawEvent::WindowSize(size) => {
                 // An in-band report (mode 2048). Share the "last size" with the
                 // screen-buffer poll so the same resize is not announced twice.
-                self.last_size = Some(size);
+                //
+                // In *cell* units only. A mode-2048 report carries a pixel extent as
+                // well (`parse_resize_report` fills it from fields 4 and 5), and
+                // `ConsoleHandle::window_size` answers zero for both, always — so a
+                // baseline that kept the reported pixels could never compare equal to
+                // what the poll reads next. The poll would re-announce the same resize
+                // within its 100 ms tick, with the pixel extent zeroed: two relayouts,
+                // two `pane_metrics` round trips over the control pipe, and a canvas
+                // flipping between the two sizes `window_from` derives from them.
+                self.last_size = Some(WindowSize {
+                    width_px: 0,
+                    height_px: 0,
+                    ..size
+                });
                 Event::WindowSize(size)
             }
             RawEvent::Mouse(kind, button, mods, x, y) => {
@@ -1819,6 +1859,34 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
+    fn a_successful_zero_byte_read_is_not_mistaken_for_an_interrupt() {
+        // `ConsoleHandle::read` retries when `ReadFile` *succeeds* with zero bytes and
+        // `ERROR_OPERATION_ABORTED`, because that is how a console control event
+        // interrupts a blocked `ReadConsole`. Windows does not reset `GetLastError` on
+        // a successful call, so without the `SetLastError(0)` before each attempt an
+        // abort code left in this thread's slot by any earlier API call turns an
+        // honest zero-byte read into an unbounded loop — on the reader thread, with no
+        // bound and nothing that could make the next attempt differ.
+        //
+        // Poisoning the slot and asking for zero bytes with data pending is the only
+        // shape from which a successful zero-byte read can be provoked here at all: a
+        // zero-length read *blocks* on an empty pipe rather than returning, and the
+        // console's real abort is not reproducible without a console. It pins the pair
+        // — the clear and the `!buf.is_empty()` guard — rather than either alone.
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        std::io::Write::write_all(&mut writer, b"x").expect("a byte to make the read return");
+        let handle = owned(reader.into());
+        // SAFETY: a thread-local store with no pointer arguments.
+        unsafe { SetLastError(ERROR_OPERATION_ABORTED) };
+        assert_eq!(handle.read(&mut []).expect("a zero-length read"), 0);
+        // And it consumed nothing: the byte is still there for the next reader.
+        let mut one = [0u8; 1];
+        assert_eq!(handle.read(&mut one).expect("the pending byte"), 1);
+        assert_eq!(&one, b"x");
+    }
+
+    #[test]
     fn an_event_split_across_two_reads_is_held_until_it_is_whole() {
         // The decoder already reports incomplete tails; what is new is that the
         // loop keeps the tail and waits rather than treating "no event yet" as
@@ -2026,14 +2094,19 @@ mod tests {
 
         // The same size the buffer already has, so only the shared baseline can
         // keep the screen-buffer poll quiet afterwards.
-        inbox.push(format!("\x1b[48;{rows};{cols};0;0t").as_bytes());
+        //
+        // With a real pixel extent on it, which is what a host that implements mode
+        // 2048 actually sends. `window_size` reports zero pixels always, so a
+        // baseline that kept the reported ones could never match the poll — and this
+        // test, written with `;0;0t`, was the one shape in which it did.
+        inbox.push(format!("\x1b[48;{rows};{cols};768;1024t").as_bytes());
         assert_eq!(
             term.poll_event(Some(Duration::from_secs(5))).unwrap(),
             Some(Event::WindowSize(WindowSize {
                 cols: u32::from(cols as u16),
                 rows: u32::from(rows as u16),
-                width_px: 0,
-                height_px: 0,
+                width_px: 1024,
+                height_px: 768,
             })),
         );
         assert_eq!(

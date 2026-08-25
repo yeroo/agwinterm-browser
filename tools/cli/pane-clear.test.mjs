@@ -44,6 +44,25 @@ const pane = await loadModule("cli/src/pane.ts");
 const help = await loadModule("cli/src/help.ts");
 const mainSource = fs.readFileSync(path.join(REPO, "cli", "src", "main.ts"), "utf8");
 
+/**
+ * The source between two anchors, and a failure rather than a slice when either has
+ * moved.
+ *
+ * A bare `source.slice(source.indexOf(a), source.indexOf(b))` answers `-1` for a
+ * missing anchor, which `slice` reads as "one character from the end" -- a body that
+ * is one character long, non-empty, and satisfies every "does not contain" assertion
+ * made about it. A renamed function would silently turn these into tests that assert
+ * nothing at all, which is the one failure mode a source-reading test has.
+ */
+function between(source, from, to = null) {
+  const start = source.indexOf(from);
+  assert.ok(start >= 0, `the source no longer contains ${JSON.stringify(from)}`);
+  if (to === null) return source.slice(start);
+  const end = source.indexOf(to, start);
+  assert.ok(end > start, `${JSON.stringify(to)} no longer follows ${JSON.stringify(from)}`);
+  return source.slice(start, end);
+}
+
 /** A pane environment, with the three variables agwinterm sets. */
 const inPane = (extra) => ({ AGWINTERM_ENABLED: "1", ...extra });
 
@@ -332,10 +351,7 @@ describe("sending the clear", () => {
 });
 
 describe("the CLI's foreground wait", () => {
-  const body = mainSource.slice(
-    mainSource.indexOf("async function openInForeground"),
-    mainSource.indexOf("async function attachHere"),
-  );
+  const body = between(mainSource, "async function openInForeground", "async function attachHere");
 
   it("clears after the browser is done, not before", () => {
     // The ordering is the whole point: clearing before the wait would take the
@@ -454,42 +470,106 @@ describe("giving the console back, which is the other half of giving the pane ba
     }
   });
 
-  it("writes it, and puts the console back into cooked mode", () => {
+  it("writes it, and cooks the console modes from a child process", () => {
     const written = [];
     const calls = [];
     const restored = pane.restorePaneConsole(
       { write: (chunk) => written.push(chunk) },
+      { isTTY: true, pause: () => calls.push("pause") },
       {
-        isTTY: true,
-        setRawMode: (raw) => calls.push(`raw:${raw}`),
-        pause: () => calls.push("pause"),
+        cook: () => {
+          calls.push("cook");
+          return true;
+        },
       },
     );
     assert.deepEqual(restored, { escapes: true, modes: true });
     assert.deepEqual(written, [pane.DISABLE_REPORTING]);
-    // `uv_tty_set_mode(NORMAL)` rewrites the input mode outright, which is what puts
-    // back echo and line input and takes `ENABLE_VIRTUAL_TERMINAL_INPUT` off again --
-    // the `SetConsoleMode` half that no escape string can reach.
-    assert.deepEqual(calls, ["raw:false", "pause"]);
+    // The `SetConsoleMode` half that no escape string can reach, and that this
+    // process cannot make itself: see `cookConsoleModes`.
+    assert.deepEqual(calls, ["cook", "pause"]);
+  });
+
+  it("reads the cooking child's path from this process, not from the pane's env", () => {
+    // Two unrelated environments. `%SystemRoot%` names the Windows this CLI is
+    // running on; the pane env names the pane to address, and a caller is free to
+    // hand in one that mentions no Windows at all -- every test in this file does.
+    // Reading the child's path out of that one silently lost the modes half on a
+    // console that was perfectly restorable, and let a caller point the spawn
+    // somewhere else by naming `SystemRoot` itself.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
+    const body = between(source, "function cookConsoleModes(", "\n}");
+    assert.match(body, /process\.env\.SystemRoot/, "the child's path is not this process's");
+    assert.ok(!/(?<!process\.)env\.SystemRoot/.test(body), "the pane env still decides the path");
+    // And an absolute one, for `taskkillPath`'s reason: `path.join` on a relative
+    // root resolves `System32\cmd.exe` against the directory the CLI was launched in.
+    assert.match(body, /path\.isAbsolute/, "a relative %SystemRoot% still reaches path.join");
+  });
+
+  it("does not call setRawMode, because it does nothing and is not honest about it", () => {
+    // The call this used to make. `uv_tty_set_mode` returns early when the mode
+    // already matches the one it recorded, and a `uv_tty_t` starts at NORMAL -- so a
+    // CLI that never turned raw mode *on* asks for NORMAL, matches, and reaches no
+    // syscall at all. Forcing the transition is no better: libuv saves the mode it
+    // found on the way in and `uv_tty_reset_mode` restores that saved -- broken --
+    // mode when Node tears down stdio. Both measured on Windows 11.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
+    const body = between(source, "export function restorePaneConsole", "// -- whose placement is it");
+    assert.ok(!body.includes("setRawMode"), "the restore is back on a call that does nothing");
+  });
+
+  it("pauses stdin even when the cooking child throws", () => {
+    // `pause` is what lets the CLI's process exit: reading `isTTY` constructs the tty
+    // handle, and a handle constructed this late holds the event loop open. It is the
+    // cook that can throw -- `execFileSync` does -- so sharing a `try` with it made
+    // the failure that hangs the CLI the same failure that skips the restore.
+    const calls = [];
+    const restored = pane.restorePaneConsole(
+      { write: () => {} },
+      {
+        isTTY: true,
+        pause: () => calls.push("pause"),
+      },
+      {
+        cook: () => {
+          throw new Error("ENOENT");
+        },
+      },
+    );
+    assert.deepEqual(restored, { escapes: true, modes: false });
+    assert.deepEqual(calls, ["pause"], "a throwing cook took the stdin pause with it");
   });
 
   it("leaves a stdin that is not a console alone, and says it did not touch it", () => {
     // `terminal-browser open > out.txt` still has a console to reset the modes on,
-    // and no tty to ask. The half that did not run is reported as not having run:
-    // `SetConsoleMode` is reachable only through Node's raw-mode setter, so a
-    // redirected stdin leaves echo and line input exactly as the engine set them,
-    // and a report claiming otherwise sends the user away from a broken console.
+    // and no tty to ask. The half that did not run is reported as not having run: a
+    // redirected stdin is not the console the child would have to inherit, so echo
+    // and line input stay exactly as the engine set them, and a report claiming
+    // otherwise sends the user away from a broken console.
     const calls = [];
-    const redirected = pane.restorePaneConsole(
-      { write: () => {} },
-      { isTTY: false, setRawMode: () => calls.push(1) },
-    );
+    const cook = () => {
+      calls.push(1);
+      return true;
+    };
+    const redirected = pane.restorePaneConsole({ write: () => {} }, { isTTY: false }, { cook });
     assert.deepEqual(calls, []);
     assert.deepEqual(redirected, { escapes: true, modes: false });
-    assert.deepEqual(pane.restorePaneConsole({ write: () => {} }, {}), {
+    assert.deepEqual(pane.restorePaneConsole({ write: () => {} }, {}, { cook }), {
       escapes: true,
       modes: false,
     });
+    assert.deepEqual(calls, []);
+  });
+
+  it("reports the modes as not restored when the cooking child does not run", () => {
+    // A `%SystemRoot%` that is not set, a platform with no `SetConsoleMode`, a spawn
+    // that hit the timeout: the child either ran and exited clean or it did not, and
+    // only the first is a restore. Claiming one anyway is the mis-report the two
+    // flags exist to prevent.
+    assert.deepEqual(
+      pane.restorePaneConsole({ write: () => {} }, { isTTY: true }, { cook: () => false }),
+      { escapes: true, modes: false },
+    );
   });
 
   it("never throws, whatever the streams do", () => {
@@ -503,7 +583,7 @@ describe("giving the console back, which is the other half of giving the pane ba
       modes: false,
     });
     assert.deepEqual(
-      pane.restorePaneConsole({ write: () => {} }, { isTTY: true, setRawMode: thrower }),
+      pane.restorePaneConsole({ write: () => {} }, { isTTY: true }, { cook: thrower }),
       { escapes: true, modes: false },
     );
   });
@@ -513,9 +593,10 @@ describe("giving the console back, which is the other half of giving the pane ba
     // same `Drop`, so the exits that skip one skip the other. Clearing the picture
     // and leaving the console on the alternate screen with the cursor hidden and
     // mouse reporting on is half a fix.
-    const body = mainSource.slice(
-      mainSource.indexOf("async function openInForeground"),
-      mainSource.indexOf("async function attachHere"),
+    const body = between(
+      mainSource,
+      "async function openInForeground",
+      "async function attachHere",
     );
     const clear = body.indexOf("clearOwnedPaneFrame(process.env");
     const restore = body.indexOf("restorePaneConsole()");
@@ -591,7 +672,13 @@ function freshRoot(t, name) {
   return root;
 }
 
-/** `process.stdout` and `process.stdin` as recorders. */
+/**
+ * `process.stdout` and `process.stdin` as recorders, plus the cooking child as one.
+ *
+ * `cook` is a seam rather than the real thing on purpose: letting it run would spawn
+ * `cmd.exe` against the test runner's own console, and would only do anything at all
+ * on one platform.
+ */
 function recorder() {
   const written = [];
   const calls = [];
@@ -601,8 +688,11 @@ function recorder() {
     out: { write: (chunk) => written.push(chunk) },
     input: {
       isTTY: true,
-      setRawMode: (raw) => calls.push(`raw:${raw}`),
       pause: () => calls.push("pause"),
+    },
+    cook: () => {
+      calls.push("cook");
+      return true;
     },
     get text() {
       return written.join("");
@@ -1108,6 +1198,7 @@ describe("the pane-clear verb", () => {
       env: inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
       out: rec.out,
       input: rec.input,
+      cook: rec.cook,
       root,
       timeoutMs: 1_000,
     });
@@ -1124,10 +1215,33 @@ describe("the pane-clear verb", () => {
       pane.DISABLE_REPORTING,
       "the report was written before the console came back",
     );
-    assert.deepEqual(rec.calls, ["raw:false", "pause"], "the SetConsoleMode half did not run");
+    assert.deepEqual(rec.calls, ["cook", "pause"], "the SetConsoleMode half did not run");
+    assert.match(rec.text, /out of raw mode/, "the modes half ran and was not reported");
     assert.match(rec.text, /frame: +cleared/);
     assert.ok(rec.text.includes(dir), "it does not say which frames it found");
     assert.match(rec.text, /pid 4242/);
+  });
+
+  it("reports the modes as not restored when the verb's cooking child will not run", async (t) => {
+    // The seam the verb forwards, driven the other way. `paneClearCommand` owns the
+    // wiring between `PaneClearOptions.cook` and `restorePaneConsole`, and a report
+    // that claims a restore the child never made is the one wording that sends a user
+    // away from a console that still does not echo.
+    const root = freshRoot(t, "verb-nocook");
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: {},
+      out: rec.out,
+      input: rec.input,
+      cook: () => false,
+      root,
+    });
+
+    assert.equal(code, 0);
+    assert.match(rec.text, /the input modes could not be put back from here/);
+    assert.ok(!/out of raw mode/.test(rec.text), rec.text);
+    assert.deepEqual(rec.calls, ["pause"], "the recorder's own cook was used instead");
   });
 
   it("restores the console before it prints, or the report is thrown away", () => {
@@ -1135,7 +1249,7 @@ describe("the pane-clear verb", () => {
     // the alternate screen and then leave it -- the one arrangement where a command
     // that worked is indistinguishable from one that did nothing.
     const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
-    const body = source.slice(source.indexOf("export async function paneClearCommand"));
+    const body = between(source, "export async function paneClearCommand");
     const restore = body.indexOf("restorePaneConsole(out");
     const print = body.indexOf("paneClearReport(");
     assert.ok(restore > 0 && print > restore, "the report is written before the console is back");
@@ -1154,6 +1268,7 @@ describe("the pane-clear verb", () => {
       env: inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
       out: rec.out,
       input: rec.input,
+      cook: rec.cook,
       root,
       timeoutMs: 500,
     });
@@ -1177,6 +1292,7 @@ describe("the pane-clear verb", () => {
       env: inPane({ AGWINTERM_PIPE: absent, AGWINTERM_SESSION_ID: "pane-1" }),
       out: rec.out,
       input: rec.input,
+      cook: rec.cook,
       root,
       timeoutMs: 500,
     });
@@ -1197,6 +1313,7 @@ describe("the pane-clear verb", () => {
       env: { AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "pane-1" },
       out: rec.out,
       input: rec.input,
+      cook: rec.cook,
       root,
       timeoutMs: 200,
     });
@@ -1210,7 +1327,7 @@ describe("the pane-clear verb", () => {
     const root = freshRoot(t, "verb-nopane");
     const rec = recorder();
 
-    const code = await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, root });
+    const code = await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, cook: rec.cook, root });
 
     assert.equal(code, 0);
     assert.match(rec.text, /no agwinterm pane/);
@@ -1226,7 +1343,7 @@ describe("the pane-clear verb", () => {
     leftoverFrames(root, 4242, 2);
     const rec = recorder();
 
-    await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, root });
+    await pane.paneClearCommand({ env: {}, out: rec.out, input: rec.input, cook: rec.cook, root });
 
     assert.match(rec.text, /2 frame\(s\)/);
     assert.match(rec.text, /run this from the pane/);
@@ -1321,13 +1438,15 @@ describe("the pane-clear verb", () => {
 
   it("does not claim the input modes are back when there was no tty to ask", () => {
     // `terminal-browser pane-clear | tee log.txt` gets the escapes and not the
-    // `SetConsoleMode` half, because Node's raw-mode setter is the only handle this
-    // process has on it. Reporting the full restore there is the one wording that
-    // tells a user with a console that still does not echo that it was fixed.
+    // `SetConsoleMode` half, because a redirected stdin is not the console the
+    // cooking child would have to inherit. Reporting the full restore there is the
+    // one wording that tells a user with a console that still does not echo that it
+    // was fixed.
     const outcome = { request: null, owned: null, cleared: false, searched: pane.searchedRoots() };
     const half = pane.paneClearReport({}, outcome, { escapes: true, modes: false }).join("\n");
     assert.match(half, /console: mouse reporting off/);
-    assert.match(half, /stdin here is not a console/);
+    assert.match(half, /the input modes could not be put back from here/);
+    assert.match(half, /run this again with stdin on the pane/);
     assert.ok(!/out of raw mode/.test(half), half);
 
     const whole = pane.paneClearReport({}, outcome, { escapes: true, modes: true }).join("\n");
@@ -1336,8 +1455,8 @@ describe("the pane-clear verb", () => {
 });
 
 describe("how the CLI dispatches pane-clear", () => {
-  const main = mainSource.slice(mainSource.indexOf("async function main("));
-  const branch = main.slice(main.indexOf('command === "pane-clear"'));
+  const main = between(mainSource, "async function main(");
+  const branch = between(main, 'command === "pane-clear"');
 
   it("has a verb in front of it at all", () => {
     // `clearPaneFrame` and `restorePaneConsole` were library functions with one
@@ -1377,10 +1496,7 @@ describe("how the CLI dispatches pane-clear", () => {
 });
 
 describe("the foreground exit path clears only what it drew", () => {
-  const body = mainSource.slice(
-    mainSource.indexOf("async function openInForeground"),
-    mainSource.indexOf("async function attachHere"),
-  );
+  const body = between(mainSource, "async function openInForeground", "async function attachHere");
 
   it("asks whether this browser ever placed a frame", () => {
     // It used to send `image.clear` unconditionally, which is the CLI contradicting
