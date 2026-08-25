@@ -1,0 +1,251 @@
+{
+  "scope": {
+    "task": "ralphex-20260822-post-port-corrections",
+    "run": "20260825-165958",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260822-post-port-corrections\\20260825-165958\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 5360023,
+        "raised": 1,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 4693158,
+        "raised": 4,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 7997889,
+        "raised": 3,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 208834,
+        "raised": 5,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "arch+quality-1",
+      "file": "cli/src/pane.ts",
+      "line": 490,
+      "end_line": 490,
+      "severity": "minor",
+      "confidence": 88,
+      "title": "The `%SystemRoot%` absoluteness check admits UNC and drive-relative roots",
+      "body": "The factual core checks out. Verified on this machine with `node.exe`: `path.win32.isAbsolute(\"\\\\\\\\srv\\\\share\")` is `true` and `path.win32.join` yields `\\\\srv\\share\\System32\\cmd.exe`; `isAbsolute(\"/Windows\")` is `true` and joins to `\\Windows\\System32\\cmd.exe`, which resolves against the current *drive*. Only `C:Windows` and `Windows` are caught. Both sites are as described — `cookConsoleModes` at pane.ts:490 and `taskkillPath` at main.ts:401 — and both are new in `git diff main...HEAD`, so nothing here pre-dates the change.\n\nWhat is wrong is the severity. The guard's documented purpose (main.ts:394-397) is to stop the *current-directory-first* hazard: an attacker who can drop `taskkill.exe` in a download folder the user happens to be sitting in. That is a weak-attacker threat. Reaching either of the spellings above instead requires control of this process's `SystemRoot`/`windir` — an attacker with that already controls `PATH`, `ComSpec` and the launch itself, and has no need for this path. So this is an incomplete defence-in-depth guard rather than an exploitable hole: real, worth closing because the check exists precisely to make the spelling airtight, but not a major.\n\nThe drive-relative half is also a plain correctness gap independent of any attacker — with `SystemRoot=\\Windows` and a cwd on `D:`, recovery silently spawns nothing or the wrong binary — though no ordinary Windows supplies such a value.",
+      "fix": "Require a drive-qualified root, e.g. `const root = named \u0026\u0026 /^[A-Za-z]:[\\\\/]/.test(named) ? named : \"C:\\\\Windows\"`. Note the reach before doing it: `main.ts` already imports from `pane.ts` (main.ts:34) so a single exported helper is available, but `tools/cli/pane-clear.test.mjs:528` and the `taskkillPath` test just below it assert the literal string `path.isAbsolute` in each body, so both assertions have to move with the code.",
+      "sources": [
+        "arch+quality",
+        "adversarial"
+      ],
+      "lenses": [
+        "quality",
+        "adversarial"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "docs+tests-1",
+      "file": "cli/src/main.ts",
+      "line": 528,
+      "end_line": 529,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "\"Idempotent, so it runs either way\" is false now that the modes half spawns cmd.exe",
+      "body": "`openInForeground`'s exit path calls `restorePaneConsole()` unconditionally after every child exit, justified by the comment on line 528: \"Idempotent, so it runs either way.\" `cli/src/pane.ts:513-516` carries the same reason (\"mode resets are idempotent, and asking a console that is already on the primary buffer with a visible cursor to go there again is a no-op\"). That was true when the modes half was `process.stdin.setRawMode(false)` — the same change's own doc records that it reached no syscall at all. It is no longer true: the modes half is now `cookConsoleModes` (pane.ts:563), an `execFileSync` of `cmd.exe /c exit` with `stdio: \"inherit\"`, whose documented effect (pane.ts:465-470) is to rewrite the console input mode to cmd's cooked default — replacing mode 1008 with 999 rather than restoring a saved value.\n\nFailure case: `terminal-browser open https://example.com` in a pane, quit the browser normally (ordinary Ctrl+Q). `ModeGuard::drop` runs and restores the console to the exact mode read at entry — `terminal_windows.rs:79` states that as the guard's contract (\"Both routes restore the exact mode that was read at entry, and both are idempotent\"). Then `restorePaneConsole()` fires anyway and cmd.exe overwrites that restored mode with 999 (0x3E7). Every input-mode bit the shell had that differs from cmd's default is lost: a pane whose shell had `ENABLE_QUICK_EDIT_MODE` off gets it turned back on, `ENABLE_MOUSE_INPUT` and `ENABLE_WINDOW_INPUT` are cleared. If the browser was launched from a caller that intentionally used nonstandard console modes, the clean engine restore is immediately overwritten and control returns with the caller's console configured incorrectly. On the clean-exit path the CLI now leaves the console in a state the engine had already put right — the comment that authorises running it unconditionally is exactly the one the change invalidated. The idempotence claim holds only when the prior mode was already cmd's default.\n\nThe fix is either the comment or the code, and which one is the author's call: the modes half is only needed on the exits that ran no destructor, so gating it (as the frame half already is, via `clearOwnedPaneFrame`'s ownership question) would restore the reason. If the clobber is accepted, both comments need to stop calling it a no-op.",
+      "fix": "Either gate the modes half of `restorePaneConsole` on the same \"did this exit run a destructor\" question the frame half already asks — leaving confirmed clean exits to `ModeGuard`'s exact restoration — or rewrite the two comments (`main.ts:528`, `pane.ts:513-516`) to say that the cooking child rewrites the console input mode whether or not the engine had already restored it.",
+      "sources": [
+        "docs+tests",
+        "adversarial"
+      ],
+      "lenses": [
+        "comments",
+        "docs",
+        "adversarial"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "adversarial-1",
+      "file": "cli/src/main.ts",
+      "line": 378,
+      "end_line": 379,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "A failed or timed-out tree kill is treated as confirmed termination",
+      "body": "The control flow is as described: `catch { return }` at main.ts:378-380 exits `terminateTree` immediately, skipping even the `Promise.race([dead, 1s])` on line 381, and `openInForeground` then runs `clearOwnedPaneFrame` (523) and `restorePaneConsole` (529) as though the browser were stopped. The invariant test at tools/cli/pane-clear.test.mjs:391 does only what the finding says — it compares `body.indexOf(...)` positions of the kill and the clear, which is statement ordering in the source text, not termination.\n\nThe aftermath the finding names is also supported by the repo's own note at pane.ts:17-19 (libuv puts a non-`detached` child in a job object that dies with the parent): the surviving browser is killed when the CLI exits, after the CLI has already retired the frame evidence and cooked the console — so the frame and mode state it leaves behind has nothing left to clean it up. That is the wreck this path exists to prevent.\n\nNarrow, as the finding concedes: `taskkill /F /T` against a live pid normally succeeds well inside 2s, and the common failure — exit code 128, process already gone — is exactly the outcome the `catch` was written for and is harmless. Only a genuine failure or timeout with the child alive triggers it.",
+      "fix": "Do not adopt the fix as written — gating the cleanup on a confirmed kill is the wrong direction. If the browser cannot be killed, the CLI is about to exit and the job object will take it down with no destructor, so skipping `clearOwnedPaneFrame`/`restorePaneConsole` leaves the pane broken with nothing left to repair it. The proportionate fix stays inside `terminateTree`: in the `catch`, fall back to `child.kill()` and fall through to the existing `Promise.race([dead, 1s])` instead of returning, so a failed `taskkill` still gets a second route and the exit is still awaited before the caller proceeds.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "arch+quality-2",
+      "file": "cli/src/main.ts",
+      "line": 344,
+      "end_line": 344,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "`TASKKILL_TIMEOUT_MS`'s doc comment puts the two recovery steps in a `finally` they are not in",
+      "body": "The comment added with `TASKKILL_TIMEOUT_MS` says \"the two recovery steps that run after it — `clearOwnedPaneFrame` and `restorePaneConsole` in `openInForeground`'s `finally` — would never run\". Both calls are in the `try` block (main.ts:523 and main.ts:529, inside the `try {` opened at main.ts:497). The `finally` at main.ts:531 contains only the signal-listener removal loop.\n\nThe comment's substantive claim — that an unbounded `execFileSync` would strand them — is correct; the location is not. A reader following the pointer lands on listener cleanup and finds neither step, in a file where these cross-references are the primary documentation. It also inverts the safety property: being in the `try` means an exception from `terminateTree` would skip them, which is precisely why `terminateTree` is written never to throw — a fact the wrong word hides.",
+      "fix": "Say \"in `openInForeground`'s `try`\", or move the two calls into the `finally` if that is the intent the comment was recording.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "quality"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "adversarial-4",
+      "file": "engine/crates/pixel-core/src/clipboard_image.rs",
+      "line": 114,
+      "end_line": 116,
+      "severity": "minor",
+      "confidence": 94,
+      "title": "Tilde expansion still recognizes only the Unix separator",
+      "body": "On Windows, `looks_absolute` admits `~\\Pictures\\a.png`, but `admitted_path` expands only the `~/` spelling. The backslash form therefore becomes a relative literal path beginning with `~` and `is_file` checks it under the browser's working directory instead of under `USERPROFILE`, so pasting an existing home-relative image silently falls back to ordinary text. The slash-only assumption is inherited from upstream, but this change refactored the expansion into this touched function without widening it; `browser/src/url.ts:25` independently records that `~\\` is the spelling Windows users normally enter.",
+      "fix": "On Windows, strip either `~/` or `~\\` before applying the existing `under_home` validation and joining to `USERPROFILE`.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "adversarial-5",
+      "file": "store/src/paths.ts",
+      "line": 75,
+      "end_line": 77,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "Root-relative LOCALAPPDATA is accepted as a stable application root",
+      "body": "`path.win32.isAbsolute` returns true for a rooted-but-driveless value such as `\\Users\\ada\\AppData\\Local`, and `path.win32.join` preserves that form, so `windowsBase` accepts it as the application root even though it resolves against whichever drive the reading process is on. The comment above the function promises the fallback covers a variable that is \"missing or relative\", and by Windows' own reckoning this value is not absolute.\n\nThe divergence does not need an unusual spawn to appear: `cli/src/launch.ts:78` spawns the browser with `cwd: browserDir` (documented at lines 116-118 — \"`process.cwd()` inside it is not the user's directory\"), so the CLI resolves against the user's pane drive while the browser resolves against the install drive. With a rooted LOCALAPPDATA those are different trees whenever the two differ, and preferences, registry rows, recordings (`browser/src/record/paths.ts:22`) and cleanup then operate on separate roots.\n\n`browser/src/record/paths.ts:11-15` records this exact trap as the bug the port fixed — \"a leading slash is *drive-relative*, not absolute, so `path.join` resolved it against whatever drive the browser was launched from\" — so the hazard class is one the project has already named. The trigger is a deliberately malformed environment (Windows always sets LOCALAPPDATA drive-qualified), which is what keeps this minor.",
+      "fix": "Require `LOCALAPPDATA` to be drive-qualified or UNC-qualified; otherwise use the profile-derived fallback.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "arch+quality-4",
+      "file": "tools/cli/pane-clear.test.mjs",
+      "line": 1541,
+      "end_line": 1542,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "Test comment still describes the modes half as a `setRawMode` call that was removed",
+      "body": "The comment reads \"A console whose stdout is a closed pipe still has a `setRawMode` to call, and claiming the full restore there sends a user away from a pane still on the alternate screen.\"\n\n`restorePaneConsole` no longer calls `setRawMode` — `PaneInput.setRawMode` was deleted from the interface (`cli/src/pane.ts:400-404`) and the modes half is now `cookConsoleModes`, a `cmd.exe /c exit` child. This same file asserts the removal at line 544-553: \"does not call setRawMode, because it does nothing and is not honest about it\", checking that `pane.ts`'s source contains no `setRawMode` at all.\n\nSo one test in this file pins that the mechanism is gone while another tells the reader it is what runs. The assertion being explained is still right; only its stated cause is a mechanism the file itself proves absent.",
+      "fix": "Rewrite the comment in terms of the current mechanism — a console whose stdout is a redirect still has a console for the cooking child to inherit, so the modes half can succeed where the escapes half did not.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "quality"
+      ],
+      "verdict": "unverified"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [],
+  "immaterial": [
+    {
+      "id": "arch+quality-3",
+      "file": "docs/design/07-as-built.md",
+      "line": 59,
+      "end_line": 62,
+      "severity": "minor",
+      "confidence": 80,
+      "title": "§1 still states the sweep threshold flatly as \"an hour\" after `MARKED_STALE_AFTER` split it",
+      "body": "§1 reads \"a fresh publisher sweeps directories older than an hour left by processes that died before they could. The `pane` marker (see *Taking the picture back*) is written beside the first frame the host *does* place, is exempt from that reaping…\".\n\nThis change added `MARKED_STALE_AFTER` (`engine/crates/pixel-core/src/frame_file.rs:150`, a week) and `sweep_stale` now takes two thresholds, choosing the longer one for any directory holding `PANE_FILE`. §3 of the same document was updated and says so (lines 174-177); §1 was not.\n\nThe paragraph is the one place a reader meets the sweep, and it goes straight on to discuss the `pane` marker — the exact directory the hour no longer applies to — while mentioning only its exemption from frame *reaping*. A maintainer reading §1 concludes a marked wreck is gone after an hour, which is the belief `MARKED_STALE_AFTER` exists to correct.",
+      "fix": "Add the second threshold to the §1 sentence, e.g. \"…older than an hour — a week, once the directory names a pane (`MARKED_STALE_AFTER`) — left by processes that died before they could\", pointing at §3 for why.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "architecture"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "2026-08-25T16:59:59.6057155+03:00",
+    "finished_at": "2026-08-25T17:15:56.3759295+03:00",
+    "duration_ms": 956770,
+    "tokens": 19445124,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 651230
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 78860,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 226673,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}

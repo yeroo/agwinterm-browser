@@ -1,0 +1,321 @@
+{
+  "scope": {
+    "task": "port-windows-full",
+    "run": "01-initial",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\port-windows-full\\01-initial\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 8782636,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 9443289,
+        "raised": 4,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 7227739,
+        "raised": 9,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 241680,
+        "raised": 4,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "arch+quality-2",
+      "file": "docs/design/UPSTREAM.md",
+      "line": 55,
+      "end_line": 62,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "UPSTREAM.md's divergence list claims to be exhaustive and test-backed; six edited vendored files are in neither",
+      "body": "The \"Intentional divergences from upstream\" section (docs/design/UPSTREAM.md:55-66) states \"What is listed here is everything else, so the claim 'the other 43 files are untouched' stays checkable\" and \"Each is asserted by a test in `tools/vendor-check/`, so a re-vendor that drops one fails loudly.\" Step 3 of the Re-vendoring checklist is \"Re-apply every divergence listed above.\"\n\nSix edits are absent from the list. `git diff --stat 45b5e43..HEAD` shows all of them: `engine/Cargo.toml` (the `windows-sys` workspace dependency), `engine/crates/pixel-core/Cargo.toml` (the `cfg(windows)` dependency table), `engine/crates/pixel-node/src/capture.rs` (the `read_exact_at` shim replacing `std::os::unix::fs::FileExt`, plus a `cfg_attr(windows, allow(dead_code))`), `engine/crates/pixel-node/src/surface.rs` (three `cfg_attr(windows, allow(irrefutable_let_patterns))`), `engine/packages/pixel-react/scripts/build-native.mjs` (rewritten — 82 lines, including the `win32` branch of `libraryName`), and the rest of `engine/crates/pixel-node/src/lib.rs` (the `SurfaceSink` trait and the genericisation of `draw_frame`/`draw_pixels`) — divergence 5 names only that file's one `WATCH_RESIZE` line.\n\nThe guard behind the claim does not reach them either. `tools/vendor-check/unchanged.test.mjs:43` sets `const SRC = \"engine/crates/pixel-core/src\"` and diffs the 46 files in `pixel-core-files.json` and nothing else. `pixel-node` and `pixel-react` are vendored upstream trees with no baseline-diff check at all, so an edit there — or a re-vendor that drops one — is invisible to `pnpm test`. (`native-build.test.mjs` exercises what `build-native.mjs` does; it does not compare it to the baseline.)\n\nThis answers the vendored-tree question directly: a change to upstream code outside `pixel-core/src` does slip past the guard. Most of these particular six fail loudly at compile time if dropped, which limits the blast radius — but the document tells a re-vendorer the list is complete, and it is not.",
+      "fix": "Either extend `unchanged.test.mjs` to diff `engine/crates/pixel-node/src` and `engine/packages/pixel-react` against the baseline with the same named-reason table, or narrow UPSTREAM.md's claim to `pixel-core/src` and say plainly which vendored trees are unguarded.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "architecture"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "docs+tests-1",
+      "file": "docs/design/07-as-built.md",
+      "line": 117,
+      "end_line": 117,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "As-built doc names `presentBitmap` as the Windows frame path; the port never reaches it",
+      "body": "The \"what was dropped\" table says of the patched-Electron fast paths: \"`presentPaint` already falls through to `presentBitmap` (`browser/src/page/paint.ts:104`), which is stock Electron's `paint` event, **and that is the path this port runs**.\"\n\nIt is not. `browser/src/page/controller.ts:175-184` calls `presentPaint` only when `event.texture || shmFrame`; on stock Electron on Windows both are always undefined, so every frame goes to `this.bitmaps.push(image, dirtyRect, this.wholeSurfaceNext)` — `BitmapPresenter` in `paint.ts:132`, which coalesces a burst on `setImmediate`, unions damage rects, promotes a size change to a whole-surface repaint, and calls `surface.present` itself. `presentBitmap` is never invoked on this platform.\n\nThis is not an oversight the project failed to notice: `docs/plans/20260821-windows-port.md:810-816` records it as an explicit Task 9 correction (\"➕ **`presentPaint` is not the Windows path** … the **throttled `BitmapPresenter` is what Windows runs**\"), and `tools/offscreen/present.test.mjs:296-300` repeats it as a \"Finding\". Task 15 wrote the as-built doc after both and carried the pre-correction claim through anyway.\n\nFailure case: the goal for this review names frame pacing and backpressure on stock Electron as an open risk. Someone chasing that reads §2, opens `paint.ts:104`, finds a function with no throttling in it, and concludes the port has no frame coalescing at all — the opposite of the truth. The same sentence appears at `docs/design/00-port-brief.md:235-237`, which is milder because it at least names `BitmapPresenter`; the brief's own convention (an `⚠️ As built` note \"on the spot\" wherever a claim did not survive the code, per its header at lines 10-17) was also not applied there.",
+      "fix": "In `07-as-built.md:117`, replace the trailing clause with something like: \"`presentPaint` falls through to `presentBitmap`, but the controller only calls `presentPaint` when a texture or shm frame is present — so on Windows every frame goes to the throttled `BitmapPresenter` (`paint.ts:132`) instead, and `presentBitmap` is the fallback behind it.\" Add the matching `⚠️ As built` note at `00-port-brief.md:235`.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "docs",
+        "comments"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "docs+tests-3",
+      "file": "docs/design/07-as-built.md",
+      "line": 218,
+      "end_line": 218,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "\"Two lesser ones\" heading now sits over five bullets",
+      "body": "`### Two lesser ones, named so they are not surprises` (line 218) is followed by five bullets, not two: no key releases (220), the clipboard being the OS clipboard (225), no Super modifier (244), the console input code page (254), and Ctrl+Shift not being a chord this host has (266).\n\n`git show 8dbfbd6:docs/design/07-as-built.md` confirms the heading shipped with exactly two bullets — no key releases and no Super modifier — and that three more (the clipboard, the code page, and Ctrl+Shift) were appended or inserted by the four later `fix: address code review findings` commits without the count being updated. This is a stale heading introduced by the change under review, not a pre-existing one.\n\nFailure case: this section is the port's register of accepted limitations, and the count is the only thing telling a reader whether they have the whole list. Someone triaging \"what did this port knowingly give up\" reads \"Two lesser ones\", scans the first two bullets, and stops — missing the three that were inserted after it: that `cmdModifier` is `ctrl` and zoom/back/forward moved to Alt chords, that the console input code page is switched to UTF-8 and restored, and that Ctrl+Shift is not a chord this host can deliver at all, so find, devtools and record have Windows-only default bindings (Ctrl+F, F12, Alt+R).",
+      "fix": "Retitle to \"### The lesser ones, named so they are not surprises\" (no count to keep current), or update it to five.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "docs"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "adversarial-1",
+      "file": "engine/crates/pixel-core/src/agwinterm.rs",
+      "line": 277,
+      "end_line": 279,
+      "severity": "major",
+      "confidence": 90,
+      "title": "Control-pipe replies have no deadline",
+      "body": "After writing a frame request, `read_line` waits indefinitely. If agwinterm accepts the connection but its handler stalls—for example while reading a redirected TEMP path—the engine thread remains blocked permanently. Rendering stops, and shutdown also hangs because `PixelEngine::stop` joins that thread. The TypeScript control clients have deadlines, but this frame-critical client does not.",
+      "fix": "Bound each exchange with timed or overlapped pipe I/O; on expiry, discard the connection and return an error.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "adversarial-4",
+      "file": "engine/crates/pixel-core/src/clipboard_image.rs",
+      "line": 84,
+      "end_line": 93,
+      "severity": "minor",
+      "confidence": 88,
+      "title": "Windows file URLs are accepted without converting them to Windows paths",
+      "body": "The inherited `file://` parser is newly reachable on Windows, but canonical URLs are not normalized. `file:///C:/Users/me/a.png` becomes `/C:/Users/me/a.png`, while `file://server/share/a.png` becomes the relative path `server/share/a.png`; both fail `is_file`, so pasting a valid local or UNC image URL is treated as ordinary text. The test constructs the nonstandard `file://C:\\...` form and therefore misses this case.",
+      "fix": "Parse file URLs as URLs and convert them with platform-aware file-path handling, including drive-letter and UNC authority forms.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "docs+tests-4",
+      "file": "README.md",
+      "line": 16,
+      "end_line": 17,
+      "severity": "minor",
+      "confidence": 70,
+      "title": "README sends re-vendorers to UPSTREAM.md for three divergences; only two are in its divergence list",
+      "body": "README.md:15-17 says 40 of the 43 \"ended up byte-identical (the other three have a written reason in [`UPSTREAM.md`](docs/design/UPSTREAM.md))\". The three are `lib.rs`, `clipboard_image.rs` and `engine/mod.rs` (`tools/vendor-check/unchanged.test.mjs:55-64`). UPSTREAM.md's numbered \"Intentional divergences\" list carries reasons for the latter two (4 and 6) but not the first — its preamble at lines 57-61 explicitly excludes `pixel-core`'s `lib.rs`, and `unchanged.test.mjs:134` encodes that exclusion. So a reader following the README link finds two written divergences, not three.\n\nTwo corrections to the original reasoning. First, UPSTREAM.md does name `pixel-core`'s `lib.rs` and does give it a one-clause reason (\"replacing those is what the port *is*, and the plan tracks them task by task\") — it is absent from the numbered list, not from the file. Second, the claimed failure — a re-vendorer following checklist step 3 loses `lib.rs`'s module declarations and `#[cfg(unix)]` gates — cannot pass unnoticed: dropping them leaves the workspace without its module declarations so it does not compile, and checklist step 5 (`pnpm test`) fails `unchanged.test.mjs:94-104`, whose `changed` list would no longer contain `lib.rs`.\n\nWhat is left is a doc cross-reference that overstates what the linked file contains, in a spot where `docs/design/06-acceptance.md:120-134` gets it right with a four-row table. `docs/design/00-port-brief.md:25` repeats the same imprecise pointer.",
+      "fix": "One line: either repoint README.md:16-17 (and 00-port-brief.md:25) at `06-acceptance.md` §5, which tabulates all three, or add `pixel-core`'s `lib.rs` to UPSTREAM.md's divergence list with its one-line reason so the numbered list matches the count the README promises.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "docs"
+      ],
+      "verdict": "refined"
+    },
+    {
+      "id": "docs+tests-2",
+      "file": "tools/input/keybindings.test.mjs",
+      "line": 151,
+      "end_line": 152,
+      "severity": "minor",
+      "confidence": 88,
+      "title": "Comment claims Ctrl+Shift+F \"still finds\" directly above an assertion that it does not match",
+      "body": "Lines 151-152 read:\n\n```js\n// What the user pressing Ctrl+Shift+F actually sends, which now still finds.\nassert.equal(win32.matchesBinding(press(\"f\", \"ctrl\", \"shift\"), find), false);\n```\n\nThe comment is wrong twice over, and this same file establishes both facts at lines 139-142: \"The C0 encoding carries no shift — `byte_key_event` sets `ctrl` and nothing else — so `ctrl+shift+f` and `ctrl+f` arrive as the same `0x06`.\" So (a) what a user pressing Ctrl+Shift+F *actually sends* is `press(\"f\", \"ctrl\")`, which is the assertion on line 150 (`true`), not this one; and (b) the event this line constructs — ctrl **and** shift both set — is one a Windows console can never produce, and the assertion correctly expects `false`, i.e. it does *not* find.\n\nFailure case: a reader auditing whether the Ctrl+Shift→Ctrl remapping actually works reads the comment, sees `false` asserted beneath a comment promising it \"still finds\", and either concludes the binding is broken or \"fixes\" the assertion to `true` — which would then fail, since `matchesMods` compares shift exactly. The comment is what is wrong here, not the code or the assertion.",
+      "fix": "Move the comment up one line onto the `press(\"f\", \"ctrl\")` assertion, and replace the line-152 comment with what it is actually pinning — e.g. \"a synthetic ctrl+shift event, which this console cannot emit, does not match; the exact shift comparison is why the default had to move.\"",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "comments",
+        "tests"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "docs+tests-5",
+      "file": "tools/launcher/launch.test.mjs",
+      "line": 253,
+      "end_line": 257,
+      "severity": "minor",
+      "confidence": 80,
+      "title": "The \"Windows path\" in foregroundSpawnEnv's test collapses to `C:worksite`",
+      "body": "```js\nconst env = launch.foregroundSpawnEnv({ PATH: \"/x\", TERM: \"dumb\" }, 4242, \"C:\\work\\site\");\n…\nassert.equal(env[launch.CALLER_CWD_VAR], \"C:\\work\\site\");\n```\n\nIn a JavaScript string literal `\\w` and `\\s` are unrecognised escapes, so both occurrences evaluate to `\"C:worksite\"` — no backslashes at all. The assertion passes because both sides are the same collapsed literal, so the test is green and asserting nothing about a path.\n\nThat the escaping is an oversight rather than a choice is visible 96 lines up in the same file: line 157 writes `\"--partition=C:\\\\Users\\\\a b\\\\it's\"` with the backslashes properly doubled, for exactly this reason.\n\nFailure case: `CALLER_CWD_VAR` is the caller's working directory, which on Windows is always backslash-separated, and `browser/src/entry.ts` reads it back to set the browser's cwd. If `foregroundSpawnEnv` ever normalised, trimmed or re-escaped separators — or if a future change routed it through a path helper — this suite would not notice, because the only value it ever passes through is an ordinary alphanumeric string. The whole point of the test (\"carries the caller's environment through\") is untested for the one input shape this port exists for.",
+      "fix": "Double the backslashes on both lines: `\"C:\\\\work\\\\site\"`.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "tests"
+      ],
+      "verdict": "confirmed"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [
+    {
+      "id": "adversarial-3",
+      "file": "browser/src/profile.ts",
+      "line": 35,
+      "end_line": 40,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "EPERM is treated as a dead profile owner",
+      "body": "This helper treats every `process.kill(pid, 0)` error as death. On Windows, probing a live higher-integrity browser returns `EPERM`—a case the changed instance-registry code correctly handles. A second browser then overwrites the first browser's lock and selects the same Chromium `userData` directory, causing a profile-lock startup failure or concurrent-profile conflict. The reporting source describes it as a pre-existing helper: the fault lives in code the change under review did not touch, and the change only makes the surrounding path more routine.",
+      "fix": "Treat `EPERM` as alive and only treat `ESRCH` as dead, matching `store/src/instances.ts`.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": ""
+    },
+    {
+      "id": "adversarial-2",
+      "file": "browser/src/foreground.ts",
+      "line": 65,
+      "end_line": 0,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "Immediate exit bypasses the profile-lock cleanup hook",
+      "body": "Every normal foreground close calls `app.exit`, which Electron specifies does not emit `will-quit`; `profile.ts` removes `terminal-browser.lock` only from that event. The lock therefore remains after every foreground browser exit. If Windows reuses that recorded PID before the next launch, `claimProfile` considers the stale lock live and silently selects another profile, so the user appears logged out or loses access to the browsing state in the expected profile. The will-quit-only cleanup is inherited upstream, but the new foreground exit path makes this interaction routine.",
+      "fix": "Remove the owned lock during explicit foreground shutdown or register cleanup on `process.exit`; alternatively use a quit path that emits `will-quit`.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "pre_existing"
+    }
+  ],
+  "immaterial": [
+    {
+      "id": "arch+quality-3",
+      "file": "engine/crates/pixel-core/src/lib.rs",
+      "line": 92,
+      "end_line": 92,
+      "severity": "minor",
+      "confidence": 85,
+      "title": "`TerminalBackend` is re-exported from pixel-core's public API with no caller outside tests",
+      "body": "`pub use terminal_backend::TerminalBackend;` (engine/crates/pixel-core/src/lib.rs:92) puts the trait on the crate's public surface. Nothing imports it.\n\n`rg -n \"TerminalBackend\"` across the repo (excluding `.reference/`) returns exactly: this export; `engine/crates/pixel-core/src/terminal_windows.rs:1675, 2912, 2916, 2919, 2920`, all inside the `#[cfg(test)] mod tests` that opens at line 1660; and `tools/vendor-check/unchanged.test.mjs:58` and `inventory.test.mjs:414, 422`, which assert on the *source text* rather than using the trait. `pixel-node` and `pixel-react` — the only consumers of `pixel-core` — never mention it. The trait's own module doc concedes the shape: \"The engine keeps calling the concrete `crate::terminal::Terminal`\" (terminal_backend.rs:10-15).\n\nThe trait itself earns its place: the single `impl TerminalBackend for Terminal` is a compile-time signature check across the two backends, and the fake in its test module exercises the contract. The `pub use` is what has nothing behind it, and it is not free — it is one of the three written reasons `lib.rs` diverges from the vendored baseline (`tools/vendor-check/unchanged.test.mjs:56-58`), so it buys a permanent line of vendor divergence for a symbol no caller imports.",
+      "fix": "Drop the `pub use` and keep `mod terminal_backend;` crate-private; the compile-time drift check and the test fake both still work. Update the `lib.rs` reason in `unchanged.test.mjs` accordingly.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "architecture"
+      ],
+      "verdict": "immaterial"
+    },
+    {
+      "id": "arch+quality-4",
+      "file": "tools/vendor-check/clippy-scope.py",
+      "line": 61,
+      "end_line": 82,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "`blame()` is duplicated verbatim between the two scope scripts, including its 14-line rationale",
+      "body": "`clippy-scope.py:61-82` and `fmt-scope.py:82-103` are the same 22 lines — identical body, identical docstring, down to the punctuation — and both files also carry their own copies of `REPO` and `BASELINE = \"45b5e43\"`. Both are new in this change, sit in the same directory, and are invoked one after the other by README.md:139-140.\n\nWhat is duplicated is not boilerplate: it is the whole safety argument of both scripts. The docstring explains why the blame runs against the working tree rather than `HEAD` — \"the mis-attribution is one-sided and therefore worse than noise ... is counted as vendored, is never printed, and the check exits green.\" A fix or a refinement applied to one copy leaves the other silently running the old, unsafe attribution, and since both scripts report zero on a clean tree, the divergence is invisible until a port-authored complaint is misfiled as vendored.\n\nThe shared form is named and obvious — the baseline commit, and \"which commit wrote this line as the file stands now\" — and lifting it costs one module in the same directory that both already-adjacent scripts import.",
+      "fix": "Move `BASELINE`, `REPO` and `blame()` into a `tools/vendor-check/scope_blame.py` and import it from both scripts.",
+      "sources": [
+        "arch+quality"
+      ],
+      "lenses": [
+        "quality"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "2026-08-24T12:22:57.6781633+03:00",
+    "finished_at": "2026-08-24T12:44:19.744167+03:00",
+    "duration_ms": 1282066,
+    "tokens": 28021160,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 885586
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 200236,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 196240,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}

@@ -23,3 +23,21 @@ out/
 
 *.log
 .revmux/tasks/*/*/stages/
+
+# vendored upstream build state
+engine/packages/pixel-react/native/
+*.snap.new
+*.pending-snap
+*.profraw
+*.profdata
+.env
+.env.*
+
+# Task 10's bring-up harness writes its measurements beside itself. The two
+# `measured-*.tsv` the frame-budget doc's table is built from are committed; a
+# re-measurement's output, the frames it produced, and agwinterm's own perf log
+# are not — the last two are megabytes per run.
+tools/milestone/frame-budget*.tsv
+tools/milestone/*.log
+tools/milestone/frame-*.png
+tools/milestone/shot-*.png

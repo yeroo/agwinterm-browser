@@ -42,6 +42,11 @@ command -v revmux >/dev/null 2>&1 || { echo "ralphex-revmux: revmux not on PATH"
 # RALPHEX_REVMUX_PROFILE.
 PROFILE="${RALPHEX_REVMUX_PROFILE:-comprehensive}"
 MIN_CONFIDENCE="${RALPHEX_REVMUX_MIN_CONFIDENCE:-60}"
+# revmux's default hard timeout is 20m per agent attempt, which a wide diff
+# exceeds — this repo's own manual round was given 40m for exactly that reason.
+# An agent killed mid-read reports nothing, so a review that silently covered
+# less looks identical to a clean one.
+HARD_TIMEOUT="${RALPHEX_REVMUX_HARD_TIMEOUT:-40m}"
 
 # One revmux task per plan, one run per review iteration. Keeping the task stable
 # across iterations is the point: revmux carries earlier rounds into every later
@@ -55,7 +60,16 @@ PATHS_JSON="$(revmux new --task "$TASK" --run "$RUN" 2>/dev/null)" || {
   echo "ralphex-revmux: revmux new failed" >&2; exit 0; }
 
 # Take the scope path out of revmux's payload rather than joining it by hand.
-SCOPE="$(printf '%s' "$PATHS_JSON" | sed -n 's/.*"scope"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -1 | sed 's/\\\\/\//g')"
+pluck() {
+  printf '%s' "$PATHS_JSON" \
+    | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\(.*\)\".*/\1/p" \
+    | head -1 | sed 's/\\\\/\//g'
+}
+SCOPE="$(pluck scope)"
+# revmux allocates a profile file beside the scope. Left unwritten, every
+# reviewer runs with this project's conventions empty, and the panel spends
+# every round re-reporting the same non-findings.
+PROFILE_MD="$(pluck profile)"
 [ -z "$SCOPE" ] && { echo "ralphex-revmux: could not read scope path from revmux new" >&2; exit 0; }
 
 {
@@ -74,6 +88,52 @@ SCOPE="$(printf '%s' "$PATHS_JSON" | sed -n 's/.*"scope"[[:space:]]*:[[:space:]]
   cat "$PROMPT_FILE"
 } > "$SCOPE" 2>/dev/null || { echo "ralphex-revmux: could not write scope" >&2; exit 0; }
 
+# The conventions every reviewer is held to, in revmux's own profile slot. Kept
+# apart from the scope because it describes the REPOSITORY rather than this
+# diff: what the harness can and cannot do, and what counts as a finding here.
+if [ -n "$PROFILE_MD" ]; then
+  cat > "$PROFILE_MD" <<'CONVENTIONS' || \
+    echo "ralphex-revmux: could not write profile (continuing)" >&2
+# Project conventions
+
+winterm-browser is a Windows-native port, and its conventions are inherited
+from upstream terminal-browser, which is vendored here. Where they disagree
+with general taste, they win.
+
+## Build and test
+
+```bash
+cargo nextest run --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Warnings are errors. `pixel-core` denies undocumented unsafe blocks and warns
+on `unsafe_code` crate-wide; a port that adds unsafe must document it.
+
+For the Node-side tools, invoke `node.exe` directly rather than `node`: the
+shell aliases it to `winpty node.exe`, which fails non-interactively with
+"stdout is not a tty" and exits non-zero even when every test passes.
+
+## What is worth reporting
+
+- Real defects: wrong behaviour, dropped data, panics, silent fallbacks that
+  hide a caller's mistake.
+- Anything crossing the C# boundary or touching shared memory by hand —
+  lifetime and ownership errors there are the severest class in this repo.
+- A change that works but does not match the plan it was built from, and a plan
+  or doc left describing a world the code no longer has.
+- Missing tests for a code path the change introduced.
+
+## What is not
+
+- Style preferences, naming, comment density. Upstream's conventions are
+  settled and matching them beats improving them.
+- Anything the plan file lists as out of scope or deferred, or argues against
+  as a recorded decision.
+CONVENTIONS
+fi
+
 echo "ralphex-revmux: running revmux (profile=$PROFILE, task=$TASK, run=$RUN)" >&2
 
 # Verify the wiring without paying for a panel: RALPHEX_REVMUX_DRY_RUN=1 stops here,
@@ -91,6 +151,7 @@ fi
 revmux --task "$TASK" --run "$RUN" \
        --profile "$PROFILE" \
        --min-confidence "$MIN_CONFIDENCE" \
+       --hard-timeout "$HARD_TIMEOUT" \
        --markdown --no-tui \
        --workdir "$REPO_ROOT" 2>&1 || true
 

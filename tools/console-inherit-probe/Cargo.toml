@@ -1,0 +1,30 @@
+[package]
+name = "console-inherit-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "console-inherit-probe"
+description = "Measures whether a GUI-subsystem grandchild inherits the pane's ConPTY, which is what the foreground process model rests on."
+
+[[bin]]
+name = "console-inherit-probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "gui-child"
+path = "src/bin/gui-child.rs"
+
+[dependencies]
+# Reused for the byte-format helpers only. The pseudoconsole machinery is not
+# shared: this probe needs a three-process topology and a creation-flag variable,
+# neither of which `conpty_probe::measure` exposes.
+conpty-probe = { path = "../conpty-probe" }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }

@@ -1,0 +1,206 @@
+# Upstream provenance
+
+What was vendored, from where, and every place this tree deliberately differs.
+Re-vendoring is expected to happen more than once; this file plus
+`tools/vendor-check/` is what makes it cheap.
+
+## Source
+
+| | |
+|---|---|
+| project | `terminal-browser` (the "terminal graphics engine" monorepo) |
+| local checkout | `.reference/terminal-browser/` — read-only, never committed |
+| vendored on | 2026-08-21 |
+| `packageManager` | `pnpm@10.13.1` |
+| `browser`, `cli` version | `0.1.0` |
+
+**There is no commit hash to record.** The reference checkout carries no VCS
+metadata — no `.git`, no `.hg` — so the upstream revision cannot be named, only
+the bytes. A content digest stands in for it:
+
+| tree | files | sha256 |
+|---|---|---|
+| whole checkout (excl. `node_modules`, `target`, `dist`) | 256 | `f6cc301011e1ee844be7a8b32e536a6949cbc63fadbead1fcc56323d75ca4b79` |
+| `engine/crates/pixel-core` | 49 | `07761059df991330b300e44074cc6b52ee056ec0abebf4e37df88a1082e8e300` |
+
+Reproduce with `python tools/vendor-check/digest.py .reference/terminal-browser`.
+
+⚠️ Recording a hash instead of a revision is weaker than the plan assumed: it can
+tell us *that* upstream moved, not *what* moved. If a real upstream remote becomes
+available, replace this section with the commit and keep the digests as a check.
+
+## What was copied
+
+`engine/` (`crates/`, `packages/`, `examples/`, `assets/`, `Cargo.toml`,
+`Cargo.lock`, `deny.toml`, `justfile`, `rust-toolchain.toml`), `browser/`, `cli/`,
+`store/`, `terminals/`, `assets/`, plus `LICENSE`, `package.json`,
+`pnpm-workspace.yaml` and `pnpm-lock.yaml`.
+
+`assets/` at the repo root is separate from `engine/assets/` and both are needed:
+`pixel-core` and `pixel-node` `include_bytes!` the engine copy at compile time,
+while `browser/src/session/session.tsx:89` resolves the root copy at runtime.
+
+The Rust workspace root stays at `engine/`, as upstream has it. `cargo` commands
+in this plan run from `engine/`, not the repo root.
+
+## What was deliberately not copied
+
+| omitted | why |
+|---|---|
+| `scripts/` (incl. `install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh`) | POSIX shell installers; `fetch-electron.sh` fetches the patched Electron fork the Constraints forbid |
+| `herdr-plugin/`, `release-worker/`, `skill/` | outside the port's scope; not referenced by the five vendored packages |
+| `engine/target/`, `engine/examples/agent/dist/` | build output |
+| `AGENTS.md`, `CLAUDE.md`, `README.md`, `.github/`, `.vscode/` | this repo has its own |
+
+## Intentional divergences from upstream
+
+Edits to vendored files that are *not* the port's own subject matter. The three
+unix-bound modules (`terminal.rs`, `ghostty.rs`, `herdr.rs`) and `pixel-core`'s
+`lib.rs` are excluded — replacing those is what the port *is*, and the plan tracks
+them task by task. What is listed here is everything else, so the claim "the other
+43 files are untouched" stays checkable.
+
+Each is asserted by a test in `tools/vendor-check/`, so a re-vendor that drops one
+fails loudly rather than at the Task 10 milestone.
+
+1. **`browser/package.json` — `postinstall` replaced.** Upstream runs
+   `bash ../scripts/fetch-electron.sh`. That is forbidden twice over: it needs a
+   POSIX shell, and it fetches the patched Electron fork. Replaced with
+   `node node_modules/electron/install.js`.
+
+   Not simply *removed*, because removal alone yields an install that succeeds and
+   produces no Electron binary anywhere. Electron 43.3.0 has **no `postinstall` of
+   its own** — it dropped one and now downloads lazily on first `require("electron")`.
+   Invoking its installer explicitly keeps the binary's arrival at install time,
+   where a failure is legible.
+
+2. **`pnpm-workspace.yaml` — `electron` added to `onlyBuiltDependencies`.** pnpm 10
+   blocks a dependency's build scripts unless listed. With Electron 43 this is
+   currently inert (there is no script to block), but it is the documented reason
+   upstream substituted the fork fetch, and it costs nothing to keep correct for a
+   version that reinstates one.
+
+3. **`package.json` — a root `test` script added**, running the vendor-check suite.
+   Upstream has no root test entry point.
+
+   Two things about that script are deliberate and would otherwise read as
+   oversights. It does **not** build first: a nested bare `pnpm` is not on `PATH`
+   unless `corepack enable` has been run, so `pnpm -r build && …` fails on a stock
+   machine. The three suites that import the built `pixel-store` instead call
+   `requireBuilt` (`tools/lib/built.mjs`), which refuses a missing *or stale*
+   `dist/` and names the build command — a stale one would otherwise pass green
+   against the previous source. And it does **not** include
+   `terminals/test/terminals.test.js`: that suite is upstream's, is vendored
+   byte-identical, and is **red at this baseline** — `herdr falls back when the
+   running herdr predates --right-click` expects a fallback `herdr.ts` does not
+   implement. Fixing it means editing vendored code for a host this port
+   permanently disables ([`07-as-built.md`](07-as-built.md) §2) and cannot test
+   against, so it is left to upstream. The one line of `pixel-terminals` this port
+   *did* change — `callerTty`'s Windows early return — is covered in
+   `tools/vendor-check/inventory.test.mjs` instead.
+
+   The inherited `build:dist`, `install:dist`, `dist` and `release:*` scripts all
+   target `scripts/`, which was not copied (see below), and `browser` runs a `start`
+   script built around the POSIX `exec`. All six are inert here and are kept only to
+   keep the diff against upstream small.
+
+4. **`engine/crates/pixel-core/src/clipboard_image.rs` — POSIX path assumptions
+   widened, and UNC deliberately narrowed** (Task 4, plus a later review round). This
+   is the first edit to one of the 43 supposedly-portable files, and it was found by
+   running their tests rather than by reading them: the file uses no unix *API*, which
+   is what `inventory.test.mjs` screens for, but it assumed unix *paths* in four
+   places, and three of its five tests failed on Windows.
+
+   - `image_path_from_paste` gated on a leading `/` or `~`, so every drive-qualified
+     Windows path (`C:\…`, `C:/…`) was rejected as prose. Now `looks_absolute`.
+   - a `file://` URL kept the empty authority's slash — `file:///C:/pics/a.png` became
+     `/C:/pics/a.png`, which reads as absolute and then fails `is_file` silently, on
+     the one spelling every real producer writes. Now `file_url_path`, which unwraps
+     the empty-authority form and leaves a named authority alone.
+   - `~/` expanded through `HOME`, which Windows spells `USERPROFILE`. Now `home_dir`
+     — and through `strip_home`, which takes `~\` as well: `looks_absolute` admits a
+     leading `~` in either separator, so the spelling a Windows user types reached the
+     expansion and fell out of it as a relative literal, probed against the browser's
+     working directory and never found. The same widening `browser/src/url.ts` makes
+     for `~\` and `.\`, on the same reasoning and Windows-only for the same one.
+   - `unescape` treated every backslash as a quote character, turning
+     `C:\Users\me\a.png` into `C:Usersmea.png`. On Windows it now unescapes only an
+     escaped space or tab — the case the function exists for — and leaves every other
+     backslash standing as a separator.
+
+   All four are `cfg!(windows)` branches, so unix behaviour is byte-for-byte what it
+   was. Upstream would probably take that much; it is a portability fix, not a
+   divergence in intent.
+
+   ⚠️ **The fifth change is a divergence in intent, and it goes the other way.**
+   `looks_absolute` now **refuses** UNC — `\\host\share\a.png`, `//host/share/…`,
+   `\\?\UNC\…` and `file://host/share/…` are all declined before `is_file` is asked.
+   On Windows that probe is not a filesystem question: it is an outbound SMB or WebDAV
+   connection with implicit authentication, made synchronously on the thread that runs
+   `handle_event`. A page that puts `\\attacker.example\s\a.png` on the clipboard would
+   get a credential handshake out of this machine on the next Ctrl+V, and a host that
+   does not route would freeze the UI for the whole connect timeout. The extended-length
+   spelling of a *local* path (`\\?\C:\pics\a.png`) is still admitted, because there is
+   no host in it. Pinned by `a_unc_share_is_never_probed` and
+   `an_extended_length_local_path_is_still_local`, both of which assert on the gate
+   rather than on the result — `is_file` on an unreachable share is `false` too, so an
+   outcome check would pass with the guard removed. Upstream would not take this one
+   unchanged: it costs a paste that used to work on a trusted share.
+
+   A later review round found the refusal had **two doors left open**, and both are
+   now shut. `looks_absolute` runs on the text *as pasted*, where a leading `~`
+   satisfies it outright — and `Path::join` replaces its base rather than appending
+   when the joined component carries a root or a Windows prefix, so
+   `~/\\attacker.example\s\a.png` expanded to the share itself, home discarded, and
+   reached `is_file`. `under_home` re-decides the question after expansion and is
+   pinned by `a_tilde_does_not_smuggle_a_share_past_the_gate`. Separately,
+   `read_for_worker` opened every `CF_HDROP` entry through `from_file` with no gate
+   at all; it now applies `looks_absolute` to each. That door is narrower — a page
+   cannot put a file *list* on the clipboard the way it can put text — but the
+   promise this divergence makes is that no share is opened, not that no share is
+   opened from one code path.
+
+   ⚠️ **The lesson generalises: "no unix API" is not "portable".** Two other files
+   handle paths (`image_cache.rs`, `native.rs`) and their tests pass today, but the
+   screen that cleared all 43 cannot see this class of problem. Task 14's
+   unchanged-check should expect this list to grow.
+
+5. **`engine/crates/pixel-node/src/lib.rs` — `watch_resize` is on under Windows**
+   (Task 10). Upstream passes `watch_resize: false` unconditionally, which is right
+   for it: its engine lives in a daemon that is not the tty's foreground process
+   group, so `SIGWINCH` would not arrive anyway, and in the no-tty shape
+   `pixel-react` nudges the engine from `process.stdout.on("resize", …)` instead.
+
+   Neither route exists on Windows — there is no `SIGWINCH`, and Electron's stdout
+   is a pipe rather than a `tty.WriteStream`, so that event never fires. Without
+   this the pane resizes and the browser goes on drawing the old size; agwinterm
+   then places a canvas it has to clip, silently. It is one line —
+   `WATCH_RESIZE = cfg!(windows)` — and off Windows it is byte-for-byte upstream's
+   behaviour, but a re-vendor that drops it fails as a picture that stops being
+   right rather than as a build error, so it is listed here and pinned by a test.
+
+6. **`engine/crates/pixel-core/src/engine/mod.rs` — one added `#[test]`** (Task 11).
+   No production line changed, and the test asserts something about *upstream's*
+   code rather than the port's: that `NativeScroll::spawn(None)` yields nothing
+   unless `NATIVE_SCROLL_HELPER` names a helper.
+
+   It is here because that is what makes `reports_pixel_mouse() == false` a
+   documented ceiling instead of a bug. Both gates the flag feeds — `pointer.rs:61`
+   and `scroll.rs:192` — sit behind `self.native`, so on a platform with no scroll
+   helper the flag changes nothing that runs. If upstream ever spawns a helper
+   without the variable, that reasoning stops holding, and this is what says so.
+
+   The lightest possible touch to one of the 43, and still a touch: recorded so the
+   `git diff`-against-baseline check in `tools/vendor-check/unchanged.test.mjs` has
+   a written reason for every file it finds.
+
+## Re-vendoring checklist
+
+1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update this file.
+2. Copy per "What was copied"; do not copy per "What was deliberately not copied".
+3. Re-apply every divergence listed above.
+4. `pnpm install` and confirm `browser/node_modules/electron/dist/electron.exe`.
+5. `pnpm test` — the vendor-check suite fails if the `pixel-core` inventory drifted
+   or a new unix-bound module appeared.
+6. Re-run the disposition pass in `docs/design/01-baseline-errors.md` if the
+   inventory test reports additions.

@@ -1,0 +1,112 @@
+# Review: ralphex-20260822-post-port-corrections / 20260824-204956
+
+scope: `C:\Users\boris\source\winterm-browser\.revmux\tasks\ralphex-20260822-post-port-corrections\20260824-204956\input\scope.md`
+
+## Minor
+
+### The pipe allow-list compares a case-insensitive Windows name case-sensitively
+
+`cli/src/pane.ts:181`
+
+All three copies of the dev-instance guard compare the allow-list entry to the resolved pipe name with an exact-equality test: `entry === pipe` (cli/src/pane.ts:181), `entry === pipe` (cli/src/unsupported.ts:183) and `entry == pipe` (engine/crates/pixel-core/src/agwinterm.rs:335, in `allows_pipe`). Windows named-pipe identity is resolved case-insensitively by the object manager, and this repository already relies on that fact: `sameMark` (cli/src/pane.ts:552-554) lowercases both sides before comparing the marker's pipe, with the comment "The pipe compares case-insensitively because the object manager does: a pane whose `AGWINTERM_PIPE` is `Agwinterm-Dev` and an engine that recorded `agwinterm-dev` addressed the same instance." Two comparisons of the same identifier in one file, under two different rules.
+
+Concrete failure: a developer follows the documented dev workflow (README "Working on the browser", README.md:172-176, tools/milestone/run-milestone.cmd) but spells the app id `--app-id Agwinterm-Dev`, so agwinterm sets `AGWINTERM_PIPE=Agwinterm-Dev` in the pane, while their shell profile carries `TERMINAL_BROWSER_ALLOW_PIPE=agwinterm-dev`. These name the same instance. `allows_pipe` returns false, `pipe_refusal` (agwinterm.rs:292/309) refuses it, so `Terminal::new`'s `refuse_unlisted_instance` (terminal_windows.rs:1024/1029) fails the engine with PermissionDenied before it takes the console, and `windowsHostRefusal` (cli/src/unsupported.ts:82) refuses `terminal-browser open` outright with "AGWINTERM_PIPE names \"Agwinterm-Dev\", and TERMINAL_BROWSER_ALLOW_PIPE=\"agwinterm-dev\" does not list it" — a message that reads as though the developer named the wrong instance when they named the right one, and that names a value they believe is already on the list, differing only in case. The CLI half (`pipeRefusal`, pane.ts:221) refuses the launch the same way, in every build, so recovery is withheld too and a debug engine independently refuses the same valid target.
+
+The guard fails closed, so there is no bypass in the other direction: a case difference can only produce a spurious refusal, never let a dev build publish into production. That is what keeps this minor rather than major. Neither the Rust tests around agwinterm.rs:1700-1713 nor `HOST_CASES` in tools/cli/unsupported.test.mjs pins the comparison either way, so this is an unstated behaviour rather than a deliberate one.
+
+Fix: Compare the allow-list entry and the pipe with the same case-folding `sameMark` already uses, in all three copies, while retaining exact handling for `*`: `entry === "*" || entry.toLowerCase() === pipe.toLowerCase()` in pane.ts:181 and unsupported.ts:183, and `entry == "*" || entry.eq_ignore_ascii_case(pipe)` in `allows_pipe` (agwinterm.rs:335). Add a row to `HOST_CASES` in tools/cli/unsupported.test.mjs and a Rust case so the three readers stay pinned together on this axis.
+
+_confidence: 99 | sources: adversarial, bugs+impl, arch+quality | lenses: adversarial, bugs, impl, quality | verdict: confirmed_
+
+### New `expired` test asserts a phrasing the code never emits, with an assertion that cannot fail
+
+`engine/crates/pixel-core/src/agwinterm.rs:2071-2083`
+
+`the_bound_on_the_loop_is_asked_of_both_halves_of_an_exchange` iterates `for what in ["writing a request", "reading a reply"]` and asserts `said.contains(what)`. Two problems, both introduced by this change.
+
+First, the assertion is tautological. `expired` (agwinterm.rs:715-726) builds its message as `format!("agwinterm did not respond within {} ms while {what}", ...)` — it interpolates the caller's own string. So `err.to_string().contains(what)` holds for *any* value of `what`; the test supplies the string and then asserts the formatter echoed it. Verified by reading the format string: there is no input for which this arm can fail.
+
+Second, `"reading a reply"` is not a phrasing the production code produces. The only two `expired` call sites are `write_all` -> `expired(deadline, "writing a request")` (line 496) and `read_line` -> `expired(deadline, "waiting for a reply")` (line 546). A repo-wide grep for `"reading a reply"` returns only this test line. The comment above it (line 2068) claims "the guard itself is asserted: both phrasings" — but one of the two is invented and the real read-side phrasing is never passed through `expired` here.
+
+Failure case: change `read_line`'s `expired(deadline, "waiting for a reply")` to any other string — including an empty one — and this test still passes, because it never uses the call site's argument. The read-side wording is in fact pinned, but by two *other* tests that drive a real exchange (lines 1986 and 2018), so the practical damage is limited to a test that claims coverage it does not provide and a comment asserting a phrase pair that does not exist.
+
+Fix: Drive the guard through the call sites rather than through hand-supplied strings, or at minimum replace `"reading a reply"` with the literal `"waiting for a reply"` the code uses and drop the tautological `said.contains(what)` in favour of asserting the two fixed messages verbatim. Correct the "both phrasings" comment to match whichever the test ends up covering.
+
+_confidence: 92 | sources: docs+tests | lenses: tests, comments | verdict: confirmed_
+
+### Two comments claim a live publisher can never be swept; this change's own `remark` comment refutes both
+
+`engine/crates/pixel-core/src/frame_file.rs:98`
+
+`STALE_AFTER`'s doc comment (frame_file.rs:96-98) states: "A live publisher creates a file inside its directory every frame, which keeps the directory's own timestamp fresh, **so nothing in use is ever this old**."
+
+The same claim is repeated a second time, in `sweep_stale`'s own doc at frame_file.rs:358-359: "A directory in use gains a file every frame, so its timestamp is never [`STALE_AFTER`] old." Both sites must be corrected together; fixing only one leaves the contradiction in place.
+
+The comment this change added on `FrameDir::remark` (lines 318-328) says the opposite and calls it out explicitly: "a browser whose directory was reclaimed while it sat idle — **a real case**, since `sweep_stale` reads age, not liveness, and **an idle publisher writes no frames to keep its timestamp fresh**".
+
+`remark` is the correct one, and the code agrees. `sweep_stale` (line 367-386) selects purely on `metadata().modified()` age, with no liveness check. `write_frame` (lines 692-701) carries a `NotFound` retry that runs `create_dir_all` and `self.dir.remark()`, and its own comment (683-687) already concedes the directory "is swept by the OS, by cleaners, and by `sweep_stale` in another browser whose clock disagrees". Nothing but publishing touches the directory once `mark_pane` has run, so a browser sitting on a static page stops advancing its mtime, and the next browser's `sweep_stale(&root, STALE_AFTER)` at `FrameDir::create` (line 256) removes it once it passes the hour.
+
+Git blame confirms this is drift the change introduced rather than a pre-existing disagreement: both false statements date to the port commit `1fb2587`, while the contradicting `remark` comment landed in `5cd87d5`, inside this task. A rule stated in two places was silently broken in a third the same change touches.
+
+Executes nothing, so the cost is a reader who takes "nothing in use is ever this old" as an invariant and concludes the `write_frame` recreate path and `remark` are dead code — removing the very thing that keeps an idle browser's wreck attributable to `pane-clear`.
+
+Fix: Rewrite both `frame_file.rs:96-98` and `frame_file.rs:358-359` to say what `remark` says: the timestamp is refreshed only while frames are actually being published, so an idle publisher's directory can age past `STALE_AFTER` and be swept — which is why `write_frame` recreates it and `remark` puts the marker back. Cross-reference `FrameDir::remark` from `STALE_AFTER`.
+
+_confidence: 96 | sources: docs+tests | lenses: comments, docs | verdict: refined_
+
+### Guard-refusal test fixture's backslash collapses, contradicting the rule this same commit added
+
+`tools/cli/pane-clear.test.mjs:1185-1195`
+
+The new test "names the guard, not a repair, when it found a wreck it may not clear" builds its fixture as `owned: { dir: "T:\wreck", pid: 4242, frames: 2 }` (line 1185) and asserts `assert.match(report, /2 frame\(s\) left in T:\wreck/)` (line 1195).
+
+Neither is what it looks like, and I confirmed both by execution: `\w` is an unrecognised string escape, so the value is `"T:wreck"` — no separator at all — and in the regex `\w` is the word-character class, so the pattern is `T:` + any word char + `reck`, which happens to consume the `w`. The assertion passes by coincidence between two independent mistakes. Note the same object literal doubles its backslash correctly one line down (`searched: ["T:\\"]`, line 1188), so the fixture is inconsistent with itself.
+
+The consequence is narrower than the original finding stated. `paneClearReport` (cli/src/pane.ts:871) interpolates `outcome.owned.dir` verbatim into a template literal in this branch — there is no escaping or normalisation step that could mangle a backslash, so the "this test would not notice a mangled path" scenario has no code path behind it. What is real: the branch is never exercised with a directory of the shape it actually receives in production (`path.join(root, name)`, always backslash-separated), the regex is looser than it reads (it also matches `T:xreck`), and — the material part — the rule is contradicted inside the very commit that added it. `fba801d` repaired exactly this defect at tools/launcher/launch.test.mjs:253-257, replacing `"C:\work\site"` with `"C:\\work\\site"` and adding the standing assertion "the fixture must keep its separators to be worth asserting". A maintainer who reads that rule and then reads this fixture is misled about which convention holds.
+
+The fix is two escaped characters in one test file with no reach beyond its own line, so it is cheap relative to leaving a documented convention broken at its first application.
+
+Fix: Fix both sides together — correcting only the fixture makes the current regex fail. Use `const dir = "T:\\wreck";` in the fixture and `/2 frame\(s\) left in T:\\wreck/` in the pattern, and consider the `assert.ok(dir.includes("\\"), ...)` guard that launch.test.mjs:257 now uses.
+
+_confidence: 95 | sources: docs+tests | lenses: tests, comments | verdict: refined_
+
+## Pre-existing
+
+### Age-based sweeping deletes ownership evidence from live idle publishers
+
+`engine/crates/pixel-core/src/frame_file.rs:383`
+
+This is pre-existing in the original frame-file port — the age-based sweep and its liveness-blind rule were not introduced by the change under review; what this change adds is the recovery contract that makes the consequence actionable.
+
+Every new publisher deletes any frame directory whose directory mtime is at least one hour old without checking whether its publisher is alive. The code added in this change independently confirms that an idle live browser is a real case: it writes nothing to refresh the mtime and `write_frame` must recreate a directory removed by another browser's sweep. During the interval after that sweep and before the idle browser paints again, its currently displayed placement has no frame files or pane marker on disk. If that browser and its foreground CLI are then forcibly killed, `pane-clear` finds no ownership evidence and permanently declines to clear the stale picture. Re-marking on the next frame does not cover a browser killed before that next frame.
+
+Fix: Do not sweep a directory belonging to a live publisher; record a process-liveness token/lock, or keep a heartbeat whose absence—not frame inactivity—defines staleness.
+
+_confidence: 93 | sources: adversarial | lenses: adversarial_
+
+## Immaterial
+
+### `clearOwnedPaneFrame` advertises a `pane` option it unconditionally discards
+
+`cli/src/pane.ts:701-724`
+
+The signature is `options: OwnedFramesOptions & { timeoutMs?: number }`, so `pane` is part of the accepted shape and carries the longest doc comment in the file (pane.ts:483-513), including the rule that it is "Required for the broad question" and that `"any"` asks the machine-wide question deliberately.
+
+It is then thrown away. `scoped` spreads `options` at line 707, but both branches of the `allOwnedFrames` call overwrite the key: `{ ...scoped, pane: here }` when `"pid" in options`, `{ ...scoped, pane: here ?? "any" }` otherwise. There is no path on which a caller-supplied `pane` reaches `allOwnedFrames`.
+
+Concretely: `clearOwnedPaneFrame(env, { root, pane: { pipe: "agwinterm-dev", target: "s-1" } })` from a shell whose environment names pane `s-2` searches for `s-2`'s wreck, not the one the caller asked for, and returns an outcome describing `s-2`. It reports no error — the argument is simply not there. Every current caller (`main.ts:500` with `{ pid }`, `paneClearCommand` at pane.ts:805 with `{ root, timeoutMs }`, and the suite) passes only honoured keys, so nothing misbehaves today; what is wrong is the contract a later caller would read the doc and rely on.
+
+`root` and `env` in the same options object *are* honoured, which makes the one silent exception harder to spot, not easier.
+
+Fix: Give `clearOwnedPaneFrame` its own options type naming only what it honours — `Pick<OwnedFramesOptions, "root" | "env" | "pid"> & { timeoutMs?: number }` — so passing `pane` is a type error rather than a no-op. The pane is derived from `env` by design, and the signature should say so.
+
+_confidence: 80 | sources: arch+quality | lenses: quality, architecture | verdict: immaterial_
+
+## Sources
+
+| agent | executor | model | effort | tokens | raised | status |
+| --- | --- | --- | --- | --- | --- | --- |
+| bugs+impl | claude | claude-opus-5 (requested opus) | high | 4583869 | 2 | ok |
+| arch+quality | claude | claude-opus-5 (requested opus) | high | 4749885 | 3 | ok |
+| docs+tests | claude | claude-opus-5 (requested opus) | high | 6570926 | 3 | ok |
+| adversarial | codex | gpt-5.6-sol | high | 184097 | 3 | ok |

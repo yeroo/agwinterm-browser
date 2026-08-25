@@ -1,0 +1,140 @@
+# Review: ralphex-20260822-post-port-corrections / 20260824-172044
+
+scope: `C:\Users\boris\source\winterm-browser\.revmux\tasks\ralphex-20260822-post-port-corrections\20260824-172044\input\scope.md`
+
+## Minor
+
+### Module header still asserts the two claims this change corrected elsewhere
+
+`cli/src/pane.ts:15-17`
+
+Task 7 of the plan corrected `docs/design/06-acceptance.md` because §4 "asserted the opposite of what Task 6 measured". The corrected text now reads "The CLI is the pane's foreground job, so it outlives the browser **whenever the browser is what died**", followed by an explicit warning: "'Whenever the browser is what died' was written as 'by construction', and that was the gap" (docs/design/06-acceptance.md:126-132).
+
+The original wording is still standing verbatim in the header of the module the verb lives in, in a file this change rewrote around it:
+
+  cli/src/pane.ts:15-16 — "`openInForeground` is the pane's foreground job and it outlives the browser **by construction, whatever killed it**."
+
+Two more claims in the same block are now false for the same reason:
+
+  - line 17, "Sending `image.clear` twice is harmless (the second finds nothing placed)" — this change's entire ownership rule exists because sending it when you own nothing is *not* harmless; it takes down a placement another process owns (cli/src/pane.ts:388-410, main.ts:485-493).
+  - lines 352-353, "`openInForeground` is the only survivor of that, so it does both" — `paneClearCommand` is now the other survivor, and per Task 6 the case where `openInForeground` is *not* a survivor is the strongest argument for it existing.
+
+Executes nothing, so the cost is a reader who takes the header of the ownership module as the current rule and reasons from a premise the acceptance doc flags in bold as the gap.
+
+Fix: Bring lines 15-17 in line with 06-acceptance.md:126-132 — the CLI outlives the browser only when the browser is what died; a `taskkill /F` on the CLI takes the browser's job object with it and runs neither half. Drop or invert "sending image.clear twice is harmless", and update lines 352-353 to name `pane-clear` as the second survivor.
+
+_confidence: 95 | sources: bugs+impl | lenses: impl | verdict: confirmed_
+
+### New comment's stated reason for where `pane-clear` lives is not true of the dispatch path
+
+`cli/src/pane.ts:26-28`
+
+The comment added by this change says the no-workspace-imports constraint "is also why `pane-clear` — the recovery verb `main.ts` dispatches to — lives down here: it runs when the engine is gone, the registry is empty and **nothing else in the workspace can be relied on to load**."
+
+The verb is only reachable through `main.ts`, whose imports are all static and at module top level: `pixel-store`, `pixel-terminals`, `./action`, `./control`, `./editors`, `./instances`, `./launch`, `./ls`, `./registry`, `./sandbox`, `./ssh`, `./upgrade` (cli/src/main.ts:8-41). Every one of those is fully evaluated before `main()` runs, so before the `command === "pane-clear"` branch at main.ts:849 is ever reached. The verb therefore gets no protection at all from `pane.ts` importing only node builtins — if any of that graph failed to load, `pane-clear` would fail with it.
+
+The real property the constraint buys is the one the preceding sentence already states — the addressing rules are testable without a pane, a pipe or an Electron. The appended clause claims a runtime guarantee the dispatch path does not provide, which is the kind of claim a later reader could rely on when deciding what `main.ts` may safely import.
+
+Fix: Either cut the "nothing else in the workspace can be relied on to load" clause, or make it true by dispatching `pane-clear` before the workspace imports are evaluated — a dynamic `await import("./pane")` behind an early `process.argv` check, with the heavy imports moved behind the branches that need them.
+
+_confidence: 90 | sources: bugs+impl | lenses: impl | verdict: confirmed_
+
+### A successful clear retires only one matching ownership marker
+
+`cli/src/pane.ts:691`
+
+`ownedFrames` deliberately selects only the newest wreck, and after `image.clear` succeeds this block deletes only that directory. If the same pane has two crash-left frame directories, the older marker remains even though its placement was replaced before the clear. A later `pane-clear` treats that consumed marker as fresh ownership and sends another `image.clear`; if another producer has painted the pane meanwhile, its placement is removed. The same stale authorization remains when `rmSync` fails because that error is swallowed.
+
+Fix: After a confirmed clear, invalidate or remove every matching marker for that pane that cannot represent a newer placement, and report cleanup failures without leaving an actionable marker.
+
+_confidence: 88 | sources: adversarial | lenses: adversarial | verdict: confirmed_
+
+### `frameRoots`'s `env` parameter is dead, so root discovery reads `process.env` while addressing reads the caller's `env`
+
+`cli/src/pane.ts:544-563`
+
+`frameRoots(env: PaneEnv = process.env)` (pane.ts:544) is called from exactly one place, `searchedRoots` (pane.ts:562), which calls it as `frameRoots()` with no argument. Grep confirms there is no other caller. The parameter is generality for a case that does not exist.
+
+It also leaves the two halves of `clearOwnedPaneFrame` reading different environments. `paneClearCommand` takes `options.env` and threads it into `paneClearRequest`/`paneAddress`/`pipeRefusal`, but `searchedRoots(options)` -> `frameRoots()` resolves `TMP`/`TEMP` off `process.env` regardless. Concretely: `paneClearCommand({ env: { AGWINTERM_ENABLED: "1", AGWINTERM_SESSION_ID: "s1", TMP: "D:\\scratch" } })` addresses the pane from that object but searches `os.tmpdir()`/`process.env.TMP` instead of `D:\scratch`, so it reports "nothing of ours to clear" naming roots it was never asked about — and `paneClearReport` then prints `outcome.searched`, which is the wrong set. It does not bite the shipped CLI, where `env === process.env` on both call paths, and the acceptance suite dodges it by redirecting `TEMP`/`TMP` in the spawned child's real environment rather than through `options.env`.
+
+The module's own comment at pane.ts:541 argues that both roots must be searched "and the report names what it searched rather than a directory it assumed" — which is exactly the property the unthreaded parameter quietly weakens for any caller that supplies an `env`.
+
+Fix: Either drop the parameter (`function frameRoots(): string[]` reading `process.env` directly, matching the single call site), or thread it: give `searchedRoots`/`ownedFrames`/`OwnedFramesOptions` the `env` and have `clearOwnedPaneFrame` pass its own `env` down, so addressing and root discovery answer for the same environment.
+
+_confidence: 85 | sources: arch+quality | lenses: quality, architecture | verdict: confirmed_
+
+### §4's test counts contradict §6's coverage table in the same document, and the file on disk
+
+`docs/design/06-acceptance.md:148`
+
+`06-acceptance.md:148` says "Tests: four in `frame_file.rs` … and **55** in `tools/cli/pane-clear.test.mjs`". §6's coverage table at line 276 says `cli/pane-clear.test.mjs` **66**, and the file really has 66 `it()`s (`grep -c '^\s*it(' tools/cli/pane-clear.test.mjs` → 66). The line was updated by this change (from "thirteen" to "55") and then went stale as later rounds added eleven more, so the document now states two different counts for the same suite about a hundred and thirty lines apart. The "four in `frame_file.rs`" half is stale the same way: the parenthetical enumerates four tests, but the change also added `a_refused_clear_leaves_the_evidence_the_cli_recovers_from` (`frame_file.rs:1345`) and `an_ordinary_exit_still_takes_its_directory_with_it`, both about `clear`.
+
+Two further instances of the same drift, both introduced here:
+
+- `06-acceptance.md:284` — "`pane-clear.test.mjs` (13 → 64)" cannot be reconciled with the same paragraph's own chain, which has the second round moving it "(60 → 63)" (line 295) and the fourth "(64 → 66)" (line 310). The plan's endpoint is 60, not 64.
+- `docs/plans/20260822-post-port-corrections.md:373` states that §6's tables "carry today's numbers and the date they were counted: **439** Rust (`nextest`), 382+57 (`cargo test`), **344** node in 87 suites", and line 308 says "340 tests in 8.9s". §6 actually carries 447 / 390+57 / 355 in 8.4 s. The plan asserts the content of a document it no longer describes.
+
+Nothing executes against these numbers, so the cost is only that the reader cannot tell a stale count from a wrong one — which is precisely the failure mode the same section warns about at line 400 ("A count in a doc is a claim with a date on it").
+
+Fix: Set `06-acceptance.md:146-148` to the current counts (six in `frame_file.rs`, 66 in `tools/cli/pane-clear.test.mjs`), correct `13 → 64` at line 284 to `13 → 60` so the round-by-round chain adds up to the table's 66, and update the plan's Task 7 write-up at `docs/plans/20260822-post-port-corrections.md:373` (and its Task 6 table row at line 308) to the 447/390+57/355 the acceptance doc now records.
+
+_confidence: 95 | sources: docs+tests | lenses: docs | verdict: confirmed_
+
+### Cross-doc anchor to the new `TERMINAL_BROWSER_ALLOW_PIPE` heading is broken, and the anchor test's slugger is why it passed
+
+`docs/design/05-cli-and-endpoints.md:157`
+
+`05-cli-and-endpoints.md:157` links to `07-as-built.md#terminalbrowserallowpipe--a-dev-build-refuses-an-instance-it-was-not-named-at`. The heading it points at is `07-as-built.md:318`, `### \`TERMINAL_BROWSER_ALLOW_PIPE\` — a dev build refuses an instance it was not named at`. github-slugger strips backticks and the em dash but keeps underscores — `_` (0x5F) falls in the gap between its `\[-\^` (0x5B-0x5E) and `` ` `` (0x60) ranges, so it is matched by no range in the punctuation class — making the real anchor `#terminal_browser_allow_pipe--a-dev-build-refuses-an-instance-it-was-not-named-at`. On GitHub the link lands at the top of `07-as-built.md` rather than at the one section a reader following the CLI refusal table is being sent to for the debug-gating asymmetry.
+
+Nothing caught it because `tools/docs-check/docs.test.mjs:50` implements `slug()` as `.replace(/[^\p{L}\p{N} -]/gu, "")`, which deletes `_` along with the backticks (`\p{L}` does not include `_`). `test("every anchor in the documentation names a heading that exists")` (line 85) compares the link's literal anchor against `slug()` of the heading, so it computes `terminalbrowserallowpipe…` for both and certifies the broken link as fine.
+
+Correction to the original finding: `slug()` is not pre-existing with respect to this review. `git ls-tree main` shows main carries none of these files — the whole port branch is the change under review — and `git log -S main..HEAD` puts the helper at commit 8dbfbd6, inside the diff. It predates the round that added the `07-as-built.md` heading, but both the link and the checker that excuses it are in scope here, so both are this change's to fix.
+
+`07-as-built.md:318` is confirmed as the first heading with an underscore that anything links to: the only other underscore heading in the docs, `04-cell-metrics.md:123`, has no inbound anchor, and a grep for underscore-bearing anchors across `docs/` and `README.md` returns nothing. That also bounds the fix — adding `_` to the kept class cannot break any other link, because no other link's anchor depends on an underscore being stripped.
+
+Fix: Change the link at `05-cli-and-endpoints.md:157` to `#terminal_browser_allow_pipe--a-dev-build-refuses-an-instance-it-was-not-named-at`, and add `_` to the character class `slug()` keeps in `tools/docs-check/docs.test.mjs:50` (`/[^\p{L}\p{N}_ -]/gu`) so the anchor test matches GitHub rather than a stricter rule of its own. No other documentation link resolves through a stripped underscore, so the second edit is safe as a pair with the first.
+
+_confidence: 97 | sources: docs+tests | lenses: docs, tests | verdict: refined_
+
+### Zero-placement replies still create ownership evidence
+
+`engine/crates/pixel-core/src/frame_file.rs:655`
+
+The code itself recognizes `frame:0/0` as an `ok:true` reply where agwinterm placed no image, but this success arm still writes the pane marker and pushes the frame into `written`. The pre-existing `written.push` already conflated protocol success with placement; this change makes that state actionable by `pane-clear`. After a forced exit, the marked directory authorizes a clear and a report claiming this browser left a picture even though the host explicitly placed zero; any placement added before recovery can consequently be cleared as though it were this browser's.
+
+Fix: Parse the frame counts before marking ownership; when `placed == 0`, remove the file and do not mark the directory or append to `written`.
+
+_confidence: 92 | sources: adversarial | lenses: adversarial | verdict: confirmed_
+
+### Expired exchanges start fresh one-millisecond reads
+
+`engine/crates/pixel-core/src/agwinterm.rs:712`
+
+After the shared deadline expires, `millis_until` returns 1 rather than stopping the exchange, while `read_line` starts another read whenever the previous read produced any bytes. A pipe peer that withholds the newline but drip-feeds data before each one-millisecond wait expires can therefore force up to 4 MiB worth of post-deadline reads. This requires a malformed or hostile peer, but it defeats the promised 1040 ms bound and can keep rendering and shutdown blocked far beyond it.
+
+Fix: Before starting each subsequent read or write, return `TimedOut` when `Instant::now() >= deadline`; reserve the nonzero wait only for collecting an operation started before expiry.
+
+_confidence: 90 | sources: adversarial | lenses: adversarial | verdict: confirmed_
+
+## Immaterial
+
+### `ALLOW_PIPE_VAR` is exported from two modules with no consumer anywhere in the repo
+
+`cli/src/unsupported.ts:155`
+
+`export const ALLOW_PIPE_VAR = "TERMINAL_BROWSER_ALLOW_PIPE"` is added at unsupported.ts:155 and at pane.ts:87. A repo-wide search for the identifier returns only: the two declarations, their in-file reads (unsupported.ts:177/188/189, pane.ts:209/215/216), and the Rust constant in agwinterm.rs:88 / terminal_windows.rs. No module imports it, and neither test suite imports it either — `tools/cli/unsupported.test.mjs:279` and `:303` verify the guard by regexing the *source text* of `agwinterm.rs` and then string-matching the literal `"TERMINAL_BROWSER_ALLOW_PIPE"` in the two `.ts` files, and `tools/docs-check/docs.test.mjs:412-425` does the same. So the exported surface is reachable by nothing; the drift tests would pass identically against a module-private `const`.
+
+Both modules are deliberately import-free and their public surface is the thing `main.ts` binds to, so an export with no binder is a wider surface than the module means to offer, in a file whose whole design point is that its rules are the only thing shared.
+
+Fix: Drop `export` from both declarations, leaving them module-private consts. Nothing that currently compiles or tests references them by import.
+
+_confidence: 85 | sources: arch+quality | lenses: architecture | verdict: immaterial_
+
+## Sources
+
+| agent | executor | model | effort | tokens | raised | status |
+| --- | --- | --- | --- | --- | --- | --- |
+| bugs+impl | claude | claude-opus-5 (requested opus) | high | 4370835 | 3 | ok |
+| arch+quality | claude | claude-opus-5 (requested opus) | high | 3833652 | 2 | ok |
+| docs+tests | claude | claude-opus-5 (requested opus) | high | 6377411 | 2 | ok |
+| adversarial | codex | gpt-5.6-sol | high | 210644 | 3 | ok |

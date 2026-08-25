@@ -1,0 +1,204 @@
+{
+  "scope": {
+    "task": "ralphex-20260822-post-port-corrections",
+    "run": "20260824-211036",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260822-post-port-corrections\\20260824-211036\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 1890482,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 1173034,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2265410,
+        "raised": 4,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 77346,
+        "raised": 2,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "arch+quality-1",
+      "file": "cli/src/pane.ts",
+      "line": 178,
+      "end_line": 180,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "The fold-equivalence comment covers the pipe name but not the list entry, which is unvalidated and does diverge",
+      "body": "The new doc comment on `pipeAllowed` justifies the case-fold with: \"Both readers restrict a pipe name to ASCII (`PIPE_NAME`, `valid_pipe_name`), so `toLowerCase` and Rust's `eq_ignore_ascii_case` agree on every input that gets this far.\"\n\nThe first clause is true of `pipe`, which is validated before the guard runs on all three paths (`pane.ts:223` and `unsupported.ts:170-171` gate on `PIPE_NAME`; `agwinterm.rs:202` gates on `valid_pipe_name` before `pipe_refusal`). But the fold has two operands, and only one of them is that pipe. The *list entries* come straight out of `TERMINAL_BROWSER_ALLOW_PIPE` and are never validated — `pane.ts:184-187`, `unsupported.ts:178-181` and `allows_pipe` (`agwinterm.rs:339-342`) only split, trim and drop empties.\n\nThe two copies genuinely disagree there. JS `toLowerCase` is a full Unicode fold; Rust `eq_ignore_ascii_case` is ASCII-only and requires equal byte length. With a pipe of `agwinterm-kiosk` and `TERMINAL_BROWSER_ALLOW_PIPE=AGWINTERM-KIOSK` where the K is U+212A KELVIN SIGN, one reviewer confirmed under node that `entry.toLowerCase() === pipe.toLowerCase()` is `true`, while the entry is 17 bytes against the pipe's 15, so `eq_ignore_ascii_case` cannot match. The CLI's two copies allow; the engine's copy refuses.\n\nBoth sources report the comment rather than the behaviour, and are plain that reaching the divergence needs a non-ASCII homoglyph typed into the allow-list. In a debug build the engine still refuses, so the guard fails closed and the developer just gets a confusing second refusal after the CLI let them through. What the comment gets wrong is the scope of its own guarantee, in a file whose stated contract is that the three copies match \"character for character\" — and it is exactly the sentence that would stop a later reader from noticing. The sibling comment at `agwinterm.rs:335-336` makes the same claim (\"[`valid_pipe_name`] restricts a name to ASCII, so `eq_ignore_ascii_case` is the whole of it — and is what the CLI's two copies spell `toLowerCase`\") and is wrong in the same way.",
+      "fix": "Scope the claim to the operand it is true of, e.g. \"the *pipe* is ASCII by `PIPE_NAME`/`valid_pipe_name`, so the two folds agree on it; a list entry is not validated, and a non-ASCII entry that Unicode-folds to ASCII would match here but not in `allows_pipe`.\" Apply the same qualification to `agwinterm.rs:335`.",
+      "sources": [
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "architecture",
+        "quality",
+        "comments",
+        "docs"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "bugs+impl-1",
+      "file": "docs/design/06-acceptance.md",
+      "line": 357,
+      "end_line": 357,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "New acceptance paragraph puts `sameMark` \"forty lines away\" from the guard; it is 379",
+      "body": "The seventh-round paragraph added to §6 says the allow-list \"matched its entry exactly while `sameMark`, forty lines away in the same module, folded the case of the same identifier and said why\".\n\nIn `cli/src/pane.ts`, `pipeAllowed` is declared at line 182 and `sameMark` at line 561 — 379 lines apart, at opposite ends of the module. \"Forty lines away\" is off by roughly an order of magnitude, and the number is doing the rhetorical work in the sentence: the point is that the contradiction was sitting in plain sight next to itself, which is a much weaker claim at 379 lines than at 40. The \"in the same module\" half is correct; only the distance is wrong.\n\nFailure case: a reader takes the paragraph at face value, opens `pane.ts` at `pipeAllowed` and looks forty lines in either direction, finds `pipeRefusal` and `paneAddress` rather than `sameMark`, and concludes the doc is describing a file that no longer exists. Human-facing design prose, so nothing executes differently. Introduced by this change — the whole paragraph is new.",
+      "fix": "Drop the number or replace it with something true — e.g. \"while `sameMark`, at the other end of the same module, folded the case of the same identifier\".",
+      "sources": [
+        "bugs+impl",
+        "docs+tests"
+      ],
+      "lenses": [
+        "impl",
+        "docs"
+      ],
+      "verdict": "confirmed"
+    },
+    {
+      "id": "bugs+impl-2",
+      "file": "tools/cli/pane-clear.test.mjs",
+      "line": 207,
+      "end_line": 208,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "Test comment claims the assertion below it pins `*`; the assertion contains no `*`",
+      "body": "The new `it(\"compares the pipe the way the object manager resolves it\")` ends with:\n\n```js\n// Folding a name is not folding the escape hatch: `*` stays a literal.\nassert.equal(pane.pipeAllowed(\"agwinterm-dev\", \"agwinterm-prod\"), false);\n```\n\nThe assertion passes a list of `\"agwinterm-dev\"` and a pipe of `\"agwinterm-prod\"`. No `*` appears on either side, so nothing about the escape hatch is exercised — what is actually asserted is that a differently-named instance is still refused after the fold, which is a different (and worthwhile) claim. Concretely: delete the `entry === \"*\"` arm from `pipeAllowed` (pane.ts:190) and this line still passes, despite its comment saying it is what guards that arm.\n\nThe Rust twin added by the same change gets this right — `agwinterm.rs:1714` says \"Folding a name is not folding anything else: a different name is still one\", which is what the assertion beneath it checks. The JS comment reads like that sentence mid-edit, with the wildcard clause left attached to the wrong assertion.\n\nFailure case: a maintainer reading line 207 believes the `*` escape hatch is pinned in this suite and does not add coverage for it. It is in fact covered, but at `pane-clear.test.mjs:192` (the `\"*\"` entry in the list loop) and in `unsupported.test.mjs:255-263` — so a change breaking the `entry === \"*\"` branch would fail a different test than the one this comment points at. No coverage is lost today; the defect is a mislabel, in a suite whose whole convention is that each comment says exactly what its assertion pins.",
+      "fix": "Replace line 207 with what line 208 checks, matching the Rust twin at agwinterm.rs:1714 — e.g. `// Folding a name is not folding anything else: a different name is still one.` — or keep the `*` claim and add `assert.equal(pane.pipeAllowed(\"*\", \"Agwinterm-Dev\"), true);` beneath it.",
+      "sources": [
+        "bugs+impl",
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "impl",
+        "quality",
+        "comments",
+        "tests"
+      ],
+      "verdict": "confirmed"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [
+    {
+      "id": "adversarial-2",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 393,
+      "end_line": 393,
+      "severity": "minor",
+      "confidence": 93,
+      "title": "Stale sweeping deletes live directories based only on frame activity",
+      "body": "The reporting source states this is pre-existing and that the current diff only corrects the comments describing it — the sweeping behaviour itself is untouched by the change under review.\n\nBrowser A can publish a frame, remain static for over an hour, and then have its directory removed when Browser B starts and calls `sweep_stale`. If A and its foreground CLI are forcibly terminated before A paints another frame, `pane-clear` finds no directory or pane marker and refuses to clear A's still-displayed placement. The recreate-and-remark mitigation only runs on A's next frame, so it does not cover this force-kill window. The trigger requires an idle browser, a second publisher, and termination before the next repaint, keeping the impact minor.",
+      "fix": "Track liveness with a separate renewable lease or heartbeat and sweep only directories whose lease has expired, rather than treating the last frame timestamp as liveness.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": ""
+    }
+  ],
+  "immaterial": [
+    {
+      "id": "adversarial-1",
+      "file": "cli/src/pane.ts",
+      "line": 190,
+      "end_line": 190,
+      "severity": "minor",
+      "confidence": 92,
+      "title": "Unicode folding makes the TypeScript guards accept allow-list entries the Rust guard rejects",
+      "body": "The two TypeScript copies use Unicode `toLowerCase()`, while Rust uses ASCII-only `eq_ignore_ascii_case`. Only the resolved pipe is validated as ASCII; allow-list entries are not.\n\nWith `AGWINTERM_PIPE=k` and `TERMINAL_BROWSER_ALLOW_PIPE=K` (U+212A KELVIN SIGN), TypeScript folds both values to `k`, so `windowsHostRefusal` permits the launch and `paneClearRequest` permits addressing the pane. The debug engine compares the same entry with `eq_ignore_ascii_case`, rejects it, and fails before drawing. This violates the stated three-reader contract.\n\nReported here as a behavioural defect in the guard rather than as a comment defect — note that the fold-equivalence comment finding on the same function covers the same divergence but proposes only a documentation fix. The trigger requires a malformed Unicode allow-list entry, so the impact is contained.",
+      "fix": "Validate every non-wildcard allow-list entry with the ASCII pipe-name pattern before folding it, or implement an explicitly ASCII-only fold in both TypeScript copies, so all three readers agree by construction.",
+      "sources": [
+        "adversarial"
+      ],
+      "lenses": [
+        "adversarial"
+      ],
+      "verdict": "immaterial"
+    }
+  ],
+  "stats": {
+    "started_at": "2026-08-24T21:10:36.545522+03:00",
+    "finished_at": "2026-08-24T21:19:28.4972522+03:00",
+    "duration_ms": 531951,
+    "tokens": 5817920,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 364187
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 62312,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 105448,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}
