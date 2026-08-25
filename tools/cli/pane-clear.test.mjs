@@ -474,7 +474,7 @@ describe("giving the console back, which is the other half of giving the pane ba
     const written = [];
     const calls = [];
     const restored = pane.restorePaneConsole(
-      { write: (chunk) => written.push(chunk) },
+      { write: (chunk) => written.push(chunk), isTTY: true },
       { isTTY: true, pause: () => calls.push("pause") },
       {
         cook: () => {
@@ -538,7 +538,7 @@ describe("giving the console back, which is the other half of giving the pane ba
     // the failure that hangs the CLI the same failure that skips the restore.
     const calls = [];
     const restored = pane.restorePaneConsole(
-      { write: () => {} },
+      { write: () => {}, isTTY: true },
       {
         isTTY: true,
         pause: () => calls.push("pause"),
@@ -564,10 +564,11 @@ describe("giving the console back, which is the other half of giving the pane ba
       calls.push(1);
       return true;
     };
-    const redirected = pane.restorePaneConsole({ write: () => {} }, { isTTY: false }, { cook });
+    const console_ = { write: () => {}, isTTY: true };
+    const redirected = pane.restorePaneConsole(console_, { isTTY: false }, { cook });
     assert.deepEqual(calls, []);
     assert.deepEqual(redirected, { escapes: true, modes: false });
-    assert.deepEqual(pane.restorePaneConsole({ write: () => {} }, {}, { cook }), {
+    assert.deepEqual(pane.restorePaneConsole(console_, {}, { cook }), {
       escapes: true,
       modes: false,
     });
@@ -580,7 +581,7 @@ describe("giving the console back, which is the other half of giving the pane ba
     // only the first is a restore. Claiming one anyway is the mis-report the two
     // flags exist to prevent.
     assert.deepEqual(
-      pane.restorePaneConsole({ write: () => {} }, { isTTY: true }, { cook: () => false }),
+      pane.restorePaneConsole({ write: () => {}, isTTY: true }, { isTTY: true }, { cook: () => false }),
       { escapes: true, modes: false },
     );
   });
@@ -596,9 +597,46 @@ describe("giving the console back, which is the other half of giving the pane ba
       modes: false,
     });
     assert.deepEqual(
-      pane.restorePaneConsole({ write: () => {} }, { isTTY: true }, { cook: thrower }),
+      pane.restorePaneConsole({ write: () => {}, isTTY: true }, { isTTY: true }, { cook: thrower }),
       { escapes: true, modes: false },
     );
+  });
+
+  it("does not call a redirected stdout a restored console", () => {
+    // The mirror of the stdin case above, and it cost the same mis-report. The engine
+    // turns the reporting modes *on* by writing to `CONOUT$` opened by name, so
+    // `terminal-browser open <url> > log.txt` still gets the alternate screen, the
+    // hidden cursor and any-motion mouse reporting applied to the pane -- while the
+    // compensating write here goes into `log.txt`. Node cannot follow the engine to
+    // the device (see `restorePaneConsole`), so the flag is set from the stream being
+    // a console rather than from the write returning: the run that could not repair
+    // the pane has to say so, or the report sends the user away from a pane that is
+    // still on the alternate screen with escape bytes on every mouse move.
+    const written = [];
+    const redirected = pane.restorePaneConsole(
+      { write: (chunk) => written.push(chunk) },
+      { isTTY: true },
+      { cook: () => true },
+    );
+    assert.deepEqual(redirected, { escapes: false, modes: true });
+    // The write still goes out: it is free, and a stream Node did not mark is not
+    // proof of a redirect. What it is not is evidence of a console.
+    assert.deepEqual(written, [pane.DISABLE_REPORTING]);
+    // `undefined` is what Node leaves on a pipe, so the test has to be `=== true`.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "pane.ts"), "utf8");
+    const body = between(source, "export function restorePaneConsole", "// -- whose placement is it");
+    assert.match(body, /out\.isTTY === true/, "a redirected stdout still counts as a console");
+  });
+
+  it("tells the user which redirect to drop when the escapes did not land", () => {
+    // Naming the fix is the whole point of the flag. "could not be written to" was
+    // the old wording and it describes only the EPIPE case -- a user whose stdout is
+    // a file wrote it just fine, and needs to hear about the redirect instead.
+    const outcome = { request: null, owned: null, cleared: false, searched: [] };
+    const report = pane.paneClearReport({}, outcome, { escapes: false, modes: true }).join("\n");
+    assert.match(report, /run this again with stdout on the pane/);
+    assert.match(report, /without a redirect/);
+    assert.ok(!/mouse reporting off/.test(report), report);
   });
 
   it("is run by the foreground wait, on the same path as the clear", () => {
@@ -698,7 +736,9 @@ function recorder() {
   return {
     written,
     calls,
-    out: { write: (chunk) => written.push(chunk) },
+    // `isTTY` marks it as the pane's console rather than a redirect: without it the
+    // escapes half reports as not having landed, which is its own test below.
+    out: { write: (chunk) => written.push(chunk), isTTY: true },
     input: {
       isTTY: true,
       pause: () => calls.push("pause"),
@@ -924,6 +964,47 @@ describe("whose placement it is", () => {
       pane.searchedRoots().some((seen) => samePath(seen, os.tmpdir())),
       "the process's own temp directory is not searched by default",
     );
+  });
+
+  it("follows GetTempPath2 into the profile when neither TMP nor TEMP is set", () => {
+    // The one point where the two fallback chains part company. `os.tmpdir()` ends at
+    // `%SystemRoot%\\temp`; `GetTempPath2` -- which is what the engine's
+    // `std::env::temp_dir()` calls -- ends at `%USERPROFILE%` first. With both
+    // variables unset the engine writes its frames under the profile, and a search
+    // that stopped at `os.tmpdir()` would report "nothing of ours to clear" at a
+    // painted pane -- and `openInForeground`'s exit-path clear, gated on the same
+    // answer, would decline too.
+    //
+    // Mutated and restored in the same tick rather than through `t.after`, because
+    // `frameRoots` reads `process.env` live and nothing else here may see it changed.
+    const saved = { TMP: process.env.TMP, TEMP: process.env.TEMP };
+    const profile = process.env.USERPROFILE?.trim();
+    let roots;
+    try {
+      delete process.env.TMP;
+      delete process.env.TEMP;
+      roots = pane.searchedRoots();
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    assert.deepEqual({ TMP: process.env.TMP, TEMP: process.env.TEMP }, saved);
+    if (!profile) return; // no profile to fall back to; nothing this test can claim
+    assert.ok(
+      roots.some((root) => samePath(root, path.resolve(profile))),
+      `the profile fallback is not searched: ${roots.join(" or ")}`,
+    );
+    // And it is not there on an ordinary machine, where both variables are set: an
+    // extra root is a whole home directory read on every run, and a name in the
+    // report the user never chose.
+    if (process.env.TMP?.trim() || process.env.TEMP?.trim()) {
+      assert.ok(
+        !pane.searchedRoots().some((root) => samePath(root, path.resolve(profile))),
+        "the profile is searched even though TMP or TEMP names a directory",
+      );
+    }
   });
 
   it("finds a wreck under the TMP the caller handed it, not the one node prefers", async (t) => {
@@ -1371,7 +1452,7 @@ describe("the pane-clear verb", () => {
       { request: null, owned: null, cleared: false, searched: pane.searchedRoots() },
       { escapes: false, modes: false },
     );
-    assert.match(report.join("\n"), /console: could not be written to/);
+    assert.match(report.join("\n"), /console: the escapes did not reach a console/);
     // And the command survives the stream that did it.
     assert.doesNotThrow(() => pane.restorePaneConsole({ write: thrower }, {}));
   });
@@ -1444,7 +1525,7 @@ describe("the pane-clear verb", () => {
         { escapes: false, modes: true },
       )
       .join("\n");
-    assert.match(half, /console: could not be written to/);
+    assert.match(half, /console: the escapes did not reach a console/);
     assert.match(half, /the input modes are back/);
     assert.ok(!/nothing was restored/.test(half), half);
   });

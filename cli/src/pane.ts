@@ -378,9 +378,17 @@ function readClearReply(line: string): ClearReply {
   return { cleared: false, refused: error || `the host said no: ${line.slice(0, 200)}` };
 }
 
-/** Just enough of `process.stdout` to write the escape string, so tests need no tty. */
+/**
+ * Just enough of `process.stdout` to write the escape string, so tests need no tty.
+ *
+ * `isTTY` is here for the same reason [`PaneInput`] carries it: it is what tells a
+ * console from a redirect, and the escape string only does anything on the first.
+ * Node sets it to `true` on a console stream and leaves it `undefined` otherwise, so
+ * the test is `=== true` and never `!== false`.
+ */
 export interface PaneOutput {
   write(chunk: string): unknown;
+  isTTY?: boolean;
 }
 
 /**
@@ -407,9 +415,13 @@ export interface PaneInput {
  * old single boolean, set from the write alone, made the report claim the console was
  * "out of raw mode" on precisely that run. Saying so is what tells the user to run it
  * again with stdin on the pane.
+ *
+ * A redirected *stdout* is the mirror of it, and cost the same mis-report: see
+ * [`restorePaneConsole`] for why the write going out is not the same fact as the
+ * console having received it.
  */
 export interface ConsoleRestore {
-  /** `DISABLE_REPORTING` reached the output stream. */
+  /** `DISABLE_REPORTING` reached a console, rather than merely a stream. */
   escapes: boolean;
   /** A process that could call `SetConsoleMode` ran, and exited cleanly. */
   modes: boolean;
@@ -508,6 +520,33 @@ function cookConsoleModes(): boolean {
  * `ENABLE_VIRTUAL_TERMINAL_INPUT` are console *modes*, which `SetConsoleMode`
  * changed and only `SetConsoleMode` restores — and Node has no binding for it that
  * survives this process's own exit. [`cookConsoleModes`] is where that goes, and why.
+ *
+ * ## The escapes go to `out`, and `out` is not always the console
+ *
+ * The engine does not have this problem: `terminal_windows.rs` opens `CONOUT$` **by
+ * name** and writes `ENABLE_REPORTING` there, so `terminal-browser open <url> >
+ * log.txt` still gets the alternate screen, the hidden cursor and any-motion mouse
+ * reporting applied to the *pane*. The compensating write here goes to this
+ * process's stdout, so on that same run it goes to `log.txt` — and the console keeps
+ * every mode the engine set.
+ *
+ * Following the engine and opening the device by name is not available from Node.
+ * `fs.openSync` puts every path through `path.resolve` before it reaches
+ * `CreateFileW`, and both spellings lose: `"CONOUT$"` resolves against the current
+ * directory to `\\?\C:\...\CONOUT$`, which the `\\?\` prefix strips of all
+ * DOS-device meaning — it creates a *file* called `CONOUT$` in the working directory
+ * — and `"\\\\.\\CONOUT$"` resolves to `\\.\CONOUT$\`, a trailing separator
+ * `CreateFileW` rejects. Measured on Node 22 / Windows 11; a `Buffer` path takes the
+ * same road. So there is no console handle to be had here, and the honest thing is
+ * not to claim one.
+ *
+ * Which is what `escapes` reports. The write still goes out — it is exactly right
+ * when stdout *is* the pane, which is every ordinary run — but the flag is set from
+ * the stream being a console, not from the write returning, so a redirected run says
+ * the escapes did not land and names the re-run that would fix it. That is the same
+ * bargain the modes half already makes with `isTTY`, for the same reason: a report
+ * that says "restored" to someone still looking at the alternate screen is worse
+ * than no report at all.
  */
 export function restorePaneConsole(
   out: PaneOutput = process.stdout,
@@ -517,7 +556,7 @@ export function restorePaneConsole(
   let escapes = false;
   try {
     out.write(DISABLE_REPORTING);
-    escapes = true;
+    escapes = out.isTTY === true;
   } catch {}
   let modes = false;
   try {
@@ -711,15 +750,27 @@ function sameMark(mark: PaneMark, pane: PaneMark): boolean {
  */
 function frameRoots(env: PaneEnv = process.env): string[] {
   // `os.tmpdir()` reads *this process's* environment, never the one handed in, and it
-  // is worth having only for that: it carries the profile-directory fallback neither
+  // is worth having only for that: it carries the `%SystemRoot%\temp` fallback neither
   // `TMP` nor `TEMP` spells out. So it is a root exactly when `env` is this process's
   // own. Adding it for a caller that named its own environment would put a directory
   // that caller never mentioned into `searched`, and let a wreck under it be adopted
   // and retired on that caller's behalf — which is the half of [`OwnedFramesOptions.env`]
   // that threading the variable through was for.
   const mine = env === process.env;
+  const named = [env.TMP, env.TEMP];
+  const candidates = mine ? [os.tmpdir(), ...named] : [...named];
+  // The one place the two fallback chains part company. `os.tmpdir()` is
+  // `TEMP ?? TMP ?? %SystemRoot%\temp`; `GetTempPath2` — which is what the engine's
+  // `std::env::temp_dir()` calls — is `TMP ?? TEMP ?? %USERPROFILE% ?? %windir%`. With
+  // both variables set, which is every ordinary Windows session, they agree and this
+  // adds nothing. With *neither* set they disagree by a whole directory: the engine
+  // writes its frames under the profile and the search above would look in
+  // `%SystemRoot%\temp`, find nothing, and report "nothing of ours to clear" at a
+  // painted pane — while `openInForeground`'s exit-path clear, which is gated on the
+  // same answer, quietly declined too.
+  if (mine && !named.some((value) => value?.trim())) candidates.push(env.USERPROFILE);
   const roots: string[] = [];
-  for (const value of mine ? [os.tmpdir(), env.TMP, env.TEMP] : [env.TMP, env.TEMP]) {
+  for (const value of candidates) {
     const root = value?.trim();
     if (!root) continue;
     const full = path.resolve(root);
@@ -1076,11 +1127,17 @@ export function paneClearReport(
   // were put back when there was no tty to ask is the one report that sends a user
   // away from a console that still does not echo.
   if (!consoleRestored.escapes) {
+    // Two ways to land here — a stdout that threw, and a stdout that is a file or a
+    // pipe rather than the pane — and one report, on [`restorePaneConsole`]'s
+    // reasoning: the escapes did not reach a console either way, and what the user
+    // needs is that fact and the re-run that fixes it, not which of the two it was.
+    const rerun =
+      "; run this again with stdout on the pane that was drawn on, without a redirect";
     lines.push(
       consoleRestored.modes
-        ? "  console: could not be written to — the input modes are back, but mouse " +
-          "reporting, the cursor and the alternate screen were left as they were"
-        : "  console: could not be written to — nothing was restored",
+        ? "  console: the escapes did not reach a console — the input modes are back, but " +
+          `mouse reporting, the cursor and the alternate screen were left as they were${rerun}`
+        : `  console: the escapes did not reach a console — nothing was restored${rerun}`,
     );
   } else if (consoleRestored.modes) {
     lines.push(

@@ -261,14 +261,18 @@ describe("a browser killed with Stop-Process -Force", () => {
       "the console half was skipped — mouse reporting would still be on",
     );
     assert.match(run.stdout, /frame:\s+cleared/, run.stdout);
-    assert.match(run.stdout, /console: mouse reporting off/, run.stdout);
-    // Anchored on the half that distinguishes the two reports, not on the prefix they
-    // share. `paneClear` spawns with stdin on `"ignore"`, so `isTTY` is false and no
-    // cooking child runs — which is the *modes-not-restored* branch, and asserting on
-    // "mouse reporting off" alone would pass just as well if the escapes had stopped
-    // going out too. That every acceptance run takes this branch is why the restored
-    // wording is pinned in `tools/cli/pane-clear.test.mjs` rather than here.
-    assert.match(run.stdout, /the input modes could not be put back from here/, run.stdout);
+    // Neither half of the console restore can *land* on a run observed this way, and
+    // the report has to say so rather than claim the repair. `paneClear` reads the
+    // child through pipes — it is the only way to assert on what it wrote — so its
+    // stdout is not a console and its stdin is not a tty: the escapes go into the
+    // pipe above rather than to the pane, and no cooking child runs. Both are the
+    // *not-restored* branches, and asserting the restored wording here would have
+    // pinned a claim that is false for every run this suite can make. What the
+    // restored wording says is pinned in `tools/cli/pane-clear.test.mjs`, where a
+    // console can be named without one being present.
+    assert.match(run.stdout, /console: the escapes did not reach a console/, run.stdout);
+    assert.match(run.stdout, /run this again with stdout on the pane/, run.stdout);
+    assert.ok(!/mouse reporting off/.test(run.stdout), run.stdout);
     assert.ok(!/out of raw mode/.test(run.stdout), run.stdout);
   });
 });

@@ -210,7 +210,7 @@ and leaving them would have made the table a claim about a tree that no longer e
 |---|---|
 | `cargo nextest run --workspace` | **460 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 403 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **372 passed**, 88 suites, 8.5 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **376 passed**, 88 suites, 9.1 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
@@ -274,7 +274,7 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 55 | | `cli/pane-clear.test.mjs` | 80 |
+| `terminal_windows.rs` | 55 | | `cli/pane-clear.test.mjs` | 84 |
 | `agwinterm.rs` | 50 | | `vendor-check/inventory.test.mjs` | 37 |
 | `frame_file.rs` | 41 | | `cli/endpoint.test.mjs` | 32 |
 | `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
@@ -283,8 +283,8 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 124 |
 
-Counted on 2026-08-25; the node column sums to the 372 above. The three biggest
-movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 80),
+Counted on 2026-08-25; the node column sums to the 376 above. The three biggest
+movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 84),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
 five of each are that round's: the frame roots the engine could have chosen, a pid the
@@ -429,6 +429,33 @@ zero-byte read that a stale `ERROR_OPERATION_ABORTED` would have turned into an 
 spin, the client handle's `SECURITY_IDENTIFICATION` — a control that fails *open*, so
 nothing but an assertion can see it — and the partially-written frame that is unlinked
 rather than left for the CLI's ownership rule to adopt.
+
+An eleventh round moved four, and they are the other end of the tenth's first kind: a
+repair that is made, reported, and does not reach the pane. The engine turns the
+reporting modes *on* by writing `ENABLE_REPORTING` to `CONOUT$` opened **by name** —
+`terminal_windows.rs` states that rule in its header and gives Task 1's reason for it —
+while `restorePaneConsole`'s compensating write went to `process.stdout`. On
+`terminal-browser open <url> > log.txt` those are not the same device: the alternate
+screen, the hidden cursor and any-motion mouse reporting land on the pane, and the
+escapes that undo them land in the file. Following the engine to the device is not
+available from Node — `fs.openSync` resolves every path before `CreateFileW` sees it, so
+`"CONOUT$"` becomes `\\?\C:\…\CONOUT$`, which the `\\?\` prefix strips of all DOS-device
+meaning and which *creates a file* of that name in the working directory, and
+`"\\.\CONOUT$"` becomes `\\.\CONOUT$\`, a trailing separator the call rejects. Measured
+on Node 22 / Windows 11, a `Buffer` path included. So the write stays where it is —
+correct on every run whose stdout *is* the pane, which is all of them but this one — and
+`escapes` is now set from the stream being a console rather than from the write
+returning. That is the same bargain the modes half already makes with `isTTY`, for the
+same reason: the report is the verb's whole value, and one that says "restored" to
+someone still looking at the alternate screen is worse than none.
+`pane-clear.test.mjs` (80 → 84) pins the redirected stdout, the wording that names which
+redirect to drop, and the `%USERPROFILE%` a fourth frame root now exists for —
+`GetTempPath2` falls back to the profile and `os.tmpdir()` falls back to
+`%SystemRoot%\temp`, so with neither `TMP` nor `TEMP` set the engine wrote its frames
+where the CLI would not look, and *both* halves of the ownership rule declined in
+silence. The acceptance suite reads its child through pipes, which is exactly the
+redirected case, so its console assertions now name the branch every run it can make
+actually takes.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

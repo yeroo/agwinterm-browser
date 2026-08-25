@@ -121,9 +121,9 @@ The console is the half that is easy to forget. A dead browser also leaves the a
 screen buffer on, the cursor hidden and mouse reporting live, so the shell comes back
 cursorless, echoless, and typing `\x1b[<…M` at the prompt on every pointer move.
 `restorePaneConsole` undoes that by **two** mechanisms rather than one — the escape
-sequences, written to stdout, and the console *input modes*, which only `SetConsoleMode`
-restores — because a recovery that sent only the escapes would hand back a shell that
-still does not echo.
+sequences, written to stdout when stdout is the pane, and the console *input modes*,
+which only `SetConsoleMode` restores — because a recovery that sent only the escapes
+would hand back a shell that still does not echo.
 
 The second mechanism is not the obvious one, and the obvious one does not work.
 `process.stdin.setRawMode(false)` reaches no syscall at all: `uv_tty_set_mode` returns
@@ -143,7 +143,20 @@ three ways to fail: a redirected stdin, which is not the console the child would
 inherit (so it is gated on `isTTY` rather than attempted blind); a platform with no
 `SetConsoleMode`; and a child that would not run or would not exit cleanly. All three
 are one report — the user needs to know echo was left as the browser set it and where to
-run this next, not which of the three it was. It runs before anything is printed, too:
+run this next, not which of the three it was.
+
+The escapes half has the mirror of the first of those, and it is the reason it is gated
+the same way. The engine does not write `ENABLE_REPORTING` to *its* stdout: it opens
+`CONOUT$` by name, for the reason `terminal_windows.rs` gives in its header, so
+`terminal-browser open <url> > log.txt` still puts the pane on the alternate screen while
+the undo goes into `log.txt`. Node cannot follow it to the device — `fs.openSync` resolves
+every path before `CreateFileW` sees it, so `"CONOUT$"` creates a file of that name in
+the working directory and `"\\.\CONOUT$"` picks up a trailing separator the call rejects
+(measured on Node 22 / Windows 11) — so the write stays on stdout, which is the right
+device on every run that is not redirected, and `escapes` is set from the stream being a
+console rather than from the write returning. A redirected run therefore says the escapes
+did not land and names the redirect to drop, rather than claiming a repair that went into
+a file. It runs before anything is printed, too:
 `DISABLE_REPORTING` ends with `?1049l`, so a report written first would land on the
 alternate screen and be thrown away with it, which is the one arrangement in which the
 verb genuinely looks like it did nothing.
