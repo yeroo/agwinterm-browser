@@ -210,7 +210,7 @@ and leaving them would have made the table a claim about a tree that no longer e
 |---|---|
 | `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **380 passed**, 88 suites, 9.2 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **389 passed**, 90 suites, 9.3 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -281,9 +281,9 @@ every one is:
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
-| | | | the rest | 126 |
+| | | | the rest | 135 |
 
-Counted on 2026-08-25; the node column sums to the 380 above. The three biggest
+Counted on 2026-08-25; the node column sums to the 389 above. The three biggest
 movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 84),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
@@ -523,6 +523,24 @@ rather than the validator. The same round finished the one entry on
 `browser/src/record/paths.ts`'s `/tmp/recordings`, which is drive-*relative* on Windows,
 so alt+r wrote frames to `C:\tmp\` and the toast that abbreviates a home-relative path
 had no `~` to find.
+
+A fourteenth round moved nine, all of them into a suite that did not exist —
+`tools/browser/url.test.mjs` — and all about the other end of a variable the port added.
+`CALLER_CWD_VAR` exists because a foreground browser is spawned with `cwd: browser/`, so
+`process.cwd()` inside it is not the directory the user ran the command in; without it a
+relative `open ./page.html` resolved against `browser/` and became a Google search. The
+variable was plumbed, spelled the same at both ends, and tested. What it *feeds* was not:
+`browser/src/url.ts`'s `localFile` matched `./` and `~/` — every spelling that exists on
+unix — so on Windows `.\page.html` and `~\pics\a.png`, the two spellings the platform
+prefers, matched nothing and fell through to the search the fix was written to prevent.
+Both separators are accepted now, and **only on Windows**: a backslash is an ordinary
+filename character on unix, where `.\page.html` names a file and re-reading it as
+`./page.html` would open the wrong one rather than fail to find any. The suite bundles
+the module twice with `process.platform` fixed at build time — the pattern
+`input/page-input.test.mjs` already uses for its darwin branches — so the widened half
+and the untouched half are both pinned from a Windows machine. This is the second entry
+in vendored `browser/` code the port has had to correct, after `record/paths.ts`, and it
+is the same shape: no unix API in sight, and a unix *path* assumption underneath.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

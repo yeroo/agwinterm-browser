@@ -510,6 +510,15 @@ deliverables rather than new scope:
   list nothing came back for. `/tmp/recordings` is drive-*relative* on Windows, so
   alt+r wrote frames to `C:\tmp\`, outside everything `appPaths()` owns; now
   `%LOCALAPPDATA%\<app>\recordings`, with unix left byte-for-byte.
+- `browser/src/url.ts` — the other end of `CALLER_CWD_VAR`, which the port added so a
+  foreground browser resolves `open ./page.html` against the caller's directory rather
+  than against `browser/`. `localFile` matched `./` and `~/` only, so the two spellings
+  Windows prefers — `.\page.html` and `~\pics\a.png` — matched nothing and became a
+  Google search: the port's own fix defeated for the platform it was written for. Both
+  separators are now accepted **on Windows only**, because on unix a backslash is an
+  ordinary filename character and `.\page.html` names a file. `tools/browser/url.test.mjs`
+  bundles the module twice with `process.platform` fixed, so both halves are pinned from
+  one machine.
 
 **Accepted, not planned:** `TerminalBackend`'s `pub use` in `pixel-core/src/lib.rs:92` has
 no caller outside tests, but `lib.rs` is already a written divergence for other reasons, so
