@@ -142,6 +142,19 @@ fails loudly rather than at the Task 10 milestone.
    outcome check would pass with the guard removed. Upstream would not take this one
    unchanged: it costs a paste that used to work on a trusted share.
 
+   A later review round found the refusal had **two doors left open**, and both are
+   now shut. `looks_absolute` runs on the text *as pasted*, where a leading `~`
+   satisfies it outright — and `Path::join` replaces its base rather than appending
+   when the joined component carries a root or a Windows prefix, so
+   `~/\\attacker.example\s\a.png` expanded to the share itself, home discarded, and
+   reached `is_file`. `under_home` re-decides the question after expansion and is
+   pinned by `a_tilde_does_not_smuggle_a_share_past_the_gate`. Separately,
+   `read_for_worker` opened every `CF_HDROP` entry through `from_file` with no gate
+   at all; it now applies `looks_absolute` to each. That door is narrower — a page
+   cannot put a file *list* on the clipboard the way it can put text — but the
+   promise this divergence makes is that no share is opened, not that no share is
+   opened from one code path.
+
    ⚠️ **The lesson generalises: "no unix API" is not "portable".** Two other files
    handle paths (`image_cache.rs`, `native.rs`) and their tests pass today, but the
    screen that cleared all 43 cannot see this class of problem. Task 14's

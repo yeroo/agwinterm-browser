@@ -208,16 +208,16 @@ and leaving them would have made the table a claim about a tree that no longer e
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **464 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 407 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **379 passed**, 88 suites, 9.2 s wall clock |
+| `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **380 passed**, 88 suites, 9.2 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
-| `cargo fmt --all --check` | 298 complaints, **0 on a line this port wrote** |
+| `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
 
 The two lint rows are the scoped scripts below rather than the bare commands, and that
 is not a softening: the bare commands cannot be green in this tree and never could —
-298 rustfmt complaints and 12 clippy warnings are the *vendored* tree's, and
+297 rustfmt complaints and 12 clippy warnings are the *vendored* tree's, and
 reformatting it is the silent edit the Constraints forbid. The two scripts under
 `tools/vendor-check/` run the real check and `git blame` every complaint.
 And a suite that cannot hang is now part of what "passed" means: `--test-timeout` plus
@@ -274,16 +274,16 @@ every one is:
 
 | module | `#[test]`s | | suite | `test()`s |
 |---|---|---|---|---|
-| `terminal_windows.rs` | 57 | | `cli/pane-clear.test.mjs` | 85 |
+| `terminal_windows.rs` | 59 | | `cli/pane-clear.test.mjs` | 85 |
 | `agwinterm.rs` | 50 | | `vendor-check/inventory.test.mjs` | 37 |
 | `frame_file.rs` | 43 | | `cli/endpoint.test.mjs` | 32 |
-| `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 30 |
+| `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 31 |
 | `terminal_backend.rs` | 9 | | `launcher/launch.test.mjs` | 28 |
 | `terminal_types.rs` | 5 | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | the rest | 126 |
 
-Counted on 2026-08-25; the node column sums to the 379 above. The three biggest
+Counted on 2026-08-25; the node column sums to the 380 above. The three biggest
 movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 84),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).
 The plan and the first review round after it took them to 60, 46 and 53, and the last
@@ -483,6 +483,46 @@ that file. The `Err` arm never recorded, and the paragraph beside the guard alre
 this section had let drift: `terminal_windows.rs` gained `Inbox::abandoned` and
 `ConsoleHandle::read_while` in an earlier round without the row moving, and
 `frame_file.rs` gained the marked wreck's week-long retention the same way.
+
+A thirteenth round moved four, and three of them are a guard that was applied to a
+narrower case than the promise it makes. The tenth round put UNC behind `looks_absolute`
+and this one found two ways round it. `looks_absolute` runs on the paste *as written*,
+where a leading `~` satisfies it outright — and `Path::join` replaces its base rather
+than appending when the joined component carries a root or a Windows prefix, so
+`~/\\attacker.example\s\a.png` resolved to the share with the home directory discarded
+and reached `is_file`: the outbound SMB connect with implicit credentials, on the thread
+that runs `handle_event`, from clipboard text a page can write. `clipboard_image.rs`
+(9 → 10) now decides the whole question in `admitted_path`, which is also the only place
+a test can see it — and the test resolves the path rather than asserting `is_none()`, for
+the reason the two beside it give. The same file's `CF_HDROP` route opened every entry
+with no gate at all; it is a narrower door, since a page cannot put a file *list* on the
+clipboard, but the divergence's promise is that no share is opened, not that no share is
+opened from one code path.
+
+`terminal_windows.rs` (57 → 59) gained the other kind: a sequence that can never
+terminate. `ESC ]` is how conhost spells Alt+`]` under `ENABLE_VIRTUAL_TERMINAL_INPUT`,
+both bytes in one `ReadFile`, and it opens an OSC the decoder will not decide until it
+sees `BEL`, `ESC \` or 16 KB. `lone_escape_deadline` arms only at one byte, so nothing
+was watching — and keystrokes and SGR mouse reports share that stream, so the pane went
+*deaf*. Upstream's tty backend arms on any leading `0x1b` and recovers, but it can:
+under a relaying wrapper a sequence arrives whole. Here the reader thread splits them,
+so the new deadline is narrowed to the five introducers that cannot self-terminate and
+given an order of magnitude more time — with a second test standing behind it for the
+bracketed paste whose body streams in over many reads and which a blanket deadline would
+have cut in half.
+
+The fourth is `cli/unsupported.test.mjs` (30 → 31), and it is the Task 13 rule read
+literally: *do not leave a command that appears to work but does not*. `takeSshFlags`
+gated on truthiness, so `--ssh=` — how `--ssh="$SSH_HOST"` spells an unset variable —
+read as *absent*, skipped `validateSshTarget`, and with it the only site that raises the
+Windows refusal. Off Windows it was worse than a missing message: `sshSetup` returned
+early and every request the user asked to be tunnelled went out from this machine
+instead, silently. The test runs the built CLI, because what it checks is the dispatch
+rather than the validator. The same round finished the one entry on
+[`01-baseline-errors.md`](01-baseline-errors.md)'s Task 13 list nothing came back for —
+`browser/src/record/paths.ts`'s `/tmp/recordings`, which is drive-*relative* on Windows,
+so alt+r wrote frames to `C:\tmp\` and the toast that abbreviates a home-relative path
+had no `~` to find.
 
 The stronger claim is the one Task 4 bought: the **203 inherited tests** in
 keep-unchanged modules run on Windows and stay green, which is what turns "keep

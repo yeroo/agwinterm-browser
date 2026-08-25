@@ -762,13 +762,20 @@ function takeSshFlags(args: string[]): void {
   if (at >= 0) {
     args[at] = `--ssh-bundle=${path.resolve(args[at].slice("--ssh-bundle=".length))}`;
   }
+  // Presence, not truthiness. `--ssh=` and `--ssh ""` are how an unset shell
+  // variable spells itself, and an empty target that reads as *absent* skips
+  // `validateSshTarget` — the only place `sshUnsupported` is raised. On Windows the
+  // documented refusal would never print; everywhere else `sshSetup` would return
+  // early and the request the user asked to be tunnelled would go out from this
+  // machine instead, with nothing said. `validateSshTarget("")` rejects on both
+  // platforms, so handing it the empty string is the whole fix.
   const target = args.find((arg) => arg.startsWith("--ssh="))?.slice("--ssh=".length);
-  if (at >= 0 && !target) fail("--ssh-bundle needs --ssh");
+  if (at >= 0 && target === undefined) fail("--ssh-bundle needs --ssh");
   if (args.some((arg) => arg.startsWith("--ssh-bundle-dir=")) && at < 0) {
     fail("--ssh-bundle-dir needs --ssh-bundle");
   }
   try {
-    if (target) validateSshTarget(target);
+    if (target !== undefined) validateSshTarget(target);
     if (at >= 0) validateBundleDir(args[at].slice("--ssh-bundle=".length));
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));

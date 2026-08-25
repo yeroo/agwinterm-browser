@@ -516,6 +516,19 @@ cost a second deadline on a pipe whose state is now unknown. It is also not latc
 `host_absent`, which answers a different question — "is there a pane to draw into" — and
 would turn one slow frame into a browser that never draws again.
 
+### One request per connection, on the per-browser endpoint
+
+`browser/src/registry.ts` answers `open-tab` and friends on a name any local process can
+dial — the pipe namespace is machine-global and the endpoint is computable from public
+inputs, which [`store/src/paths.ts`](../../store/src/paths.ts) records as an accepted
+gap. Its comment said one request per connection; nothing enforced it. `connection.end`
+half-closes rather than destroying, so a peer that sent two lines got a second `data`
+event, a second dispatch **with real side effects**, and an
+`ERR_STREAM_WRITE_AFTER_END` into a handler that swallows errors. It is a flag now, set
+on the first line, and a protocol property of this endpoint rather than an assumption
+about well-behaved callers — `tools/cli/registry.test.mjs` sends the second line as its
+own event, which is what the unfixed code needs to reach the second dispatch.
+
 ### The review that did not run, and when it did
 
 This project's README says every plan and every diff is reviewed by

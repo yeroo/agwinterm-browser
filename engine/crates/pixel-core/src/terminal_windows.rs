@@ -129,6 +129,19 @@ const COLOR_QUERY_IDLE: Duration = Duration::from_millis(60);
 /// would be an edit to the file this port promises to leave alone.
 const LONE_ESCAPE_WAIT: Duration = Duration::from_millis(50);
 
+/// How long an unterminated string sequence (`ESC ]`, `ESC P`, `ESC X`, `ESC ^`,
+/// `ESC _`) may sit at the head of `pending` before its `0x1b` is given up on and
+/// reported as the Escape key.
+///
+/// Twenty times [`LONE_ESCAPE_WAIT`], because the two waits answer opposite
+/// questions. A lone `0x1b` is *usually* Escape and the wait is a latency cost paid
+/// on every press. This one fires only after a sequence has already failed to
+/// complete, and the legitimate producers on this backend — the `OSC 4`/`10`/`11`
+/// colour replies, which are tens of bytes — finish in a single `ReadFile`. A
+/// second is far beyond a split reply, and short enough that a user who typed
+/// Alt+`]` sees their next keystroke rather than a dead pane.
+const STUCK_STRING_WAIT: Duration = Duration::from_millis(1000);
+
 /// The 18 slots `query_colors` asks about: foreground, background, and 16 palette
 /// entries.
 const COLOR_SLOTS: usize = 18;
@@ -1058,6 +1071,9 @@ pub struct Terminal {
     /// `None` when the tail does not start with one. See
     /// [`Terminal::lone_escape_deadline`].
     lone_escape_since: Option<Instant>,
+    /// When an unterminated string sequence first appeared at the head of
+    /// [`Terminal::pending`]. See [`Terminal::stuck_string_deadline`].
+    stuck_string_since: Option<Instant>,
     waker: Option<Waker>,
 }
 
@@ -1184,6 +1200,7 @@ impl Terminal {
             color_query: None,
             clipboard_reply: None,
             lone_escape_since: None,
+            stuck_string_since: None,
             waker: None,
         })
     }
@@ -1223,6 +1240,7 @@ impl Terminal {
             color_query: None,
             clipboard_reply: None,
             lone_escape_since: None,
+            stuck_string_since: None,
             waker: None,
         }
     }
@@ -1341,6 +1359,7 @@ impl Terminal {
                 // held arrow key looks like when the reader thread splits the
                 // sequence.
                 self.lone_escape_since = None;
+                self.stuck_string_since = None;
                 match self.lift(raw) {
                     Some(event) => return Ok(Some(event)),
                     None => continue,
@@ -1350,12 +1369,19 @@ impl Terminal {
                 return Ok(Some(Event::WindowSize(size)));
             }
             let escape_deadline = self.lone_escape_deadline();
+            let stuck_deadline = self.stuck_string_deadline();
             let color_deadline = self.color_query.as_ref().map(ColorQuery::deadline);
             let resize_deadline = self.watching_resize.then(|| Instant::now() + RESIZE_POLL);
-            let until = [deadline, escape_deadline, color_deadline, resize_deadline]
-                .into_iter()
-                .flatten()
-                .min();
+            let until = [
+                deadline,
+                escape_deadline,
+                stuck_deadline,
+                color_deadline,
+                resize_deadline,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let wait = until.map(|until| until.saturating_duration_since(Instant::now()));
             match self.inbox.take(&mut self.pending, wait)? {
                 Taken::Bytes => continue,
@@ -1365,6 +1391,14 @@ impl Terminal {
                     if escape_deadline.is_some_and(|at| Instant::now() >= at) {
                         self.pending.drain(..1);
                         self.lone_escape_since = None;
+                        return Ok(Some(Event::Key(KeyEvent::plain(Key::Escape))));
+                    }
+                    if stuck_deadline.is_some_and(|at| Instant::now() >= at) {
+                        // Drop only the `0x1b`. What follows is real input — the
+                        // `]` of Alt+`]`, and every byte typed since — so it is left
+                        // for the next pass to parse rather than discarded with it.
+                        self.pending.drain(..1);
+                        self.stuck_string_since = None;
                         return Ok(Some(Event::Key(KeyEvent::plain(Key::Escape))));
                     }
                     if color_deadline.is_some_and(|at| Instant::now() >= at) {
@@ -1419,6 +1453,40 @@ impl Terminal {
             return None;
         }
         Some(*self.lone_escape_since.get_or_insert_with(Instant::now) + LONE_ESCAPE_WAIT)
+    }
+
+    /// When an unterminated string sequence at the head of the tail should be given
+    /// up on, and its `0x1b` reported as the Escape key.
+    ///
+    /// `ESC ]`, `ESC P`, `ESC X`, `ESC ^` and `ESC _` open a string sequence, and
+    /// `parse_event_kitty` will not decide one until it sees `BEL` or `ESC \` — or
+    /// 16 KB, its only other way out. Under `ENABLE_VIRTUAL_TERMINAL_INPUT` those
+    /// exact two bytes are how conhost spells Alt+`]`, Alt+`P`, Alt+`X`, Alt+`^` and
+    /// Alt+`_`, and no terminator is ever coming. Both bytes arrive in one
+    /// `ReadFile`, so [`Terminal::lone_escape_deadline`] — which arms only at
+    /// `len() == 1` — never sees them, and the tail then swallows *everything*:
+    /// keystrokes and SGR mouse reports share this stream, so the pane goes deaf
+    /// until 16 KB has accumulated.
+    ///
+    /// Upstream (`terminal.rs`) arms its escape deadline for any `pending` beginning
+    /// with `0x1b`, which recovers this case, and it can: under a relaying wrapper
+    /// a sequence arrives whole or not at all. Here the reader thread splits them —
+    /// the comment beside the `drain` in [`Terminal::poll_event`] is about exactly
+    /// that — so a blanket 50 ms deadline would cut a half-arrived arrow key, and a
+    /// bracketed paste (`ESC [ 200~ …`) streams its body in over many reads and
+    /// could not survive one at all. Hence the narrowing: only the five introducers
+    /// that cannot self-terminate, and a wait an order of magnitude longer.
+    ///
+    /// `ESC [` is deliberately not in the list. A CSI ends at the first byte in
+    /// `0x40..=0x7e`, so the next keystroke finishes it; it recovers on its own.
+    fn stuck_string_deadline(&mut self) -> Option<Instant> {
+        let opens_string = self.pending.first() == Some(&0x1b)
+            && matches!(self.pending.get(1), Some(b'_' | b']' | b'P' | b'X' | b'^'));
+        if !opens_string {
+            self.stuck_string_since = None;
+            return None;
+        }
+        Some(*self.stuck_string_since.get_or_insert_with(Instant::now) + STUCK_STRING_WAIT)
     }
 
     /// Turns one decoded [`RawEvent`] into the event the engine sees. `None` means
@@ -3152,6 +3220,77 @@ mod tests {
             term.poll_event(Some(Duration::from_millis(50)))
                 .expect("the completed sequence"),
             Some(Event::Key(KeyEvent::plain(Key::Up))),
+        );
+    }
+
+    #[test]
+    fn an_unterminated_string_sequence_does_not_deafen_the_pane() {
+        // Alt+`]` is `1b 5d`, both bytes in one `ReadFile`, and `ESC ]` opens an OSC
+        // that no terminator is ever going to close. `lone_escape_deadline` arms
+        // only at one byte, so nothing was watching: every later byte -- keystrokes
+        // and SGR mouse reports alike -- was swallowed into the never-ending string
+        // until 16 KB had piled up. `stuck_string_deadline` is what notices.
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        inbox.push(b"\x1b]");
+        // Typed while the pane was deaf; must survive the recovery.
+        inbox.push(b"a");
+        assert_eq!(
+            term.poll_event(Some(STUCK_STRING_WAIT * 2))
+                .expect("waiting out a stuck string sequence is not an error"),
+            Some(Event::Key(KeyEvent::plain(Key::Escape))),
+            "`ESC ]` was never given up on",
+        );
+        // Only the `0x1b` was dropped, so what follows is parsed, not lost.
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(200)))
+                .expect("the introducer as a key"),
+            Some(Event::Key(KeyEvent::plain(Key::Char(']')))),
+        );
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(200)))
+                .expect("the key typed into the deaf pane"),
+            Some(Event::Key(KeyEvent::plain(Key::Char('a')))),
+        );
+
+        // The other four introducers arm the same way -- asserted on the deadline
+        // rather than by waiting it out five more times, which would cost the suite
+        // five seconds to learn one `matches!` arm.
+        for introducer in [b'P', b'X', b'^', b'_'] {
+            term.pending = vec![0x1b, introducer];
+            term.stuck_string_since = None;
+            assert!(
+                term.stuck_string_deadline().is_some(),
+                "`ESC {}` is not watched",
+                introducer as char,
+            );
+        }
+        // And `ESC [` is not, because a CSI ends at its next byte on its own.
+        term.pending = vec![0x1b, b'['];
+        term.stuck_string_since = None;
+        assert!(term.stuck_string_deadline().is_none(), "a CSI was armed");
+    }
+
+    #[test]
+    fn a_bracketed_paste_still_streams_in_over_many_reads() {
+        // The narrowing that makes the deadline above safe. A paste body arrives in
+        // pieces and `pending` begins with `0x1b` the whole time, so arming on any
+        // escape -- which is what upstream's tty backend does -- would cut a large
+        // paste in half here. `ESC [` is not a string introducer and is not armed.
+        let inbox = Inbox::new();
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        inbox.push(b"\x1b[200~hello");
+        assert_eq!(
+            term.poll_event(Some(STUCK_STRING_WAIT + Duration::from_millis(200)))
+                .expect("an unfinished paste is not an error"),
+            None,
+            "the paste was flushed as Escape instead of waiting for its terminator",
+        );
+        inbox.push(b" there\x1b[201~");
+        assert_eq!(
+            term.poll_event(Some(Duration::from_millis(200)))
+                .expect("the completed paste"),
+            Some(Event::Paste("hello there".into())),
         );
     }
 

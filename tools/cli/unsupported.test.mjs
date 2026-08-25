@@ -10,6 +10,7 @@
 // the version lookup") are the ones that would otherwise regress silently.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,8 @@ import { after, describe, it } from "node:test";
 import { pathToFileURL, fileURLToPath } from "node:url";
 
 import esbuild from "esbuild";
+
+import { requireBuilt } from "../lib/built.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -76,6 +79,38 @@ describe("--ssh", () => {
     const parse = source.indexOf("parseSshWords", at);
     assert.ok(check > at, "validateSshTarget does not consult sshUnsupported");
     assert.ok(check < parse, "the target is parsed before the platform is checked");
+  });
+
+  // Run against the shipped CLI, because what is being checked is the *dispatch*
+  // — whether `takeSshFlags` reaches `validateSshTarget` at all — and every
+  // in-process spelling of that would be asserting on the source rather than on
+  // the behaviour. `open` refuses on the flag before it looks at a terminal, so
+  // nothing is dialled and no browser is spawned.
+  it("refuses an empty --ssh rather than reading it as absent", () => {
+    const cli = requireBuilt(REPO, "cli/dist/main.js", "cli/src", "corepack pnpm -r build");
+    requireBuilt(REPO, "store/dist/index.js", "store/src", "corepack pnpm -r build");
+    // `--ssh=` is how an unset shell variable spells itself (`--ssh="$SSH_HOST"`),
+    // and it survives `rejectUnknownFlags`. Read as absent it skipped
+    // `validateSshTarget` — the only site that raises `sshUnsupported` — so on
+    // Windows the refusal never printed, and off it `sshSetup` returned early and
+    // every request the user asked to be tunnelled went out from this machine.
+    // Both spellings: the joined form the shell leaves behind, and the separate
+    // one `takeFlag` handles.
+    for (const flags of [["--ssh="], ["--ssh", ""]]) {
+      const spelling = JSON.stringify(flags);
+      const run = spawnSync(process.execPath, [cli, "open", ...flags, "https://example.invalid"], {
+        env: { ...process.env, CODEX_SANDBOX: "" },
+        encoding: "utf8",
+        timeout: 30_000,
+      });
+      const said = `${run.stdout ?? ""}${run.stderr ?? ""}`;
+      assert.equal(run.status, 1, `an empty ${spelling} was accepted:\n${said}`);
+      assert.match(
+        said,
+        process.platform === "win32" ? /--ssh is not supported on Windows/ : /invalid --ssh/,
+        `${spelling} was not validated`,
+      );
+    }
   });
 });
 

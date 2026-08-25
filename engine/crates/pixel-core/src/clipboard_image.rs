@@ -55,7 +55,18 @@ pub(crate) enum WorkerPaste {
 pub(crate) fn read_for_worker() -> Option<WorkerPaste> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
     if let Ok(files) = clipboard.get().file_list()
-        && let Some(pasted) = files.iter().find_map(|f| from_file(f, PasteSource::Clipboard))
+        && let Some(pasted) = files.iter().find_map(|file| {
+            // The same gate `image_path_from_paste` applies, for the same reason:
+            // `from_file` opens the path, and a UNC entry on the clipboard makes
+            // that an outbound SMB connect with implicit authentication rather than
+            // a filesystem read. `CF_HDROP` is not reachable from a page the way
+            // clipboard *text* is, so this is the narrower door — but it is the same
+            // door, and the module's promise is that no share is ever opened.
+            if !looks_absolute(&file.to_string_lossy()) {
+                return None;
+            }
+            from_file(file, PasteSource::Clipboard)
+        })
     {
         return Some(WorkerPaste::File(pasted));
     }
@@ -85,17 +96,46 @@ pub fn image_path_from_paste(text: &str) -> Option<PastedImage> {
         Some(rest) => file_url_path(rest),
         None => unescape(unquoted),
     };
-    if !looks_absolute(&path) {
-        return None;
-    }
-    let path = match path.strip_prefix("~/") {
-        Some(rest) => Path::new(&home_dir()?).join(rest),
-        None => PathBuf::from(path),
-    };
+    let path = admitted_path(&path)?;
     if !path.is_file() {
         return None;
     }
     from_file(&path, PasteSource::File)
+}
+
+/// The local file a paste names, or `None` if it does not name one this module will
+/// open. Everything decided before `is_file`, in one place — which is also the only
+/// place a test can see the decision, since `is_file` on an unreachable share
+/// answers `false` exactly as a refusal does.
+fn admitted_path(path: &str) -> Option<PathBuf> {
+    if !looks_absolute(path) {
+        return None;
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => Some(Path::new(&home_dir()?).join(under_home(rest)?)),
+        None => Some(PathBuf::from(path)),
+    }
+}
+
+/// The remainder of a `~/…` paste, if it really is *under* the home directory.
+///
+/// [`looks_absolute`] runs on the text as pasted, and a leading `~` satisfies it
+/// outright — so the UNC refusal it exists for is decided before the `~` is
+/// expanded. It has to be re-decided afterwards, because `Path::join` does not
+/// append an absolute component, it *replaces* the base with it:
+/// `Path::new(home).join(r"\\attacker.example\s\a.png")` is
+/// `\\attacker.example\s\a.png`, home discarded. That is the outbound SMB connect
+/// the guard refuses in every other spelling, admitted by a two-character prefix.
+///
+/// So the remainder must be relative: no root, and no Windows prefix (`C:`, `\\?\`,
+/// `\\server\share`). `Path::has_root` alone would miss `C:a.png`, which carries a
+/// drive prefix without being rooted and which `join` also lets take over.
+fn under_home(rest: &str) -> Option<&str> {
+    let mut components = Path::new(rest).components();
+    match components.next() {
+        Some(std::path::Component::Prefix(_) | std::path::Component::RootDir) => None,
+        _ => Some(rest),
+    }
 }
 
 /// The local path inside a `file://` URL.
@@ -321,6 +361,45 @@ mod tests {
             "a file:// URL with a host was unwrapped into a local path",
         );
         assert!(image_path_from_paste("file://attacker.example/s/a.png").is_none());
+    }
+
+    /// The `~` spelling of the same attack, which the gate above cannot see.
+    ///
+    /// `looks_absolute` runs before expansion and admits any leading `~`, and
+    /// `Path::join` replaces its base rather than appending when the joined
+    /// component carries a root or a Windows prefix — so `~/` in front of a share
+    /// used to walk straight past the refusal and into `is_file`. Asserted through
+    /// `admitted_path`, for the reason the sibling test gives: the resolved path is
+    /// the only place the difference is visible, and `is_file` on an unreachable
+    /// share answers `false` exactly as a refusal does.
+    #[cfg(windows)]
+    #[test]
+    fn a_tilde_does_not_smuggle_a_share_past_the_gate() {
+        for rest in [
+            r"\\attacker.example\s\a.png",
+            "//attacker.example/s/a.png",
+            r"\\?\UNC\attacker.example\s\a.png",
+            r"C:\pics\a.png",
+            "C:a.png",
+            r"\pics\a.png",
+        ] {
+            let paste = format!("~/{rest}");
+            assert!(
+                looks_absolute(&paste),
+                "{paste} no longer reaches the expansion this test guards",
+            );
+            assert_eq!(admitted_path(&paste), None, "{paste} escaped the home");
+        }
+        // And an ordinary `~/` paste still resolves under the home directory.
+        let home = home_dir().expect("USERPROFILE");
+        assert_eq!(
+            admitted_path(r"~/pics\a.png"),
+            Some(Path::new(&home).join(r"pics\a.png")),
+        );
+        assert_eq!(
+            admitted_path("~/pics/a.png"),
+            Some(Path::new(&home).join("pics/a.png")),
+        );
     }
 
     /// The extended-length prefix on an ordinary local path. Refusing it would be

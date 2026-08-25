@@ -484,6 +484,32 @@ deliverables rather than new scope:
   browser drawing with no thread that could deliver a keystroke. And a mode-2048 resize
   baseline now stores zero pixels, because `window_size` reports zero always and a
   baseline that kept the reported extent could never compare equal to the poll.
+- `browser/src/registry.ts` — one request per connection is now *enforced*, not merely
+  commented. `connection.end` half-closes, so a peer that sent two lines got a second
+  `data` event, a second `open-tab` with real side effects, and an
+  `ERR_STREAM_WRITE_AFTER_END` into a handler that swallows it. This is a protocol
+  property of the per-browser endpoint, so `07-as-built.md` §4 carries it too.
+- `store/src/client.ts` — `PRAGMA busy_timeout` now runs *before* `journal_mode = WAL`.
+  Converting out of rollback journalling is the statement that needs the exclusive
+  lock, and two panes opening the store together is ordinary here — `migrate.ts` is
+  hardened for exactly that race — so the loser of a first-ever open got `SQLITE_BUSY`
+  with no wait at all and the pane died with "database is locked".
+- `engine/crates/pixel-core/src/clipboard_image.rs` — the UNC refusal
+  (`UPSTREAM.md` divergence 4) had two doors left open: `~/` in front of a share
+  expanded *past* the gate, because `Path::join` replaces its base rather than
+  appending, and the `CF_HDROP` file-list path applied no gate at all.
+- `engine/crates/pixel-core/src/terminal_windows.rs` — an unterminated string sequence
+  at the head of the tail (`ESC ]`, which is how conhost spells Alt+`]`) now expires
+  instead of swallowing every later byte. Keystrokes and mouse reports share that
+  stream, so the pane went deaf until 16 KB had accumulated.
+- `cli/src/main.ts` — `--ssh` is validated on *presence*, not truthiness. `--ssh=` (an
+  unset shell variable spelling itself) read as absent, which skipped
+  `validateSshTarget` — the only site that raises the Windows refusal — and left every
+  request the user asked to be tunnelled going out from this machine instead.
+- `browser/src/record/paths.ts` — the one entry on `01-baseline-errors.md`'s Task 13
+  list nothing came back for. `/tmp/recordings` is drive-*relative* on Windows, so
+  alt+r wrote frames to `C:\tmp\`, outside everything `appPaths()` owns; now
+  `%LOCALAPPDATA%\<app>\recordings`, with unix left byte-for-byte.
 
 **Accepted, not planned:** `TerminalBackend`'s `pub use` in `pixel-core/src/lib.rs:92` has
 no caller outside tests, but `lib.rs` is already a written divergence for other reasons, so
