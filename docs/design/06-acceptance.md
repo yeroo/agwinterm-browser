@@ -314,7 +314,9 @@ A fourth round moved three, and both are about a guard that was asked too late.
 `pane-clear.test.mjs` (64 → 66) gained the recycled pid: a directory named after the
 process the CLI just spawned, whose `PANE_FILE` marker names a *different* pane, is no
 longer adopted by the exit path — a pid is unique among live processes and nothing
-more, and `sweep_stale` leaves a wreck standing for an hour. `terminal_windows.rs`
+more, and `sweep_stale` leaves a wreck standing for an hour — a week, once it names a
+pane, so the evidence outlives the eighteen hours this verb was written for.
+`terminal_windows.rs`
 (53 → 54) gained the ordering the dev-instance guard needs: `Terminal::new` asks
 `HostTarget::from_env` before `attach_console`, so a refused engine no longer takes the
 pane's console, alternate screen and mouse reporting on the way to declining to publish.

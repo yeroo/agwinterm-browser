@@ -374,9 +374,16 @@ async function terminateTree(child: ChildProcess): Promise<void> {
  * bare `"taskkill"` would run a `taskkill.exe` sitting in an unpacked download
  * folder in preference to the system one, with this user's privileges, on the
  * ordinary path where a browser outlived its Ctrl+C.
+ *
+ * Which is why `%SystemRoot%` is checked and not merely defaulted: `??` only rejects
+ * an *unset* variable, so an empty or relative one joins to a relative
+ * `System32\taskkill.exe` and hands the search straight back to the current
+ * directory. `path.isAbsolute` is what makes the fallback cover that too.
  */
 function taskkillPath(): string {
-  return path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+  const named = process.env.SystemRoot ?? process.env.windir;
+  const root = named && path.isAbsolute(named) ? named : "C:\\Windows";
+  return path.join(root, "System32", "taskkill.exe");
 }
 
 /**

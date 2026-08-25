@@ -231,9 +231,32 @@ impl ConsoleHandle {
     }
 
     /// Blocks until at least one byte is available. `Ok(0)` is end of input.
-    #[allow(unsafe_code)]
+    #[cfg(test)]
     fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.read_while(buf, &|| true)
+    }
+
+    /// Blocks until at least one byte is available. `Ok(0)` is end of input.
+    ///
+    /// `keep_reading` is asked before *every* `ReadFile`, including the retry below,
+    /// and a `false` returns `Ok(0)` without issuing one. That is what makes the
+    /// reader thread's shutdown not depend on a keystroke: [`Terminal::drop`] unblocks
+    /// a read that is already parked with `CancelIoEx`, but `CancelIoEx` can only
+    /// reach a read that has been *issued*, and there are two windows in which none
+    /// has been — between [`spawn_reader`] returning and the thread being scheduled
+    /// for its first read, and between the abort retry's `continue` and the read it
+    /// re-issues. A cancel that lands in either gets `ERROR_NOT_FOUND` and the thread
+    /// parks anyway, on a `CONIN$` whose modes `ModeGuard::drop` has just put back to
+    /// line-and-echo — eating the keystrokes of the shell that has the pane back,
+    /// which is the exact failure the cancel exists to prevent. Asking here closes
+    /// both: the flag is set before the cancel, so a thread that has not yet issued
+    /// its read sees it and never does.
+    #[allow(unsafe_code)]
+    fn read_while(&self, buf: &mut [u8], keep_reading: &dyn Fn() -> bool) -> io::Result<usize> {
         loop {
+            if !keep_reading() {
+                return Ok(0);
+            }
             let mut read: u32 = 0;
             // The abort check below reads `GetLastError` after a *successful* call,
             // where Windows does not promise to have set it — so it is cleared first.
@@ -279,7 +302,10 @@ impl ConsoleHandle {
             //
             // Guarded on a non-empty buffer, so a caller asking for zero bytes still
             // gets an answer rather than a spin: only a read that had room for a byte
-            // and came back with none can be the interrupted one.
+            // and came back with none can be the interrupted one. The `continue` goes
+            // back through `keep_reading`, which is what stops the retry from
+            // re-parking a reader the engine has already given up on — Ctrl+Break
+            // raises this abort *and* is a plausible reason the shutdown is running.
             if read == 0
                 && !buf.is_empty()
                 && io::Error::last_os_error().raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32)
@@ -855,6 +881,15 @@ impl Inbox {
         self.ready.notify_all();
     }
 
+    /// Whether the owning `Terminal` has gone, asked without having bytes to hand.
+    ///
+    /// [`Inbox::push`] reports the same flag, but only to a read that *produced*
+    /// bytes — and the read the shutdown has to stop is the one parked with none.
+    /// See [`ConsoleHandle::read_while`].
+    pub(crate) fn abandoned(&self) -> bool {
+        self.lock().abandoned
+    }
+
     /// Waits up to `wait` (forever, if `None`) for something to happen, appending
     /// any bytes to `out`.
     fn take(&self, out: &mut Vec<u8>, wait: Option<Duration>) -> io::Result<Taken> {
@@ -904,6 +939,11 @@ impl Inbox {
 /// if the thread is still parked in `ReadFile` when the engine shuts down. That is
 /// the accepted cost of a synchronous console read: there is one `Terminal` per
 /// process and the thread ends with it.
+///
+/// "Parked in `ReadFile`" is the case [`Terminal::drop`]'s `CancelIoEx` exists to
+/// end. What it cannot end is a read that has not been issued yet — so the loop is
+/// written against [`Inbox::abandoned`] rather than against the cancel alone, and
+/// asks it before every read through `keep_reading`. See [`ConsoleHandle::read_while`].
 pub(crate) fn spawn_reader(handle: Arc<ConsoleHandle>, inbox: Arc<Inbox>) {
     let spawned = std::thread::Builder::new()
         .name("console-input".to_owned())
@@ -911,8 +951,10 @@ pub(crate) fn spawn_reader(handle: Arc<ConsoleHandle>, inbox: Arc<Inbox>) {
             let inbox = Arc::clone(&inbox);
             move || {
                 let mut buf = [0u8; 1024];
+                let watch = Arc::clone(&inbox);
+                let keep_reading = move || !watch.abandoned();
                 loop {
-                    match handle.read(&mut buf) {
+                    match handle.read_while(&mut buf, &keep_reading) {
                         Ok(0) => return inbox.close(None),
                         Ok(read) => {
                             if !inbox.push(&buf[..read]) {
@@ -1884,6 +1926,55 @@ mod tests {
         let mut one = [0u8; 1];
         assert_eq!(handle.read(&mut one).expect("the pending byte"), 1);
         assert_eq!(&one, b"x");
+    }
+
+    #[test]
+    fn a_read_the_engine_has_given_up_on_is_never_issued() {
+        // `Terminal::drop` sets `abandoned` and then calls `CancelIoEx`, which can
+        // only reach a `ReadFile` that has been *issued* — so the flag has to be what
+        // stops one that has not. Pinned on the handle rather than through the thread
+        // because the window being closed is before the first read: there is nothing
+        // parked yet for a cancel to find, and a byte sitting on the pipe is what
+        // makes "did not issue one" distinguishable from "issued one and it blocked".
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        std::io::Write::write_all(&mut writer, b"x").expect("a byte to read");
+        let handle = owned(reader.into());
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            handle
+                .read_while(&mut buf, &|| false)
+                .expect("a refused read"),
+            0,
+            "a reader the engine had given up on issued a ReadFile anyway",
+        );
+        // And it consumed nothing: the byte is still there.
+        assert_eq!(handle.read(&mut buf).expect("the pending byte"), 1);
+        assert_eq!(&buf[..1], b"x");
+    }
+
+    #[test]
+    fn a_reader_abandoned_before_it_starts_stops_instead_of_parking() {
+        // The whole of `Terminal::new` spawning a thread and the caller dropping the
+        // `Terminal` before that thread is scheduled — an `Engine::new` that failed a
+        // line later, say. Bytes are left waiting so that a reader which ignored the
+        // flag would consume them and be seen to: without the check it reads "hi",
+        // learns from `push`'s `false` that it is abandoned, and returns *without*
+        // closing the inbox, so this poll times out into `Ok(None)` rather than
+        // ending. With it, the thread never reads and reports end of input.
+        let (reader, mut writer) = std::io::pipe().expect("a pipe");
+        std::io::Write::write_all(&mut writer, b"hi").expect("bytes waiting to be read");
+        let inbox = Inbox::new();
+        inbox.abandon();
+        spawn_reader(owned(reader.into()), Arc::clone(&inbox));
+
+        let mut term = Terminal::detached(Arc::clone(&inbox), None);
+        assert_eq!(
+            term.poll_event(Some(Duration::from_secs(5)))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::UnexpectedEof,
+            "the reader thread read on regardless of the engine that had gone",
+        );
     }
 
     #[test]

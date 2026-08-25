@@ -159,7 +159,11 @@ Neither question is "the newest frame directory on this machine". The exit path 
 pid it spawned and asks the exact question — but a pid names a *live* process and nothing
 more, `frame_file.rs` burns a counter precisely because Windows recycles them, and
 `sweep_stale` leaves a wreck standing for an hour, so a marker naming a **different** pane
-disqualifies the directory even there. `pane-clear` runs after everything is dead and has
+disqualifies the directory even there. A wreck that *names* a pane is held for a week
+instead (`MARKED_STALE_AFTER`): the marker is the whole of `pane-clear`'s evidence and the
+verb has no override for its absence, so an hour would let any browser launched in any
+other pane sweep away the only route back to this one — and the run this verb was written
+for came back to its pane roughly eighteen hours later. `pane-clear` runs after everything is dead and has
 no pid at all, and the marker is the whole of its answer: without it, two panes wrecked at
 once would mean the verb repairing one of them on the other's evidence and then deleting
 it. A directory with frames and no marker is read as nobody's rather than as ours — an

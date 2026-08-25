@@ -506,6 +506,19 @@ describe("giving the console back, which is the other half of giving the pane ba
     assert.match(body, /path\.isAbsolute/, "a relative %SystemRoot% still reaches path.join");
   });
 
+  it("spells taskkill's path out absolutely, the way cookConsoleModes cites it for", () => {
+    // `cookConsoleModes` above takes its guard from `taskkillPath` by name, but the
+    // guard was only ever on the copy. `??` rejects an *unset* `%SystemRoot%` and
+    // nothing else, so an empty or relative one joined to a relative
+    // `System32\taskkill.exe` -- handing the force-kill back to exactly the
+    // current-directory-first search the absolute path exists to avoid, on the
+    // ordinary path where a browser outlives its Ctrl+C.
+    const source = fs.readFileSync(path.join(REPO, "cli", "src", "main.ts"), "utf8");
+    const body = between(source, "function taskkillPath(", "\n}");
+    assert.match(body, /path\.isAbsolute/, "a relative %SystemRoot% still reaches path.join");
+    assert.match(body, /taskkill\.exe/, "the killer is no longer named by full path");
+  });
+
   it("does not call setRawMode, because it does nothing and is not honest about it", () => {
     // The call this used to make. `uv_tty_set_mode` returns early when the mode
     // already matches the one it recorded, and a `uv_tty_t` starts at NORMAL -- so a

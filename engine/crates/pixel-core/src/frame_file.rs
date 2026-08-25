@@ -110,8 +110,44 @@ const RETAINED: usize = 3;
 /// liveness rather than age, and [`sweep_stale`] says why this does not: a pid is
 /// reused, so a liveness test would strand real wrecks for as long as some unrelated
 /// process holds the number, which is the commoner failure and the unbounded one. An
-/// hour is chosen to make the window rare rather than to make it impossible.
+/// hour is chosen to make the window rare rather than to make it impossible — and
+/// [`MARKED_STALE_AFTER`] narrows it further still, because an idle publisher that
+/// ever had a frame accepted is a *marked* directory and is not held to this
+/// threshold at all. What is left here is the publisher that has placed nothing, and
+/// a publisher that has placed nothing has no placement to strand.
+///
+/// This is the threshold for a directory that names no pane. One that does is kept
+/// for [`MARKED_STALE_AFTER`] instead — see there.
 const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// How old a directory that *names a pane* has to be before [`sweep_stale`] reclaims
+/// it.
+///
+/// [`PANE_FILE`] is the whole of `pane-clear`'s evidence: a wreck with frames in it
+/// and a marker naming this pane is the only thing that authorises an `image.clear`,
+/// and the recovery verb has no override for its absence — by design, because
+/// clearing without evidence is clearing a placement someone else owns. Sweeping a
+/// marked wreck therefore does not just reclaim disk, it destroys the one route back
+/// for a pane that is still painted. [`STALE_AFTER`] is far too short for that: the
+/// run this verb was written for found its wreck roughly eighteen hours later, and
+/// any unrelated browser launched in the meantime would have swept it — the sweep
+/// runs over the whole temp root, so a browser started in *another* pane retires this
+/// one's evidence.
+///
+/// A week, rather than never: a marked wreck is retired the moment it is recovered
+/// (`retire`, `cli/src/pane.ts`) or exited cleanly (`FrameDir`'s `Drop`), so what
+/// this retains is only panes that were wrecked and never repaired, at [`RETAINED`]
+/// frames each. Keeping those for ever would be an unbounded leak on a machine that
+/// force-kills browsers; keeping them for a week outlives every plausible "I came
+/// back to it the next day" without becoming one.
+///
+/// The cost is the converse hazard, and it is the smaller one: evidence this old can
+/// authorise a clear against a placement some other producer has since made on the
+/// same pane. That clear only ever goes to the pane the user is *standing in*, only
+/// when a marker names that same pane, and only because they ran a repair command at
+/// a pane they judged to be wrecked — none of which is true of the frame this is
+/// protecting, which is stranded with no command that can reach it at all.
+const MARKED_STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Shared by every publisher's directory, so [`sweep_stale`] can recognise one.
 const DIR_PREFIX: &str = "terminal-browser-frames-";
@@ -258,8 +294,9 @@ impl FrameDir {
     /// `create_dir` rather than `create_dir_all`, and a counter that keeps moving
     /// until it lands on a name nobody has: a pid is unique among *live* processes
     /// and nothing more. Only a clean `Drop` removes a directory and [`sweep_stale`]
-    /// leaves anything younger than an hour alone, so a browser that was killed
-    /// leaves its frames behind — and Windows recycles pids freely. Adopting that
+    /// leaves anything younger than an hour alone — a week, once it names a pane — so
+    /// a browser that was killed leaves its frames behind, and Windows recycles pids
+    /// freely. Adopting that
     /// directory would put `frame-00000000.png` in the path of a file that already
     /// exists, and [`write_all_new`] refuses to touch one (rightly: overwriting a
     /// file the host may be reading is what this module is built to avoid). Its
@@ -268,7 +305,7 @@ impl FrameDir {
     /// first frame after an unlucky pid reuse would have been the last.
     fn create() -> io::Result<Self> {
         let root = std::env::temp_dir();
-        sweep_stale(&root, STALE_AFTER);
+        sweep_stale(&root, STALE_AFTER, MARKED_STALE_AFTER);
         Self::create_in(&root)
     }
 
@@ -378,11 +415,14 @@ impl Drop for FrameDir {
 /// directory another live browser is holding open is exactly the case where failing
 /// to delete it is correct.
 ///
-/// `older_than` is a parameter rather than [`STALE_AFTER`] read directly so the
-/// tests can drive both sides of the threshold in their own root, instead of
-/// backdating a directory — which on Windows needs a handle a plain `File::open`
-/// does not give.
-fn sweep_stale(root: &Path, older_than: Duration) {
+/// A directory that names a pane is held to `marked_older_than` instead, because it
+/// is `pane-clear`'s only evidence — see [`MARKED_STALE_AFTER`].
+///
+/// The thresholds are parameters rather than [`STALE_AFTER`] and
+/// [`MARKED_STALE_AFTER`] read directly so the tests can drive both sides of each in
+/// their own root, instead of backdating a directory — which on Windows needs a
+/// handle a plain `File::open` does not give.
+fn sweep_stale(root: &Path, older_than: Duration, marked_older_than: Duration) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -391,14 +431,22 @@ fn sweep_stale(root: &Path, older_than: Duration) {
         if !entry.file_name().to_string_lossy().starts_with(DIR_PREFIX) {
             continue;
         }
+        let path = entry.path();
+        // `max`, not the marked threshold as given: a marked wreck is worth *more*
+        // than an unmarked one, so no pair of arguments should make it go sooner.
+        let limit = if path.join(PANE_FILE).exists() {
+            marked_older_than.max(older_than)
+        } else {
+            older_than
+        };
         let stale = entry
             .metadata()
             .and_then(|meta| meta.modified())
             .ok()
             .and_then(|at| now.duration_since(at).ok())
-            .is_some_and(|age| age >= older_than);
+            .is_some_and(|age| age >= limit);
         if stale {
-            let _ = fs::remove_dir_all(entry.path());
+            let _ = fs::remove_dir_all(path);
         }
     }
 }
@@ -1116,17 +1164,51 @@ mod tests {
         }
 
         // Fresh: nothing an hour past its last frame, so nothing goes.
-        sweep_stale(&root, STALE_AFTER);
+        sweep_stale(&root, STALE_AFTER, MARKED_STALE_AFTER);
         assert!(ours.is_dir(), "a directory in use was swept");
 
         // Past the threshold, which is what "the process that owned it is gone"
         // means here — see `sweep_stale` on why liveness is not asked directly.
-        sweep_stale(&root, Duration::ZERO);
+        sweep_stale(&root, Duration::ZERO, MARKED_STALE_AFTER);
         assert!(!ours.exists(), "a stale frame directory survived the sweep");
         assert!(
             unrelated.is_dir(),
             "the sweep deleted something that was never ours",
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_wreck_that_names_a_pane_outlives_the_ordinary_sweep() {
+        // The unmarked half of this is `a_directory_a_dead_process_left_behind_is_
+        // swept_up`; what is pinned here is that the marker changes the answer. A
+        // wreck naming a pane is the whole of `pane-clear`'s evidence, and the run
+        // this verb was written for came back to its pane eighteen hours later —
+        // well past `STALE_AFTER`, and any browser launched in any *other* pane
+        // meanwhile sweeps this root.
+        let root = std::env::temp_dir().join(format!("frame-sweep-marked-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("a root to sweep");
+        let marked = root.join(format!("{DIR_PREFIX}18-0"));
+        let bare = root.join(format!("{DIR_PREFIX}19-0"));
+        for dir in [&marked, &bare] {
+            fs::create_dir_all(dir).expect("a directory");
+            fs::write(dir.join("frame-00000000.png"), b"x").expect("a file in it");
+        }
+        fs::write(marked.join(PANE_FILE), "pipe\tsession").expect("a pane marker");
+
+        // Long past the hour an unmarked wreck gets, and inside the week a marked
+        // one does: the evidence survives exactly where the recovery needs it to.
+        sweep_stale(&root, Duration::ZERO, MARKED_STALE_AFTER);
+        assert!(
+            marked.is_dir(),
+            "the sweep took the only evidence `pane-clear` accepts",
+        );
+        assert!(!bare.exists(), "an unmarked stale wreck survived");
+
+        // And it is retained, not exempt: past its own threshold it goes too, so a
+        // pane wrecked and never repaired is not an unbounded leak.
+        sweep_stale(&root, Duration::ZERO, Duration::ZERO);
+        assert!(!marked.exists(), "a marked wreck is never reclaimed");
         let _ = fs::remove_dir_all(&root);
     }
 

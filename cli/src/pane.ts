@@ -633,8 +633,8 @@ export interface OwnedFramesOptions {
    * marker adds there is the one thing the pid cannot settle on its own: a pid names
    * a *live* process and nothing more, `frame_file.rs` burns a counter precisely
    * because Windows recycles them, and `sweep_stale` leaves a wreck standing for an
-   * hour. So a pid handed out twice inside that hour would let the exit path of the
-   * second browser adopt the first's directory — clearing the pane that one is still
+   * hour — a week, once it names a pane. So a pid handed out twice inside that window
+   * would let the exit path of the second browser adopt the first's directory — clearing the pane that one is still
    * painted on, and deleting the only evidence that it is. A marker naming *another*
    * pane is therefore disqualifying on both paths.
    *
@@ -805,7 +805,8 @@ function allOwnedFrames(options: OwnedFramesOptions = {}): OwnedFrames[] {
       // broad question has nothing else to go on, so an unattributed wreck is not
       // ours. The pid question has the pid, so it adopts one — but a marker naming
       // some other pane outranks a pid that Windows may have handed out twice inside
-      // the hour `sweep_stale` waits. See [`OwnedFramesOptions.pane`].
+      // the window `sweep_stale` waits — an hour, and a week for the marked wreck
+      // this branch is reading. See [`OwnedFramesOptions.pane`].
       if (pane && pane !== "any") {
         const mark = frameMark(dir);
         if (mark ? !sameMark(mark, pane) : options.pid === undefined) continue;
@@ -889,9 +890,12 @@ export async function clearOwnedPaneFrame(
   // longer true of it. Left in place it would report the same wreck as freshly found
   // on every later run, which is the one distinction this verb exists to draw, and it
   // would go on authorising clears against panes it never drew on until `sweep_stale`
-  // reaches it an hour later. Best-effort, because this runs on paths that must not
-  // fail: a directory that will not delete is `sweep_stale`'s problem, not the
-  // recovery's.
+  // reaches it — a week later, for a wreck that names a pane, because that marker is
+  // the recovery's only evidence and the sweep holds it for as long as a user might
+  // come back to the pane (`MARKED_STALE_AFTER`, `frame_file.rs`). Which is exactly
+  // why retiring it here is not optional. Best-effort even so, because this runs on
+  // paths that must not fail: a directory that will not delete is `sweep_stale`'s
+  // problem, not the recovery's.
   //
   // Only on `cleared`, and `cleared` is now the host's own `ok:true` rather than the
   // arrival of bytes. A refusal leaves the directory exactly where it is: the pane is
@@ -914,7 +918,7 @@ export async function clearOwnedPaneFrame(
  * Takes a spent wreck out of circulation, and never throws.
  *
  * Best-effort on the directory, because this runs on paths that must not fail: one
- * that will not delete is `sweep_stale`'s problem an hour later, not the recovery's.
+ * that will not delete is `sweep_stale`'s problem a week later, not the recovery's.
  * The marker is not best-effort in the same way, though — it *is* the directory's
  * claim on this pane, and a claim that outlives the placement it was made for is what
  * authorises the next run's clear. So when the directory will not go, the marker is
