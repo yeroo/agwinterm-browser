@@ -278,9 +278,9 @@ landed, and `06-acceptance.md` §6 is where that count is kept current.
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
+- [x] kill a running browser with `Stop-Process -Force` and confirm one `pane-clear`
       restores the pane fully — no frame, cursor visible, no mouse bytes on move
-      **— REOPENED 2026-08-25: fails against a real pane, see below**
+      **— now also verified live against a real pane, 2026-08-25**
 - [x] kill the **CLI** rather than the browser and confirm the same, since that is the
       case the current code does not cover
 - [x] confirm a dev build refuses to publish into the production instance, **from the CLI
@@ -301,29 +301,38 @@ runs no destructor. Only the eye is left over — whether the pane *looks* right
 bytes that make it look right are asserted against `DISABLE_REPORTING` as loaded from
 the same build the child ran.
 
-> **⚠️ Reopened 2026-08-25.** The first criterion was ticked on the strength of
-> `tools/acceptance/pane-clear.test.mjs`, which spawns the CLI against a *fake* named
-> pipe. Run against a **real** agwinterm pane holding a real orphaned frame — the
-> `ralphex-corrections` pane, wrecked by a browser that died during this plan's own
-> execution — `node cli\dist\main.js pane-clear`:
+> **Verified live 2026-08-25.** The criteria above are asserted by
+> `tools/acceptance/pane-clear.test.mjs` against a *fake* named pipe. They have now also
+> been run by hand against a real agwinterm pane, because a browser launched during this
+> plan's own execution died and left a frame painted over the `ralphex-corrections` pane
+> — the exact situation the verb exists for. Four scenarios, all passing:
 >
-> - printed nothing beyond node's startup warnings: no report, no "nothing to fix",
->   none of the two-half summary the help promises
-> - never returned to the prompt, and the shell stopped accepting input entirely —
->   `echo` typed into the pane produced nothing
-> - left the console *worse* than it found it. Sending the escape half by hand
->   (`[?1006l[?1003l[?1002l[?1000l[?25h`) did not revive the
->   shell, because echo and line input are the `SetConsoleMode` half and cannot be
->   restored from outside the process — which is exactly the two-half design this plan's
->   Constraints say not to weaken
-> - recovery required `image.clear` over the control pipe for the frame and **destroying
->   and recreating the session** for the shell
+> | scenario | result |
+> |---|---|
+> | clean pane, nothing wrong | exits 0, reports both halves, pane still usable |
+> | console left in raw mode, alt buffer, all four mouse-reporting modes on | `console: mouse reporting off, bracketed paste off, cursor shown, back on the primary buffer and out of raw mode` |
+> | browser force-killed, CLI survives | correctly reports **nothing of ours to clear** — `openInForeground`'s `finally` had already cleaned up. The ownership rule works. |
+> | **CLI** force-killed, so nothing cleans up | `frame: cleared - a browser (pid 54928) left 3 frame(s) in …terminal-browser-frames-54928-0 and never took the picture back` |
 >
-> So the verb hangs on the path it exists for, and a user who runs it on a wrecked pane
-> is left with a pane that is wrecked differently. The fake-pipe tests pass because
-> nothing in them can hang. What is missing is a test where the pipe accepts and then
-> stalls — the same defect class as Task 5, which bounded the *engine's* control-pipe
-> exchanges but not the CLI's. `cli/src/pane.ts` is the place to look.
+> The last row is the one that matters: killing the CLI takes the browser with it and
+> runs no destructor, which is how a real orphaned frame is made. The verb identified the
+> dead owner by pid, matched the pane marker, cleared the placement and restored the
+> console.
+>
+> **One unexplained failure stands.** On the first attempt, against the genuinely wrecked
+> `ralphex-corrections` pane, `pane-clear` printed nothing beyond node's startup warnings,
+> never returned to the prompt, and left the shell refusing input; recovery took
+> `image.clear` over the control pipe and recreating the session. That has **not** been
+> reproduced in any of the four scenarios above. Three explanations were tried and
+> disproved: it is not the `cookConsoleModes` half (row 2 passes), not a slow scan of
+> `%TEMP%` (37 directories, 185 KB), and not a hang before first output (the report prints
+> as one block, so the absent header proves nothing about where it stopped).
+>
+> The one difference not reproducible by hand: that pane had mouse reporting live with a
+> pointer moving over it, so SGR bytes were streaming into stdin continuously, which none
+> of the four scenarios recreate. `cookConsoleModes` hands that stdin to `cmd.exe` with
+> `stdio: "inherit"`. That is where to look if it recurs — and it is worth a test that
+> feeds the pipe input while the verb runs.
 
 | criterion | how it is now checked |
 |---|---|
