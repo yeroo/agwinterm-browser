@@ -101,19 +101,19 @@ where there is no alternative — which is the `EPERM` fix alone.
 
 ### Task 2: Release the profile lock on foreground exit
 
-- [ ] remove the owned lock on the explicit foreground shutdown path in
+- [x] remove the owned lock on the explicit foreground shutdown path in
       `browser/src/foreground.ts`, before either `app.exit` call — this keeps the fix in
       port-added code and creates no new vendored divergence
-- [ ] make it safe to run twice and safe when no lock is owned; a recovery path that
+- [x] make it safe to run twice and safe when no lock is owned; a recovery path that
       throws on a second call is worse than the leak
-- [ ] do not remove a lock this process does not own — the same ownership rule
+- [x] do not remove a lock this process does not own — the same ownership rule
       `FramePublisher::clear` and `pane-clear` already follow
-- [ ] check the other `app.exit` site at `foreground.ts:30` is covered too, not just the
+- [x] check the other `app.exit` site at `foreground.ts:30` is covered too, not just the
       one at `:65`
-- [ ] write tests that the lock is gone after a normal foreground exit
-- [ ] write tests that a lock owned by another live process is left alone
-- [ ] write tests for the double-call and no-lock-owned cases
-- [ ] run tests — must pass before Task 3
+- [x] write tests that the lock is gone after a normal foreground exit
+- [x] write tests that a lock owned by another live process is left alone
+- [x] write tests for the double-call and no-lock-owned cases
+- [x] run tests — must pass before Task 3
 
 ### Task 3: Cover the dimension the pane-clear hang lives in
 
