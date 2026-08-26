@@ -60,14 +60,19 @@ export const SUBJECT = Object.freeze({
     reason:
       "the fork in the road: `entryMode(argv)` sends a Windows launch to " +
       "`runForeground` instead of `runDaemon`, which is the whole process-model " +
-      "decision expressed in five lines.",
+      "decision expressed in five lines. It also carries the profile lock's " +
+      "lifecycle, because `claimProfile()` runs here, before that fork: the " +
+      "startup-failure catch releases the lock and so does a Node `exit` handler, " +
+      "for the exits no `app.exit` site sees. Re-vendoring this file without those " +
+      "loses them silently — the port-added `releaseProfileLock` stays either way.",
   },
   "browser/src/daemon.ts": {
     task: `${PORT} Task 13`,
     reason:
       "`DAEMON_SOCKET` becomes `DAEMON_ENDPOINT`, and the liveness probe grows a " +
       "third answer: a daemon that did not accept within the budget is not a daemon " +
-      "whose name may be unlinked out from under it.",
+      "whose name may be unlinked out from under it. Its six `app.exit` sites also " +
+      "release the profile lock first, for the reason `browser/src/main.tsx` gives.",
   },
   "browser/src/registry.ts": {
     task: `${PORT} Task 13`,

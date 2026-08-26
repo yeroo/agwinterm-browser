@@ -255,6 +255,16 @@ that event. The upstream helper is unchanged and would be fine in upstream's own
 path; the port's foreground shape is what makes `app.exit` the ordinary exit, so the leak
 is routine here and rare there. That is also the argument for fixing it on the port's side.
 
+`app.exit` is not the whole of exiting, and the review round found the route with no call
+site to put a release in front of: an uncaught throw or rejection from a callback nobody
+is awaiting ends the process through Node, past every `app.exit`. That leak was free
+before Task 1 — upstream's `alive()` read the failed probe as death and the next launch
+took the directory back — and Task 1 removed exactly that, so a stranded lock whose pid
+Windows reissues to a higher-integrity process now reads as alive for as long as that
+process lives. `main.tsx` registers `process.on("exit", releaseProfileLock)` beside its
+`claimProfile()` for it; the explicit calls stay, since `app.exit` is not specified to run
+Node's exit handlers either.
+
 **Scope note on Task 3.** The deliverable is coverage, not a fix. The hang is real — it
 happened, and recovery took `image.clear` over the control pipe plus recreating the
 session — but one unreproduced observation does not justify changing code on a guess. If

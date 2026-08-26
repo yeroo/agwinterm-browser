@@ -212,7 +212,7 @@ them would have made the table a claim about a tree that no longer exists.
 |---|---|
 | `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **544 passed**, 123 suites, **0 skipped**, 12.3 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **546 passed**, 124 suites, **0 skipped**, 11.6 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -288,12 +288,14 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | `vendor-check/native-build.test.mjs` | 18 |
 | | | | `vendor-check/upstream-doc.test.mjs` | 15 |
-| | | | the rest | 154 |
+| | | | the rest | 156 |
 
-Re-counted on **2026-08-26**; the node column sums to the 544 above. Three suites in
-the table's "the rest" did not exist at the previous count and are the whole of its
-growth: `browser/foreground.test.mjs` (13), `browser/profile.test.mjs` (12) and
-`acceptance/profile-lock.test.mjs` (4), all from the deferred-browser-defects plan.
+Re-counted on **2026-08-26**; the node column sums to the 546 above. Most of the
+growth in the table's "the rest" is three suites that did not exist at the previous
+count, all from the deferred-browser-defects plan: `browser/foreground.test.mjs` (14),
+`browser/profile.test.mjs` (12) and `acceptance/profile-lock.test.mjs` (5). The other
+five cases are additions to suites that were already there — `acceptance/pane-clear`
+(+2), `docs-check/docs` (+2) and `cli/store` (+1).
 `vendor-check/` is now seven files rather than four: the vendor-check-gap plan derived the scope from
 the vendoring commit, gave every diverged path a disposition, and parsed `UPSTREAM.md`
 against the table that cites it. `native-build.test.mjs`'s three artifact tests are in

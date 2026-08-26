@@ -649,6 +649,13 @@ replaces. The lock is claimed in `main.tsx` *before* the daemon/foreground fork,
 `tools/browser/foreground.test.mjs` scans the whole tree and fails on an exit site that
 does not release first.
 
+`app.exit` is not the whole of exiting, though, and the last route has no call site to
+put a release in front of: an uncaught throw or rejection from a callback nobody is
+awaiting ends the process through Node, past all nine. `main.tsx` registers
+`process.on("exit", releaseProfileLock)` next to the `claimProfile()` that made the
+process a lock holder, which is the one line both shapes run. That leak used to be free
+— see the next paragraph, where the probe that reclaimed it stopped doing so on purpose.
+
 The second half of the same defect is the probe that decides whether a lock is stale.
 Upstream answered every `process.kill(pid, 0)` failure with "dead", which is right where
 it was written and wrong here: `kill(pid, 0)` asks whether a process *can* be signalled,

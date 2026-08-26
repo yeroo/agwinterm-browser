@@ -326,6 +326,41 @@ describe("the wiring, read from the source", () => {
     assert.ok(checked >= 9, `only ${checked} app.exit sites were scanned; the scan lost the tree`);
   });
 
+  it("also releases from a Node exit handler, for the exits no app.exit site sees", () => {
+    // The scan above is exhaustive over `app.exit`, and `app.exit` is not exhaustive
+    // over exits. An uncaught throw or rejection from a callback nobody is awaiting
+    // ends the process through Node, past all nine sites and past `will-quit`.
+    //
+    // Before divergence 13 that leak healed itself: upstream's `alive()` read every
+    // failed probe as death, so the next launch took the directory back. It no longer
+    // does, and a stranded lock whose pid is reissued to a higher-integrity process
+    // probes `EPERM` and reads as alive for as long as that process lives. So the
+    // handler is registered rather than argued to be unnecessary — and registered in
+    // `main.tsx`, next to the `claimProfile()` that made the process a lock holder,
+    // because that is the one line both shapes run.
+    const main = fs.readFileSync(path.join(REPO, "browser/src/main.tsx"), "utf8");
+    assert.match(
+      main,
+      /process\.on\("exit", releaseProfileLock\)/,
+      "main.tsx no longer releases the profile lock from a Node exit handler; an " +
+        "uncaught throw leaks it again, and alive() no longer reclaims what it leaks",
+    );
+    const claim = main.indexOf("claimProfile();");
+    const register = main.search(/process\.on\("exit", releaseProfileLock\)/);
+    assert.ok(claim >= 0, "main.tsx no longer claims a profile; this file is about the wrong program");
+    assert.ok(
+      register > claim,
+      "the exit handler is registered before claimProfile(); a throw in between leaks the lock",
+    );
+    // `releaseProfileLock` is what a Node `exit` handler is allowed to be: no `await`
+    // inside it, since nothing scheduled from an exit handler ever runs.
+    const body = foreground.slice(foreground.indexOf("export function releaseProfileLock"));
+    assert.ok(
+      !/\bawait\b/.test(body.slice(0, body.indexOf("export async function"))),
+      "releaseProfileLock awaits something; from a Node exit handler that work never happens",
+    );
+  });
+
   it("spells the lock the same way the vendored claimProfile does", () => {
     // The name is duplicated rather than imported, because exporting it from
     // `profile.ts` would buy a second divergence from upstream for a string. The

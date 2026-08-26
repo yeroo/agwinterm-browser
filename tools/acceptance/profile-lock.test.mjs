@@ -173,12 +173,21 @@ const PORT = await buildPort();
  * outright: the handler would never run and the test would report a leak that the
  * fix does prevent.
  *
+ * `crash` is the route none of the nine `app.exit` sites can cover: it registers the
+ * `exit` handler `main.tsx` registers, and then throws from a timer, which is the
+ * uncaught-exception path Node terminates on by itself. The two lines it mirrors are
+ * held to `main.tsx` by `tools/browser/foreground.test.mjs`, because a child that
+ * arranged its own handler and then asserted the handler ran would be a test of this
+ * file. What it establishes here is the half that is not obvious from reading either:
+ * that Node really emits `exit` after an uncaught throw, and that `releaseProfileLock`
+ * is a legal thing to do inside one.
+ *
  * `probe` names a pid to run the real `process.kill(pid, 0)` against before
  * claiming, and prints what came back. That line is what keeps "the live holder was
  * skipped" from being a claim about a probe nobody watched.
  */
 const CHILD = `
-  import { claimProfile, chosen, runForeground } from ${JSON.stringify(pathToFileURL(PORT).href)};
+  import { claimProfile, chosen, releaseProfileLock, runForeground } from ${JSON.stringify(pathToFileURL(PORT).href)};
 
   // With \`node -e\`, argv[1] is the first argument: there is no script path to hold
   // the usual slot.
@@ -199,6 +208,11 @@ const CHILD = `
   if (route === "hold") {
     console.log("ready");
     setInterval(() => {}, 1000);
+  } else if (route === "crash") {
+    process.on("exit", releaseProfileLock);
+    setTimeout(() => {
+      throw new Error("an exit nobody wrote");
+    }, 10);
   } else {
     globalThis.__session = (ctx) => {
       globalThis.__ctx = ctx;
@@ -385,6 +399,33 @@ describe("a normal foreground quit leaves no lock behind", () => {
   // it covered it, which is worse than the gap it appears to close. The lock's
   // absence above is the part that actually discriminates, and it is the criterion
   // the plan asked for.
+});
+
+describe("an exit nobody wrote still gives the lock back", () => {
+  it("releases on an uncaught throw, which no app.exit site sees", async (t) => {
+    // The nine explicit releases are placed at `app.exit` calls, and the source scan
+    // in `tools/browser/foreground.test.mjs` keeps them there. An uncaught throw from
+    // a callback reaches none of them: Node prints the stack and ends the process.
+    //
+    // This used to cost nothing, because upstream's `alive()` reclaimed any lock whose
+    // probe failed. Divergence 13 traded that away on purpose, so the residual leak is
+    // now the one the recovery cannot reach — a stranded lock whose pid Windows later
+    // reissues to a higher-integrity process reads as alive on every launch for as long
+    // as that process lives, and the user is logged out for as long as that lasts.
+    const appData = freshAppData(t);
+    const crashed = await runChild(t, appData, "crash");
+    assert.equal(crashed.code, 1, `the crash route exited ${crashed.code}, not on the throw`);
+    assert.match(crashed.err, /an exit nobody wrote/, "the child did not die of its own throw");
+
+    const dir = choseDir(crashed.out);
+    assert.equal(dir, profileDir(appData, 0));
+    assert.equal(
+      fs.existsSync(path.join(dir, LOCK_NAME)),
+      false,
+      `${LOCK_NAME} outlived an uncaught throw. Nothing reclaims it once the pid is ` +
+        `reissued to a process that probes EPERM, so this profile is stranded.`,
+    );
+  });
 });
 
 describe("a stale lock naming a dead pid is still reclaimed", () => {
