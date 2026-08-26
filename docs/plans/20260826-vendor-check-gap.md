@@ -94,18 +94,18 @@ following the checklist restores one line and loses the trait.
 
 ### Task 1: Derive the vendored universe from the vendoring commit
 
-- [ ] add a module in `tools/vendor-check/` that returns every path `45b5e43` introduced,
+- [x] add a module in `tools/vendor-check/` that returns every path `45b5e43` introduced,
       read from git rather than from a checked-in list
-- [ ] give it a declared exclusion list for the project files that commit also carried —
+- [x] give it a declared exclusion list for the project files that commit also carried —
       currently `.gitignore`, `package.json`, `docs/design/UPSTREAM.md`,
       `docs/plans/20260821-windows-port.md` — with a one-line reason each, so an exclusion
       is a decision on the record rather than an absence
-- [ ] make an unknown path fail rather than default into any category
-- [ ] have it report deletions as well as edits: a re-vendor that drops a file entirely is
+- [x] make an unknown path fail rather than default into any category
+- [x] have it report deletions as well as edits: a re-vendor that drops a file entirely is
       the failure this whole directory exists to catch, and today nothing detects it
-- [ ] write tests for the universe matching the commit (count and membership)
-- [ ] write tests for an excluded path being excluded, and for an undeclared one failing
-- [ ] run tests — must pass before Task 2
+- [x] write tests for the universe matching the commit (count and membership)
+- [x] write tests for an excluded path being excluded, and for an undeclared one failing
+- [x] run tests — must pass before Task 2
 
 ### Task 2: Classify all 48 changed paths
 
