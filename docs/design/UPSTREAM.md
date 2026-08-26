@@ -382,6 +382,18 @@ completeness check; this list is not.**
 3. Re-apply every divergence numbered above. Divergences 1-3 are the ones a fresh copy
    silently undoes without breaking a build: `browser/package.json`'s `postinstall`,
    `pnpm-workspace.yaml`'s `onlyBuiltDependencies`, and the root `test` script.
+
+   **Divergence 13 is the one to re-apply with its entry open rather than from memory.**
+   It is a handful of lines in one function, and the diff guard can only tell you *that*
+   they are gone — never that they came back wrong. Any edit to `alive()` makes
+   `browser/src/profile.ts` differ from `45b5e43` again, which is the whole of what
+   `unchanged.test.mjs` asks. Three behaviours have to survive together: `ESRCH` is the
+   only "gone", `EPERM` is alive, and any other code is warned about and then treated as
+   alive. `tools/browser/profile.test.mjs` holds all three, and
+   `tools/acceptance/profile-lock.test.mjs` runs the probe against real processes rather
+   than a replaced `process.kill`. A re-apply that satisfies the diff and not those two is
+   the understated-scope failure divergence 5 had, in a file whose symptom arrives later
+   as two browsers on one Chromium `userData` directory.
 4. `corepack pnpm install`, then confirm `browser/node_modules/electron/dist/electron.exe`
    exists. Divergence 1 is the reason it does; an install that succeeds and produces no
    binary is what its absence looks like.

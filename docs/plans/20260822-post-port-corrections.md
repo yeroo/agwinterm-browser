@@ -333,6 +333,12 @@ the same build the child ran.
 > of the four scenarios recreate. `cookConsoleModes` hands that stdin to `cmd.exe` with
 > `stdio: "inherit"`. That is where to look if it recurs — and it is worth a test that
 > feeds the pipe input while the verb runs.
+>
+> **That test was written on 2026-08-26 and it passes**, so the hang is still open rather
+> than explained: `tools/acceptance/pane-clear.test.mjs`, "stdin that does not stop while
+> the verb runs". See [`20260826-deferred-browser-defects.md`](20260826-deferred-browser-defects.md)
+> Task 3 for what that rules out and what it leaves — [`../design/07-as-built.md`](../design/07-as-built.md) §4
+> carries the standing note.
 
 | criterion | how it is now checked |
 |---|---|
@@ -445,7 +451,12 @@ Findings triaged out of this plan rather than dropped. Full text in
 `.revmux/tasks/port-windows-full/01-initial/report.md` and `dropped-findings.md`; the
 disposition table is in that task's `task.md`.
 
-**Wants its own plan — the vendored-tree guard does not cover the vendored tree.**
+**Wants its own plan — the vendored-tree guard does not cover the vendored tree.** The
+first two below were done by
+[`completed/20260826-vendor-check-gap.md`](completed/20260826-vendor-check-gap.md); the
+last two are **still open**, and checked rather than assumed on 2026-08-26 —
+`docs.test.mjs:133` still asserts one direction, and `blame()` is still duplicated between
+the two scoping scripts.
 
 - `tools/vendor-check/unchanged.test.mjs:43` diffs only `engine/crates/pixel-core/src`.
   `pixel-node` and `pixel-react` are vendored upstream trees with **no baseline check at
@@ -464,22 +475,36 @@ disposition table is in that task's `task.md`.
   `tools/vendor-check/clippy-scope.py:61` and `fmt-scope.py:82`. Lift it beside the other
   vendor-check work rather than on its own.
 
-**Windows-specific bugs in vendored browser code.** Fixing these creates new upstream
-divergences that need written reasons in `UPSTREAM.md`, which is a cost worth deciding on
-its own rather than as review fallout:
+**Windows-specific bugs in vendored browser code — both done 2026-08-26** by
+[`20260826-deferred-browser-defects.md`](20260826-deferred-browser-defects.md), which is
+also where the `pane-clear` hang above is carried. The premise below turned out to hold for
+only one of the two: `profile.ts` is vendored and its fix is now `UPSTREAM.md` divergence
+13, but `foreground.ts` is **port-added**, so releasing the lock there cost no divergence at
+all. Taking the cheaper site was the whole point of deciding this separately.
 
 - `browser/src/profile.ts:35` treats every `process.kill(pid, 0)` error as a dead owner.
   On Windows, probing a live higher-integrity browser returns `EPERM`, so a second browser
   overwrites the first's lock and selects the same Chromium `userData` directory. The
   changed instance-registry code already handles this correctly — `store/src/instances.ts`
-  is the model. Confidence 95.
+  is the model. Confidence 95. **Fixed:** `ESRCH` is now the only "gone", `EPERM` is alive,
+  and an unrecognised code is warned about and then treated as alive — the two mistakes are
+  not the same size, and neither deserves silence. `UPSTREAM.md` divergence 13,
+  `tools/vendor-check/dispositions.mjs`, `tools/browser/profile.test.mjs` and
+  `tools/acceptance/profile-lock.test.mjs`.
 - `browser/src/foreground.ts:65` closes through `app.exit`, which Electron specifies does
   not emit `will-quit` — the only event `profile.ts` removes the lock from. The lock
   survives every foreground close, and if Windows reuses that PID the next launch silently
   picks a different profile, so the user appears logged out. The `will-quit`-only cleanup
   is upstream's; the port's new foreground path is what makes it routine. Confidence 95.
+  **Fixed in the port's own file:** `releaseProfileLock()` runs before *both* `app.exit`
+  calls in `foreground.ts` — the one at `:30` as well as the one at `:65` — it is
+  idempotent, it is a no-op when no lock is owned, and it removes only a lock naming this
+  pid, which is the ownership rule `FramePublisher::clear` and `pane-clear` already follow.
 
-**Was deferred, then done — and resolved narrower than the finding asked.**
+**Already fixed — closed, and not carried forward.** This item was resolved during the
+corrections run itself, before the deferred-defects plan opened, and that plan's discovery
+pass re-confirmed it on 2026-08-26 and dropped it from the deferred list. Resolved narrower
+than the finding asked, deliberately:
 `engine/crates/pixel-core/src/clipboard_image.rs:84` accepted `file://` URLs without
 converting them to Windows paths, so `file:///C:/…` became `/C:/…` and a UNC URL became a
 relative path; both failed `is_file`, and pasting a valid local image URL was silently

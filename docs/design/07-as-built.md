@@ -624,3 +624,52 @@ check that covers a third of its subject looks exactly like a check that covers 
 — green, fast, and cited in the documentation as proof. It had been passing for five days.
 The question worth carrying forward is which other checks in this repo are trusted because
 they have never failed.
+
+### The `pane-clear` hang, and what the test written for it established
+
+`pane-clear` is the recovery verb of §1, and on **2026-08-25** it hung. Against the
+genuinely wrecked `ralphex-corrections` pane it printed nothing past node's startup
+warnings, never returned to the prompt, and left the shell refusing input; recovery took
+`image.clear` over the control pipe and recreating the session. It has happened **once**,
+and the recovery destroyed the evidence.
+
+Four scenarios built since — a clean pane, a console-wrecked pane, a browser killed with
+the CLI surviving, and a CLI killed leaving an orphaned frame — all pass. Three
+explanations were tried and disproved: not the `cookConsoleModes` half on its own, not a
+slow scan of `%TEMP%` (37 directories, 185 KB), and not a hang before first output, since
+the report prints as one block and an absent header proves nothing about where it stopped.
+
+The one condition none of them recreated is the one the real pane had: mouse reporting
+live with a pointer moving over it, so SGR bytes were arriving on stdin **continuously
+while the verb ran**, and `cookConsoleModes` hands that stdin to `cmd.exe` with
+`stdio: "inherit"`. That dimension is now covered.
+`tools/acceptance/pane-clear.test.mjs` grew "stdin that does not stop while the verb
+runs": two tests that write `\e[<35;C;RM` motion reports at 125 Hz — one per ~8ms, the
+rate `?1003h` sends for a pointer crossing a pane — onto a live pipe on the child's fd 0,
+from spawn until after exit. The second one exists because the first cannot reach the
+half that matters: with fd 0 a pipe, `restorePaneConsole` sees `isTTY` false and never
+spawns the cooking child at all, so that test opens the gate on the *real*
+`process.stdin` and lets the real `cookConsoleModes` run.
+
+**Both pass, so the hang is still open rather than explained.** Measured 2026-08-26: the
+verb finished in 916 ms with roughly 100 motion reports delivered onto its stdin, and the
+restore half finished in 938 ms reporting `modes: true` — the cooking child ran and
+returned. Each run is bounded twice, by an exit code *and* by an explicit millisecond
+assertion, because the harness deadline alone would be satisfied by a hang it cut short;
+and the number of reports actually delivered is asserted too, so a run that finished
+before any bytes arrived cannot pass as coverage.
+
+What that rules out is a `cmd.exe` inheriting a **pipe** with unread bytes still arriving
+on it. What it does not touch is the console shape of the same condition: a console input
+buffer filling with `INPUT_RECORD`s, and libuv's `uv_tty_read_stop` writing a wake-up
+record into a buffer that is already full. Node cannot reach that from a test — there is
+no `CREATE_NEW_CONSOLE` on `spawn`, and the only console this suite could hand a child is
+the runner's own real pane, which is the wreck being avoided. A pseudoconsole is
+[`tools/conpty-probe`](../../tools/conpty-probe)'s territory and a standalone cargo
+package by design. That is the fifth scenario, and it is unbuilt.
+
+No code changed for this. The green test is the whole reason: changing `cookConsoleModes`
+on a passing test would be a fix for a defect that was not found, and the plan that added
+the coverage ([`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md))
+says so out loud. **If it recurs, capture the pane state before recovering it** — the
+recovery is what destroyed the evidence the first time.

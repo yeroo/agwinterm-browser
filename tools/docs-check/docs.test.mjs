@@ -506,3 +506,47 @@ test("the dev-build pipe guard is enforced in all three readers, not just the en
     "the README still claims the whole guard is release-inert; the CLI's copy is not",
   );
 });
+
+/**
+ * The standing note about the `pane-clear` hang, against the suite it cites.
+ *
+ * This one is a documentation claim of an unusual kind: it says a defect is **not**
+ * fixed, and names the coverage that failed to reproduce it as the reason for leaving
+ * the code alone. That makes the citation load-bearing in the direction prose normally
+ * is not — a reader who wants to know whether the hang is explained has nothing but the
+ * named suite to check, and a note that cites a suite which no longer exists, or no
+ * longer contains the case it quotes, reads exactly like a live one.
+ *
+ * So the name and the quoted `describe` title are held to the file, and nothing else
+ * is: the measured timings are a record of one run and are not re-derived here.
+ */
+test("the as-built note on the pane-clear hang cites a case that is really in the suite", () => {
+  const doc = read("docs/design/07-as-built.md");
+  const at = doc.indexOf("### The `pane-clear` hang");
+  assert.ok(at > 0, "the as-built doc lost its note on the pane-clear hang");
+  const section = doc.slice(at);
+
+  const suite = "tools/acceptance/pane-clear.test.mjs";
+  assert.ok(section.includes(suite), "the note no longer names the suite that covers it");
+
+  const quoted = section.match(/grew "([^"]+)"/);
+  assert.ok(quoted, "the note no longer quotes the case it says was added");
+  // Wrapped prose, so the quote arrives with the paragraph's line break inside it. A
+  // comparison that kept it would fail on a re-wrap and on nothing else.
+  const title = quoted[1].replace(/\s+/g, " ").trim();
+  assert.ok(
+    read(suite).includes(`describe("${title}"`),
+    `the note sends a reader to "${title}" and ${suite} has no such describe. The ` +
+      `note's whole argument is that this case passes; a case nobody can find cannot ` +
+      `carry it.`,
+  );
+
+  // The handoff the note says is still uncovered on a real console. If this spawn
+  // stops inheriting stdin, the open question the note leaves has changed shape and
+  // the note is describing a program that no longer exists.
+  assert.match(
+    read("cli/src/pane.ts"),
+    /stdio: "inherit"/,
+    "cookConsoleModes no longer inherits stdin — the note's open question has moved",
+  );
+});

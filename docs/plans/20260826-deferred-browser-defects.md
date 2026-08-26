@@ -214,13 +214,31 @@ than kept; the lock's absence is the assertion that discriminates.
 
 ### Task 5: [Final] Update documentation
 
-- [ ] record the new `profile.ts` divergence in the re-vendoring checklist in `UPSTREAM.md`
-- [ ] update the Deferred section of
+- [x] record the new `profile.ts` divergence in the re-vendoring checklist in `UPSTREAM.md`
+      — step 3, and written against what the guard *cannot* say: any edit to `alive()`
+      makes the file differ from `45b5e43` again, so the diff can report the divergence
+      lost and never that it came back wrong. The three behaviours that have to survive
+      together are named, with `tools/browser/profile.test.mjs` and
+      `tools/acceptance/profile-lock.test.mjs` as what actually holds them — the
+      understated-scope failure divergence 5 had, pre-empted for divergence 13
+- [x] update the Deferred section of
       `docs/plans/20260822-post-port-corrections.md`: mark the `file://` item as already
-      fixed, and point the two profile items at this plan
-- [ ] note in `docs/design/07-as-built.md` what the `pane-clear` test established, and
+      fixed, and point the two profile items at this plan — done, and the group heading
+      now says the premise held for only one of the two, since `foreground.ts` turned out
+      to be port-added and cost no divergence. The fourth group was checked rather than
+      assumed while there: two of its four bullets were closed by the vendor-check-gap
+      plan and two are still open (`docs.test.mjs:133` still asserts one direction,
+      `blame()` is still duplicated), so it is labelled that way rather than left silent
+      beside three resolved ones
+- [x] note in `docs/design/07-as-built.md` what the `pane-clear` test established, and
       whether the hang is now explained or still open — do not leave the reader guessing
-      which
+      which — a new §4 subsection that says **still open** in bold, gives the two
+      measurements, and separates what the pass rules out (a `cmd.exe` inheriting a pipe
+      with bytes still arriving) from what it cannot touch (the console shape, which
+      needs the unbuilt `tools/conpty-probe` scenario). Pinned by a new test in
+      `tools/docs-check/docs.test.mjs`: the note's whole argument is that a case passes,
+      so the suite and the `describe` title it quotes are held to the file, and the
+      `stdio: "inherit"` handoff it calls uncovered is held to `cli/src/pane.ts`
 
 ## Technical Details
 
