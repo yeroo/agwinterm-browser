@@ -255,4 +255,48 @@ describe("an unrecognised probe failure is loud, not silently either answer", ()
     assert.equal(chosen, profileDir(2));
     assert.equal(warnings.length, 2);
   });
+
+  it("does not let 'treat it as alive' become permanent for a value no pid can take", () => {
+    // The cost of the default above is bounded only if it can be undone. A lock whose
+    // contents are outside int32 is answered by `process.kill` with a `TypeError` and
+    // no errno, so under "unknown means alive" that directory would be warned about
+    // and skipped on *every* launch, forever — worse than upstream's blanket `false`,
+    // which self-healed on the next start. The shape is checked before the probe.
+    existingLock(0, 99999999999);
+    const { chosen, warnings } = claimWith(() => assert.fail("a non-pid was probed"));
+
+    assert.equal(chosen, profileDir(0), "a lock holding no possible pid was never reclaimed");
+    assert.equal(fs.readFileSync(lockPath(0), "utf8"), String(process.pid));
+    assert.deepEqual(warnings, [], "a value that is not a pid is not an unrecognised probe answer");
+  });
+
+  it("reclaims rather than skips a lock naming a negative pid", () => {
+    existingLock(0, -1);
+    const { chosen } = claimWith(() => assert.fail("a non-pid was probed"));
+    assert.equal(chosen, profileDir(0));
+  });
+});
+
+describe("when every numbered profile is taken", () => {
+  it("falls back to a throwaway directory rather than sharing a live one", () => {
+    // The end of the walk, and the change above made strictly more inputs reach it:
+    // EPERM and every unrecognised code now skip where they used to reclaim. The
+    // fallback profile has none of the user's cookies in it, which is the branch's own
+    // headline symptom — so what it does here is pinned rather than left to be found.
+    for (let index = 0; index < 32; index++) existingLock(index, 4242 + index);
+    const { chosen, events } = claimWith(() => {
+      throw errno("EPERM");
+    });
+
+    assert.ok(chosen, "claimProfile set no userData path at all");
+    for (let index = 0; index < 32; index++) {
+      assert.notEqual(chosen, profileDir(index), `profile ${index} was taken from its live owner`);
+      assert.equal(fs.readFileSync(lockPath(index), "utf8"), String(4242 + index));
+    }
+    assert.ok(fs.existsSync(chosen), "the fallback directory was not created");
+    assert.match(path.basename(chosen), /^terminal-browser-/);
+    // No lock in it, which is what `releaseProfileLock` has to be safe against.
+    assert.equal(fs.existsSync(path.join(chosen, "terminal-browser.lock")), false);
+    assert.equal(events.has("will-quit"), false, "a lockless fallback registered an unlock");
+  });
 });

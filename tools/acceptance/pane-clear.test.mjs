@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 import { requireBuilt } from "../lib/built.mjs";
 import { hostOn } from "../lib/control-host.mjs";
-import { onceWithin, teardown, withDeadline } from "../lib/deadline.mjs";
+import { onceWithin, settlesWithin, teardown, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -123,23 +123,6 @@ function alive(pid) {
     return true;
   } catch (error) {
     return error.code === "EPERM";
-  }
-}
-
-/**
- * Resolves once `predicate()` holds, and rejects at the deadline rather than
- * spinning forever.
- *
- * A process a job object is tearing down does not die on the same tick its parent
- * does, so this is a wait on a state with no event behind it. Bounded like every
- * other wait in the tree — `tools/lib/deadline.mjs` is why.
- */
-async function settles(predicate, what, ms = CHILD_MS) {
-  const until = Date.now() + ms;
-  for (;;) {
-    if (predicate()) return;
-    if (Date.now() >= until) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 
@@ -309,7 +292,11 @@ describe("a CLI killed rather than the browser", () => {
     strays.push(browser);
     forceKill(cli.pid); // no /T: whatever dies here dies because the CLI did
     await onceWithin(cli, "exit", "the killed CLI to be reaped", CHILD_MS);
-    await settles(() => !alive(browser), "the browser to go down with the CLI's job object");
+    await settlesWithin(
+      () => !alive(browser),
+      "the browser to go down with the CLI's job object",
+      CHILD_MS,
+    );
     const left = fs.readdirSync(root).filter((name) => name.startsWith(FRAME_DIR_PREFIX));
     assert.equal(left.length, 1, "no frame directory survived, so nothing was left to recover");
     assert.deepEqual(host.lines, [], "something cleared the pane before the recovery verb ran");
@@ -572,8 +559,15 @@ const CONSOLE_RESTORE = `
   // before the cooking child inherits it, rather than arriving only after.
   setTimeout(() => {
     const started = Date.now();
-    const restored = pane.restorePaneConsole({ write() {}, isTTY: true }, process.stdin);
-    process.stdout.write(JSON.stringify({ ...restored, ms: Date.now() - started }) + "\\n");
+    // The stub records rather than discards: \`escapes\` is \`out.isTTY === true\`, so
+    // asserting it against a stub that discards would be asserting the stub's own
+    // literal. What the caller needs to know is that the bytes were written.
+    let wrote = "";
+    const out = { write(chunk) { wrote += chunk; }, isTTY: true };
+    const restored = pane.restorePaneConsole(out, process.stdin);
+    process.stdout.write(
+      JSON.stringify({ ...restored, wrote, ms: Date.now() - started }) + "\\n",
+    );
   }, 300);
 `;
 
@@ -655,6 +649,9 @@ describe("stdin that does not stop while the verb runs", () => {
       assert.equal(report.modes, true, `the cooking child did not run: ${stdout}`);
     }
     assert.equal(report.escapes, true, stdout);
+    // And the escapes actually went out, rather than `escapes` reporting on the
+    // stub's `isTTY` while `write` was never reached.
+    assert.equal(report.wrote, DISABLE_REPORTING, `the restore wrote ${JSON.stringify(report.wrote)}`);
     // `CONSOLE_COOK_TIMEOUT_MS` is 2s, and it is the only bound inside the call. A
     // restore that took longer than this either exceeded that budget or was never
     // held by it — both are the reproduction, and both fail here rather than wedge.

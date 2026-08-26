@@ -102,6 +102,19 @@ platform still does, so nothing changes off Windows.
   made it unnecessary. It works, so (a) needs no new code here; but it means cookies and
   browsing state are per-pane. Chromium locks a profile directory, so this is not a
   choice (a) gets to make differently.
+
+  > **Corrected 2026-08-26.** "Needs no new code here" held for the pool and not for
+  > its lifecycle, and the two defects that cost were both in the lifecycle.
+  > `claimProfile` removes the lock from Electron's `will-quit`, and `app.exit` — how a
+  > foreground browser ordinarily ends — emits no `will-quit`, so the lock outlived
+  > every exit; once Windows reissued the pid the next launch skipped to the next
+  > numbered directory and handed the user a profile with none of their cookies in it,
+  > which reads as being logged out. And the probe deciding "stale" answered every
+  > failure with "dead", including the `EPERM` Windows returns for a live
+  > higher-integrity holder. `releaseProfileLock` (`browser/src/foreground.ts`) now runs
+  > before every `app.exit` in `browser/src`, and `alive()` treats `ESRCH` as the only
+  > "gone" — `docs/design/UPSTREAM.md` divergence 13. Plan:
+  > [`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md).
 - **Nothing else in the tree assumes one process.** The instance registry is already
   per-session, not per-daemon: `Registry` (`browser/src/registry.ts:52-56`) listens on
   a socket named by the session key, and the key is `${process.pid}-${seq}`

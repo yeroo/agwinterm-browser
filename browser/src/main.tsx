@@ -6,7 +6,7 @@ import { app, screen } from "electron";
 
 import { runDaemon } from "./daemon";
 import { entryMode, sessionArgv } from "./entry";
-import { runForeground } from "./foreground";
+import { releaseProfileLock, runForeground } from "./foreground";
 import { LOGS_DIR, ensureDataDir } from "pixel-store";
 import { appLog } from "pixel-react";
 import { claimProfile } from "./profile";
@@ -59,5 +59,10 @@ void (async () => {
   else await runForeground(cdpPort, sessionArgv(argv));
 })().catch((error) => {
   process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  // `claimProfile()` ran above, before either shape was chosen, so a start that
+  // never reached one is still holding a lock — and `app.exit` emits no `will-quit`
+  // to remove it. A browser that failed to start is exactly the process whose lock
+  // nobody goes back for.
+  releaseProfileLock();
   app.exit(1);
 });

@@ -17,6 +17,14 @@
 // cleanup on an exit path can be worse than the leak it replaces — taking someone
 // else's lock, throwing when nothing is owned, and throwing on a second call.
 //
+// One of those pins is deliberately not about this file. `claimProfile()` runs in
+// `main.tsx` *before* the daemon/foreground fork, so the lock is held by every browser
+// process and every `app.exit` anywhere in `browser/src` leaks it — which is how
+// `main.tsx`'s startup-failure catch and `daemon.ts`'s six exits were found still
+// leaking after the two here were fixed. The source scan at the end walks the whole
+// tree for that reason; a guard that reads one file is a guard that says nothing about
+// the next one.
+//
 // `foreground.ts` imports `electron` and the session factory, so it is bundled here
 // with both stubbed, the way `tools/browser/profile.test.mjs` bundles `profile.ts`.
 // `./entry` is import-free and is bundled for real.
@@ -29,6 +37,8 @@ import { after, beforeEach, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import esbuild from "esbuild";
+
+import { settlesWithin } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -84,6 +94,29 @@ async function loadForeground() {
 
 const { releaseProfileLock, runForeground } = await loadForeground();
 
+/**
+ * `FOREGROUND_SIGNALS` from `browser/src/entry.ts`, read rather than re-spelled.
+ *
+ * The list is what `runForeground` registers, so a signal added there has to arrive
+ * in the release coverage below on its own. A copy here would let a fifth signal be
+ * added, pass `tools/process-model/entry.test.mjs` — which pins the list against the
+ * CLI's, not against this file — and never be checked for releasing the lock.
+ */
+async function loadSignals() {
+  const out = path.join(scratch, "entry.mjs");
+  await esbuild.build({
+    entryPoints: [path.join(REPO, "browser/src/entry.ts")],
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    outfile: out,
+    logLevel: "silent",
+  });
+  return (await import(pathToFileURL(out).href)).FOREGROUND_SIGNALS;
+}
+
+const FOREGROUND_SIGNALS = await loadSignals();
+
 /** A fresh `userData` directory per test, standing in for the one `claimProfile` took. */
 let userData;
 let lock;
@@ -114,7 +147,7 @@ async function withApp(dir, body) {
     exit: (code) => exits.push({ code, lockStillThere: fs.existsSync(lock) }),
   };
   try {
-    return { exits, value: await body(exits) };
+    await body(exits);
   } finally {
     delete globalThis.__fgApp;
   }
@@ -154,23 +187,13 @@ async function startForeground() {
   return { ctx, signals };
 }
 
-/** Polls `predicate` until it holds, or fails after `budget` ms. */
-async function until(predicate, budget, what) {
-  const deadline = Date.now() + budget;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  assert.fail(`timed out after ${budget}ms waiting for ${what}`);
-}
-
 describe("a normal foreground exit leaves no lock behind", () => {
   it("releases when the session closes itself", async () => {
     heldBy(process.pid);
     await withApp(userData, async (exits) => {
       const { ctx } = await startForeground();
       ctx.onClose(0);
-      await until(() => exits.length === 1, 1000, "app.exit after onClose");
+      await settlesWithin(() => exits.length === 1, "app.exit after onClose", 1000);
       assert.equal(exits[0].code, 0);
       assert.equal(
         exits[0].lockStillThere,
@@ -181,30 +204,22 @@ describe("a normal foreground exit leaves no lock behind", () => {
     assert.equal(fs.existsSync(lock), false);
   });
 
-  it("releases on the signal route too, not only the session one", async () => {
-    // `foreground.ts` has two `app.exit` sites and they are reached by different
-    // paths. Covering one and calling the leak fixed is how it comes back.
-    heldBy(process.pid);
-    await withApp(userData, async (exits) => {
-      const { signals } = await startForeground();
-      const sigint = signals.get("SIGINT");
-      assert.ok(sigint, "no SIGINT handler was registered");
-      sigint();
-      await until(() => exits.length === 1, 2000, "app.exit after SIGINT");
-      assert.equal(exits[0].code, 130);
-      assert.equal(exits[0].lockStillThere, false, "the signal route still leaks the lock");
-    });
-  });
-
-  it("releases on every signal the foreground shape survives", async () => {
-    for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+  it("releases on every signal the foreground shape survives, with its exit code", async () => {
+    // The other `app.exit` site, reached by a different path. Covering one route and
+    // calling the leak fixed is how it comes back. Driven off `FOREGROUND_SIGNALS`
+    // itself so a signal added to that list is covered here without an edit.
+    assert.ok(FOREGROUND_SIGNALS.length >= 4, "the signal list did not load");
+    for (const [signal, code] of FOREGROUND_SIGNALS) {
       userData = fs.mkdtempSync(path.join(scratch, "userdata-"));
       lock = path.join(userData, LOCK_NAME);
       heldBy(process.pid);
       await withApp(userData, async (exits) => {
         const { signals } = await startForeground();
-        signals.get(signal)();
-        await until(() => exits.length === 1, 2000, `app.exit after ${signal}`);
+        const handler = signals.get(signal);
+        assert.ok(handler, `no ${signal} handler was registered`);
+        handler();
+        await settlesWithin(() => exits.length === 1, `app.exit after ${signal}`, 2000);
+        assert.equal(exits[0].code, code, `${signal} exited with the wrong code`);
         assert.equal(exits[0].lockStillThere, false, `${signal} left the lock behind`);
       });
     }
@@ -270,7 +285,7 @@ describe("the release path cannot itself break an exit", () => {
     await withApp(userData, async (exits) => {
       const { ctx } = await startForeground();
       ctx.onClose(3);
-      await until(() => exits.length === 1, 1000, "app.exit despite a failed release");
+      await settlesWithin(() => exits.length === 1, "app.exit despite a failed release", 1000);
       assert.equal(exits[0].code, 3);
     });
   });
@@ -279,17 +294,36 @@ describe("the release path cannot itself break an exit", () => {
 describe("the wiring, read from the source", () => {
   const foreground = fs.readFileSync(path.join(REPO, "browser/src/foreground.ts"), "utf8");
 
-  it("releases before every app.exit, including any added later", () => {
-    const sites = [...foreground.matchAll(/app\.exit\(/g)];
-    assert.equal(sites.length, 2, "the number of exit sites changed; check each one releases");
-    for (const site of sites) {
-      const before = foreground.slice(0, site.index);
-      assert.match(
-        before.slice(-200),
-        /releaseProfileLock\(\);\s*$/,
-        "an app.exit is reached without releasing the profile lock first",
-      );
+  /** Every `.ts`/`.tsx` under `browser/src`, so a new exit site cannot hide in a new file. */
+  function sources(dir) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return sources(full);
+      return /\.tsx?$/.test(entry.name) ? [full] : [];
+    });
+  }
+
+  it("releases before every app.exit in browser/src, including any added later", () => {
+    // Scanned across the whole tree rather than this one file, because
+    // `claimProfile()` runs in `main.tsx` before the shape is chosen: the lock is
+    // held by *every* browser process, so every `app.exit` in any of them leaks it.
+    // The two sites here were the reachable ones; `main.tsx`'s startup-failure catch
+    // and `daemon.ts`'s six were not, and were found by widening this.
+    let checked = 0;
+    for (const file of sources(path.join(REPO, "browser/src"))) {
+      const text = fs.readFileSync(file, "utf8");
+      for (const site of text.matchAll(/app\.exit\(/g)) {
+        checked += 1;
+        assert.match(
+          text.slice(0, site.index).slice(-200),
+          /releaseProfileLock\(\);\s*$/,
+          `${path.relative(REPO, file)} reaches an app.exit without releasing the profile lock ` +
+            `first (offset ${site.index})`,
+        );
+      }
     }
+    // A scan that found nothing would pass every assertion above it.
+    assert.ok(checked >= 9, `only ${checked} app.exit sites were scanned; the scan lost the tree`);
   });
 
   it("spells the lock the same way the vendored claimProfile does", () => {

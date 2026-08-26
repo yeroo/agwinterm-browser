@@ -239,9 +239,9 @@ user already knows. `cli/src/unsupported.ts` owns the wording and imports nothin
 `scripts/` (`install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh` — POSIX shell,
 and the second fetches the forbidden fork), `herdr-plugin/`, `release-worker/`, `skill/`,
 build output, and upstream's own `README.md`/`AGENTS.md`/`CLAUDE.md`. The full list and
-the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also numbers the twelve deliberate
+the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also numbers the thirteen deliberate
 edits to vendored files that are not the port's own subject matter. Since **2026-08-26**
-each is checked — by a diff against `45b5e43` for the nine the port applied, by content
+each is checked — by a diff against `45b5e43` for the ten the port applied, by content
 for the three the vendoring commit applied and so cannot show a diff — so a re-vendor
 that drops one fails by name. That sentence used to say "six" and used to claim each was
 pinned by a test; it was true of two of the six. See
@@ -384,10 +384,12 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
 
 ## 4. Added after the port shipped
 
-Three things below were not in the port. They are here rather than in the corrections
-plan because this file is what a person running the thing meets, and all three change
-what they meet. The plan is
-[`20260822-post-port-corrections.md`](../plans/20260822-post-port-corrections.md).
+The subsections below were not in the port. They are here rather than in the plans that
+produced them because this file is what a person running the thing meets, and every one
+of them changes what they meet. The plans are
+[`20260822-post-port-corrections.md`](../plans/20260822-post-port-corrections.md),
+[`completed/20260826-vendor-check-gap.md`](../plans/completed/20260826-vendor-check-gap.md)
+and [`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md).
 
 ### `TERMINAL_BROWSER_ALLOW_PIPE` — a dev build refuses an instance it was not named at
 
@@ -624,6 +626,38 @@ check that covers a third of its subject looks exactly like a check that covers 
 — green, fast, and cited in the documentation as proof. It had been passing for five days.
 The question worth carrying forward is which other checks in this repo are trusted because
 they have never failed.
+
+### The profile lock outlived the process, and being logged out was the symptom
+
+`claimProfile()` (`browser/src/profile.ts`) hands each concurrent browser its own
+`userData` directory out of a pool of 32 and writes `terminal-browser.lock` into the one
+it took. It removes that lock from Electron's `will-quit` — and `will-quit` is the one
+event this port's shape never sees, because Electron specifies that `app.exit` terminates
+immediately without emitting it and `app.exit` is how a foreground browser ordinarily
+ends. So the lock survived every normal quit. Days later, once Windows had reissued that
+pid to something living, the next launch read the lock, believed the profile was in use,
+took the next numbered directory, and opened a browser with none of the user's cookies in
+it. What the user sees is being logged out of everything, which names nothing.
+
+Fixed on **2026-08-26** by `releaseProfileLock` (`browser/src/foreground.ts`), which runs
+*before* `app.exit` rather than in a handler that will never run. It removes only a lock
+naming this process — someone else's is their live browser's, and unlinking it would
+invite a third process onto their profile — and it is safe called twice and safe when
+nothing is owned, because a cleanup that throws on an exit path is worse than the leak it
+replaces. The lock is claimed in `main.tsx` *before* the daemon/foreground fork, so every
+`app.exit` in `browser/src` leaks it, not only the two in the foreground shape;
+`tools/browser/foreground.test.mjs` scans the whole tree and fails on an exit site that
+does not release first.
+
+The second half of the same defect is the probe that decides whether a lock is stale.
+Upstream answered every `process.kill(pid, 0)` failure with "dead", which is right where
+it was written and wrong here: `kill(pid, 0)` asks whether a process *can* be signalled,
+and Windows answers `EPERM` for one at a higher integrity level — an elevated browser
+probed by an ordinary one. Reading that as death puts two browsers on one Chromium
+profile. `ESRCH` is now the only "gone", an unrecognised code is warned about and treated
+as alive, and a value that is not a pid at all is reclaimed rather than believed forever.
+That is `UPSTREAM.md` divergence 13, and `store/src/instances.ts` reads the same code the
+same way so that the two liveness verdicts in this tree cannot disagree.
 
 ### The `pane-clear` hang, and what the test written for it established
 

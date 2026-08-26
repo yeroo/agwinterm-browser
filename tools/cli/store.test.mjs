@@ -318,7 +318,22 @@ describe("the pruning rule in the shipped module", () => {
     // `process.kill(pid, 0)` throws EPERM on Windows for a process this one may
     // not signal. Upstream's bare `catch { return false }` would have deleted a
     // running browser's row.
-    assert.match(source, /=== "EPERM"/);
+    //
+    // Spelled as "anything but ESRCH is alive" rather than "EPERM is alive": a probe
+    // that failed some third way is a probe that failed, not a process that is
+    // missing, and the rule that reads it as death is the one that evicts a running
+    // browser from `ls`. `browser/src/profile.ts` reads the same code the same way —
+    // `docs/design/UPSTREAM.md` divergence 13 names this file as its model, and that
+    // is only true while the two agree on the third case as well as the first two.
+    assert.match(source, /!== "ESRCH"/);
+    assert.ok(!/=== "EPERM"/.test(source), "an unrecognised probe failure is death again");
+  });
+
+  it("does not probe a value that is not a pid, which would be alive forever", () => {
+    // `process.kill` answers a non-int32 with a `TypeError` carrying no errno, and
+    // under the rule above that reads as alive — so a bogus row would never be
+    // pruned. The shape is checked before the probe instead.
+    assert.match(source, /Number\.isInteger\(pid\)/);
   });
 
   it("deletes only on a definite absence", () => {

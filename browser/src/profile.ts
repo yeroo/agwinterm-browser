@@ -47,8 +47,16 @@ export function claimProfile() {
  * treated as alive, because the two mistakes are not the same size: refusing a profile
  * that was in fact free costs one numbered directory, and taking one that was not costs
  * the user their session. The warning is what keeps that from being a guess nobody sees.
+ *
+ * The one thing "treat it as alive" must not do is become permanent, and it would for a
+ * value that is not a pid at all: `process.kill` rejects a non-int32 with a `TypeError`
+ * rather than an errno, so a lock reading `99999999999` would be warned about and
+ * skipped on every launch forever, costing a numbered directory each time. Upstream's
+ * blanket `false` at least self-healed there. So the shape of the argument is checked
+ * first — a value no pid can take names no process, and reclaiming it is safe.
  */
 function alive(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fffffff) return false;
   try {
     process.kill(pid, 0);
     return true;

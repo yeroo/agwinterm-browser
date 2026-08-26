@@ -28,7 +28,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 467 Rust tests and 510 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 467 Rust tests and 544 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -262,8 +262,12 @@ apply to lines this port wrote, and that scope is enforced rather than asserted.
 | [`UPSTREAM.md`](docs/design/UPSTREAM.md) | what was vendored, every deliberate divergence, and the re-vendoring checklist |
 
 The plans are [`20260821-windows-port.md`](docs/plans/20260821-windows-port.md), the port itself,
-and [`20260822-post-port-corrections.md`](docs/plans/20260822-post-port-corrections.md), which fixed
-four defects the port shipped with — and ran the review it shipped without.
+[`20260822-post-port-corrections.md`](docs/plans/20260822-post-port-corrections.md), which fixed
+four defects the port shipped with — and ran the review it shipped without,
+[`completed/20260826-vendor-check-gap.md`](docs/plans/completed/20260826-vendor-check-gap.md), which
+widened the vendored-tree guard from one tree to three, and
+[`20260826-deferred-browser-defects.md`](docs/plans/20260826-deferred-browser-defects.md), which
+closed the two Windows profile defects that plan deferred.
 
 ## How this project is built
 

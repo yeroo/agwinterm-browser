@@ -93,6 +93,25 @@ export function onceWithin(emitter, event, what, ms = DEFAULT_DEADLINE_MS) {
 }
 
 /**
+ * Resolves once `predicate()` holds, and rejects at the deadline rather than
+ * spinning forever.
+ *
+ * The wait with no event behind it. A process a job object is tearing down does not
+ * die on the same tick its parent does, and a lock file removed on the way out has
+ * no watcher worth the complexity — so the answer is polled. It belongs here for the
+ * same reason everything else does: every wait in this tree says what it was waiting
+ * for and is bounded, and three suites had each grown their own copy of this loop.
+ */
+export async function settlesWithin(predicate, what, ms = DEFAULT_DEADLINE_MS, every = 25) {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (predicate()) return;
+    if (Date.now() >= until) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, every));
+  }
+}
+
+/**
  * Runs `after`-hook teardown that must happen whether or not the test passed.
  *
  * Each step is awaited independently and its failure reported rather than thrown,

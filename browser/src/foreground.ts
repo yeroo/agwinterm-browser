@@ -44,6 +44,13 @@ const PROFILE_LOCK = "terminal-browser.lock";
  * directory, and gave the user a profile with none of their cookies in it. That
  * reads as being logged out, which is why this is worth a fix and not a note.
  *
+ * Exported, and called from `main.tsx` and `daemon.ts` as well as from here,
+ * because `claimProfile()` runs in `main.tsx` *before* the shape is chosen: every
+ * `app.exit` in this process leaks the lock, not only the two below. It lives in
+ * this file rather than a module of its own because this is the shape that actually
+ * reaches those exits on Windows; `tools/browser/foreground.test.mjs` checks every
+ * exit site in `browser/src` against it, so a new one cannot be added silently.
+ *
  * Three properties, each of which is a way this could be worse than the leak:
  *
  *   - **Only our own lock.** A holder that is not this pid is someone else's live

@@ -18,6 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const ROOT = path.resolve(import.meta.dirname, "..", "..");
 
@@ -548,5 +549,44 @@ test("the as-built note on the pane-clear hang cites a case that is really in th
     read("cli/src/pane.ts"),
     /stdio: "inherit"/,
     "cookConsoleModes no longer inherits stdin — the note's open question has moved",
+  );
+});
+
+/**
+ * The divergence counts the as-built doc states, against the table that decides them.
+ *
+ * `07-as-built.md` is the one place a reader is given the *size* of the divergence set
+ * rather than the set itself, and the sentence carrying it already went stale once —
+ * it says so itself two lines later ("that sentence used to say six"). A count that
+ * reads authoritative and is not is the exact failure this file exists for, and the
+ * numbers are derivable, so they are derived rather than trusted.
+ */
+test("the as-built divergence counts match tools/vendor-check/dispositions.mjs", async () => {
+  const { DIVERGENCES } = await import(
+    pathToFileURL(path.join(ROOT, "tools/vendor-check/dispositions.mjs")).href
+  );
+  const entries = Object.values(DIVERGENCES);
+  const port = entries.filter((one) => one.appliedIn === "port").length;
+  const vendoring = entries.filter((one) => one.appliedIn === "vendoring-commit").length;
+  assert.equal(port + vendoring, entries.length, "a divergence has an appliedIn nobody counts");
+
+  const doc = read("docs/design/07-as-built.md");
+  const words = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+    "eighteen", "nineteen", "twenty",
+  ];
+  const spell = (n) => words[n] ?? String(n);
+  assert.ok(
+    doc.includes(`numbers the ${spell(entries.length)} deliberate`),
+    `the doc does not say there are ${spell(entries.length)} deliberate edits, and there are`,
+  );
+  assert.ok(
+    doc.includes(`for the ${spell(port)} the port applied`),
+    `the doc does not say the port applied ${spell(port)} of them, and it did`,
+  );
+  assert.ok(
+    doc.includes(`for the ${spell(vendoring)} the vendoring commit applied`),
+    `the doc does not say the vendoring commit applied ${spell(vendoring)} of them, and it did`,
   );
 });

@@ -202,16 +202,17 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 ## 6. Tests, lints and coverage
 
 Re-run on **2026-08-26**, after
-[the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md) and its review round.
-The numbers this table carried on 2026-08-21 were 421 / 364+57 / 266 and on 2026-08-25
-the node row was 389 / 90 suites, and leaving either would have made the table a claim
-about a tree that no longer exists.
+[the deferred-browser-defects plan](../plans/20260826-deferred-browser-defects.md) and its review
+round; the run before it was [the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md)'s,
+whose node row was 510 / 112 suites. The numbers this table carried on 2026-08-21 were
+421 / 364+57 / 266 and on 2026-08-25 the node row was 389 / 90 suites, and leaving any of
+them would have made the table a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
 | `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **510 passed**, 112 suites, **0 skipped**, 8.9 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **544 passed**, 123 suites, **0 skipped**, 12.3 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -287,10 +288,13 @@ every one is:
 | | | | `offscreen/present.test.mjs` | 18 |
 | | | | `vendor-check/native-build.test.mjs` | 18 |
 | | | | `vendor-check/upstream-doc.test.mjs` | 15 |
-| | | | the rest | 120 |
+| | | | the rest | 154 |
 
-Re-counted on **2026-08-26**; the node column sums to the 510 above. `vendor-check/`
-is now seven files rather than four: the vendor-check-gap plan derived the scope from
+Re-counted on **2026-08-26**; the node column sums to the 544 above. Three suites in
+the table's "the rest" did not exist at the previous count and are the whole of its
+growth: `browser/foreground.test.mjs` (13), `browser/profile.test.mjs` (12) and
+`acceptance/profile-lock.test.mjs` (4), all from the deferred-browser-defects plan.
+`vendor-check/` is now seven files rather than four: the vendor-check-gap plan derived the scope from
 the vendoring commit, gave every diverged path a disposition, and parsed `UPSTREAM.md`
 against the table that cites it. `native-build.test.mjs`'s three artifact tests are in
 that 18 because they no longer skip — an unbuilt or stale `pixel.node` is a failure now

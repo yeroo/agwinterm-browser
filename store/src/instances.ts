@@ -19,13 +19,21 @@ export async function removeInstance(key: string): Promise<void> {
 }
 
 function alive(pid: number): boolean {
+  // A value no pid can take names no process. Checked before the probe because
+  // `process.kill` answers a non-int32 with a `TypeError` carrying no errno, and
+  // under the rule below that would read as alive and keep a bogus row forever.
+  if (!Number.isInteger(pid) || pid <= 0 || pid > 0x7fffffff) return false;
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
     // EPERM means the process exists and is someone else's — Windows reports it
-    // for processes at a higher integrity level. ESRCH is the only "gone".
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    // for processes at a higher integrity level. ESRCH is the only "gone", and
+    // that is the whole rule: anything else is a probe that failed rather than a
+    // process that is missing, and answering "dead" to it deletes a running
+    // browser's row. `browser/src/profile.ts` reads the same code the same way,
+    // which is what `docs/design/UPSTREAM.md` divergence 13 claims of this file.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 

@@ -5,6 +5,7 @@ import path from "node:path";
 import { app } from "electron";
 
 import { DAEMON_ENDPOINT, endpointStatus, isPipeEndpoint, removeEndpoint } from "pixel-store";
+import { releaseProfileLock } from "./foreground";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
 
@@ -38,6 +39,11 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
   const status = await endpointStatus(DAEMON_ENDPOINT);
   if (status === "alive") {
     process.stderr.write("terminal-browser daemon already running\n");
+    // `claimProfile()` runs in `main.tsx` before the shape is chosen, so this
+    // process already took a numbered profile and wrote a lock into it — including
+    // on this path, where it decided within a line or two not to be a daemon at all.
+    // `app.exit` emits no `will-quit`, the one event upstream removes the lock from.
+    releaseProfileLock();
     app.exit(3);
     return;
   }
@@ -57,7 +63,10 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
   const scheduleIdleExit = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      if (sessions.size === 0) app.exit(0);
+      if (sessions.size === 0) {
+        releaseProfileLock();
+        app.exit(0);
+      }
     }, IDLE_EXIT_MS);
   };
   scheduleIdleExit();
@@ -69,7 +78,10 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
       } catch {}
     }
     sessions.clear();
-    setTimeout(() => app.exit(code), 200);
+    setTimeout(() => {
+      releaseProfileLock();
+      app.exit(code);
+    }, 200);
   };
   process.on("SIGINT", () => stopEverything(130));
   process.on("SIGTERM", () => stopEverything(143));
@@ -101,7 +113,10 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
           if (message.build && message.build !== build) {
             reply({ ok: false, error: "stale" });
             connection.end();
-            if (sessions.size === 0) app.exit(0);
+            if (sessions.size === 0) {
+              releaseProfileLock();
+              app.exit(0);
+            }
             return;
           }
           if (!message.tty) {
@@ -142,7 +157,10 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
         } else if (message.cmd === "shutdown") {
           reply({ ok: true, sessions: sessions.size });
           connection.end();
-          setTimeout(() => app.exit(0), 50);
+          setTimeout(() => {
+            releaseProfileLock();
+            app.exit(0);
+          }, 50);
         }
       }
     });
@@ -158,6 +176,7 @@ export async function runDaemon(cdpPort: number | null): Promise<void> {
   });
   server.on("error", (error) => {
     process.stderr.write(`terminal-browser daemon endpoint error: ${error}\n`);
+    releaseProfileLock();
     app.exit(1);
   });
   server.listen(DAEMON_ENDPOINT);

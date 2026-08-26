@@ -358,12 +358,23 @@ there fails the suite.
     a Chromium profile-lock failure or a concurrent-profile conflict rather than anything
     naming this function.
 
-    So `ESRCH` is the only "gone", which is the model `store/src/instances.ts` already
-    states in this repo two directories away. Any other code is `console.warn`ed and then
-    treated as alive: refusing a profile that was in fact free costs one numbered
-    directory, and taking one that was not costs the user their session, so the two
-    mistakes do not deserve the same default — but neither deserves silence, which is
-    what the warning is for.
+    So `ESRCH` is the only "gone", which is the model `store/src/instances.ts` states in
+    this repo two directories away — that file's own probe was `code === "EPERM"`, right
+    about the pair that matters and wrong about the third case, and was brought to
+    `code !== "ESRCH"` alongside this so the tree cannot hold two liveness verdicts about
+    one pid. (That is a port edit inside an already-diverged port file, not a fourteenth
+    divergence; `instances.ts` has a disposition rather than an entry here.) Any other
+    code is `console.warn`ed and then treated as alive: refusing a profile that was in
+    fact free costs one numbered directory, and taking one that was not costs the user
+    their session, so the two mistakes do not deserve the same default — but neither
+    deserves silence, which is what the warning is for.
+
+    "Treat it as alive" must not be able to become permanent, though, and it would for a
+    holder that is not a pid at all: `process.kill` answers a non-int32 with a
+    `TypeError` carrying no errno, so a lock reading `99999999999` would be warned about
+    and skipped on every launch forever — strictly worse than upstream, whose blanket
+    `false` self-healed. The shape of the value is therefore checked before the probe: a
+    number no pid can take names no process, and reclaiming it is safe.
 
     Windows-specific, and therefore incidental rather than the port's subject: upstream's
     version is correct on the platform it was written for, where a probe that is refused

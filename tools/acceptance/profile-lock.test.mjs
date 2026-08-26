@@ -45,7 +45,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import esbuild from "esbuild";
 
-import { withDeadline } from "../lib/deadline.mjs";
+import { settlesWithin, withDeadline } from "../lib/deadline.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -320,16 +320,6 @@ function stillRunning(pid) {
   }
 }
 
-/** Polls until `predicate` holds, because a process's death has no event here. */
-async function settles(predicate, what, ms = CHILD_MS) {
-  const until = Date.now() + ms;
-  for (;;) {
-    if (predicate()) return;
-    if (Date.now() >= until) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-}
-
 describe("a second browser launched against a live first one", () => {
   it("takes its own profile and leaves the first's lock naming the first", async (t) => {
     const appData = freshAppData(t);
@@ -408,7 +398,7 @@ describe("a stale lock naming a dead pid is still reclaimed", () => {
     assert.equal(choseDir(crashed.out), profileDir(appData, 0));
 
     forceKill(crashed.pid);
-    await settles(() => !stillRunning(crashed.pid), "the crashed holder to die");
+    await settlesWithin(() => !stillRunning(crashed.pid), "the crashed holder to die", CHILD_MS);
     assert.equal(
       fs.existsSync(lockOf(appData, 0)),
       true,
