@@ -116,13 +116,24 @@ function forceKill(pid, { tree = false } = {}) {
   }
 }
 
-/** Whether `pid` is still a process we can see. */
+/**
+ * Whether `pid` is still a process we can see.
+ *
+ * "Anything but ESRCH is alive", the same verdict `browser/src/profile.ts` and
+ * `store/src/instances.ts` reach under divergence 13 — not the older
+ * `code === "EPERM"`, which reads a probe that failed some third way as a process
+ * that is gone. This is the predicate the wait below settles on, so a spurious
+ * "dead" ends the wait early and the assertions after it run against a browser that
+ * is still up. `stillRunning` in `tools/acceptance/profile-lock.test.mjs` spells the
+ * same rule; that suite deliberately asks `tasklist` instead on Windows, because it
+ * is the suite testing the rule and may not wait on it.
+ */
 function alive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return error.code === "EPERM";
+    return error.code !== "ESRCH";
   }
 }
 
