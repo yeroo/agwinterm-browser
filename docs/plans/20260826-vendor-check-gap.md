@@ -215,12 +215,32 @@ it is present. `tools/lib/built.mjs` exists to make both loud and says why: "a s
 sites use it; this file is the outlier, and it guards the artifact this directory exists
 to protect.
 
-- [ ] route the artifact check through `requireBuilt` against `engine/crates/pixel-node/src`
+- [x] route the artifact check through `requireBuilt` against `engine/crates/pixel-node/src`
       so a missing or stale `pixel.node` fails with the build command instead of skipping
-- [ ] check the three degraded tests then run rather than skip
-- [ ] write a test that a stale artifact fails
-- [ ] write a test that a missing artifact fails with the build command in the message
-- [ ] run tests — must pass before Task 6
+- [x] check the three degraded tests then run rather than skip
+- [x] write a test that a stale artifact fails
+- [x] write a test that a missing artifact fails with the build command in the message
+- [x] run tests — must pass before Task 6
+
+**Found while doing it.** The file no longer contains a `skip`, and `node --test`
+reports 14 passed / 0 skipped where it reported 11 / 3. Both failures were then driven
+against the real tree rather than only against fixtures: moving `pixel.node` aside exits
+1 with *"...is missing — this suite tests the built package. Run: corepack pnpm --filter
+pixel-react build:native"*, and `touch`ing `pixel-node/src/lib.rs` exits 1 with *"...is
+older than engine/crates/pixel-node/src — this suite would pass against the previous
+build"*. Two things worth recording:
+
+- **The obvious fix was itself a silent pass.** Calling `requireBuilt` once in the
+  `describe` body — which is how the other three call sites do it, at module scope —
+  prints `not ok 3 - the built napi module` with the right message and then exits **0**:
+  node 22.19.0 counts a throw from a suite callback as neither pass nor fail. `pnpm test`
+  would have stayed green while printing its own failure. The check therefore lives
+  inside each test, where a throw is a failure the exit code knows about. Anything that
+  moves it back up a level re-introduces the bug this task was closing.
+- **`requireBuilt`'s source-root guard is now exercised.** `newestUnder` answers 0 for a
+  directory it cannot read, which would make every staleness comparison pass; a renamed
+  `pixel-node/src` is exactly how this check would go quiet again, so the fixture that
+  deletes the source tree asserts the refusal names the path.
 
 ### Task 6: Verify acceptance criteria
 
