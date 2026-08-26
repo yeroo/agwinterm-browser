@@ -585,7 +585,7 @@ genericisation of `draw_frame` and `draw_pixels`. A re-vendorer working down the
 would have restored the constant, lost the trait and the six tests hanging off it, and had
 nothing tell them so.
 
-The repair is [`20260826-vendor-check-gap.md`](../plans/20260826-vendor-check-gap.md), and
+The repair is [`20260826-vendor-check-gap.md`](../plans/completed/20260826-vendor-check-gap.md), and
 its one design decision is that **the scope is derived, not listed**. `universe.mjs` asks
 `git show --name-only 45b5e43` what was vendored — 239 paths, four declared out with a
 reason each — so every path that commit carried is in scope with nobody to remind. That

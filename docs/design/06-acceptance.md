@@ -202,7 +202,7 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 ## 6. Tests, lints and coverage
 
 Re-run on **2026-08-26**, after
-[the vendor-check-gap plan](../plans/20260826-vendor-check-gap.md) and its review round.
+[the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md) and its review round.
 The numbers this table carried on 2026-08-21 were 421 / 364+57 / 266 and on 2026-08-25
 the node row was 389 / 90 suites, and leaving either would have made the table a claim
 about a tree that no longer exists.
