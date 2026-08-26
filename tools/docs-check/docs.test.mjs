@@ -590,3 +590,42 @@ test("the as-built divergence counts match tools/vendor-check/dispositions.mjs",
     `the doc does not say the vendoring commit applied ${spell(vendoring)} of them, and it did`,
   );
 });
+
+/**
+ * The README's test counts against the acceptance table it links to.
+ *
+ * The README is where a reader meets these numbers first, and it links straight to
+ * `06-acceptance.md` for the run they came from — so the two are one claim made twice,
+ * and the copy nothing checks is the one that goes stale. It did: the node row was
+ * re-derived to 546 in the acceptance table while the README kept saying 544, in the
+ * same branch, because the table has a suite that counts it and the README had nothing.
+ *
+ * This holds the two to each other rather than to a run of the suite. Re-running the
+ * tests here to compare would be circular — the count would be of a process that is
+ * this file's own caller — and the acceptance table is already the place where a
+ * measured number is recorded against a date. The check a reader needs is only that
+ * the front page repeats it correctly.
+ */
+test("the README's test counts match the acceptance table it cites", () => {
+  const readme = read("README.md");
+  const table = read("docs/design/06-acceptance.md");
+
+  const claimed = readme.match(/(\d+) Rust tests and (\d+) node tests/);
+  assert.ok(claimed, "the README no longer states its Rust and node test counts");
+
+  const rust = table.match(/`cargo nextest run --workspace` \| \*\*(\d+) passed\*\*/);
+  assert.ok(rust, "the acceptance table no longer records a nextest count for the README to match");
+  assert.equal(
+    claimed[1],
+    rust[1],
+    `the README says ${claimed[1]} Rust tests and the acceptance table says ${rust[1]}`,
+  );
+
+  const node = table.match(/`node --test "tools\/\*\/\*\.test\.mjs"` \| \*\*(\d+) passed\*\*/);
+  assert.ok(node, "the acceptance table no longer records a node count for the README to match");
+  assert.equal(
+    claimed[2],
+    node[1],
+    `the README says ${claimed[2]} node tests and the acceptance table says ${node[1]}`,
+  );
+});
