@@ -606,7 +606,7 @@ Deriving the *trees* from that same commit needed one declaration on top, and le
 made the untracked check a repo-wide nag for a review round. `45b5e43` did two jobs — it
 imported upstream and it laid down this repo's scaffolding — so `tools/` and `docs/design/`
 qualified as directories the commit put vendored files in, though `UPSTREAM.md`'s "What was
-copied" lists neither. Every tool and design note written since, 78 of them including the
+copied" lists neither. Every tool and design note written since, 66 of them including the
 four files of this change, was an untracked-file failure until it was staged. `EXCLUSIONS`
 could not repair it: those paths belong in the universe and must stay byte-identical, so
 declaring them out would have traded a false finding for a real hole in the diff.

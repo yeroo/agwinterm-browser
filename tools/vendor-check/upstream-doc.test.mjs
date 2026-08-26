@@ -136,7 +136,18 @@ describe("the UPSTREAM.md divergence list", () => {
     // applied shows up as a diff against the baseline. An edit the *vendoring commit*
     // applied cannot — it is the baseline — so the only honest check is the content.
     for (const { number, path: file } of entries()) {
-      if (DIVERGENCES[number].appliedIn === "port") {
+      // Named rather than dereferenced twice, because the drift this file exists to
+      // catch — a numbered entry in the document with no row in the table — would
+      // otherwise land here as `Cannot read properties of undefined`, in a suite whose
+      // whole product is a failure that names the path and the fix.
+      const entry = DIVERGENCES[number];
+      assert.ok(
+        entry,
+        `${DOC} numbers divergence ${number} (${file}) and DIVERGENCES in ` +
+          `tools/vendor-check/dispositions.mjs has no such entry. Add the row or drop ` +
+          `the entry — a number the table cannot resolve is a reference to nothing.`,
+      );
+      if (entry.appliedIn === "port") {
         assert.ok(
           SURVEY.changed.includes(file),
           `divergence ${number} says ${file} was edited, and it does not differ from ` +
@@ -146,7 +157,7 @@ describe("the UPSTREAM.md divergence list", () => {
       } else {
         assert.ok(
           divergenceEvidenceHolds(number),
-          `divergence ${number} claims ${DIVERGENCES[number].what} of ${file}, and the ` +
+          `divergence ${number} claims ${entry.what} of ${file}, and the ` +
             `file does not show it`,
         );
       }

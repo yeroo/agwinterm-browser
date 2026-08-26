@@ -290,7 +290,7 @@ every one is:
 | | | | the rest | 120 |
 
 Re-counted on **2026-08-26**; the node column sums to the 504 above. `vendor-check/`
-is now five suites rather than one: the vendor-check-gap plan derived the scope from
+is now seven files rather than four: the vendor-check-gap plan derived the scope from
 the vendoring commit, gave every diverged path a disposition, and parsed `UPSTREAM.md`
 against the table that cites it. `native-build.test.mjs`'s three artifact tests are in
 that 14 because they no longer skip — an unbuilt or stale `pixel.node` is a failure now

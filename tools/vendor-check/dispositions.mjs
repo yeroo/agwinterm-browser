@@ -539,8 +539,13 @@ export function readRepoFile(relative) {
  * produced no Electron binary.
  */
 export function divergenceEvidenceHolds(number, read = readRepoFile) {
+  // `hasOwn` rather than a bare read for the reason every other table lookup in this
+  // module uses it: `DIVERGENCES.constructor` is truthy, so a bare read answers for a
+  // key nobody declared and the caller gets the wrong error about a real-looking entry.
+  if (!Object.hasOwn(DIVERGENCES, number)) {
+    throw new Error(`there is no divergence ${number} in UPSTREAM.md`);
+  }
   const entry = DIVERGENCES[number];
-  if (!entry) throw new Error(`there is no divergence ${number} in UPSTREAM.md`);
   if (entry.appliedIn !== "vendoring-commit") {
     throw new Error(
       `divergence ${number} (${entry.path}) is applied by the port, so it is checked by ` +

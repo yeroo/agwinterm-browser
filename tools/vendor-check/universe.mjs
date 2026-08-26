@@ -100,12 +100,13 @@ export const EXCLUSIONS = Object.freeze({
  * `tools` and `docs/design` are trees upstream code arrives in. `UPSTREAM.md`'s "What
  * was copied" says otherwise in as many words: upstream gave `engine/`, `browser/`,
  * `cli/`, `store/`, `terminals/`, `assets/` and four root files, and nothing else.
- * 78 paths this port has since committed sit under these two roots — every tool in
- * `tools/`, every design note, and the four files of this very change — and each was
- * an untracked-file failure for as long as it took to write. That is the
- * guard-gets-silenced pressure the `docs/plans` note below already names, at eight
- * times the size, and a guard that fails on ordinary work teaches people to stop
- * reading it.
+ * 66 paths this port has since committed sit under these two roots as of 2026-08-26 —
+ * every tool in `tools/`, every design note, and the files of this very change — and
+ * each was an untracked-file failure for as long as it took to write. The count is
+ * dated rather than asserted because it grows with every note this port writes, which
+ * is itself the point: that is the guard-gets-silenced pressure the `docs/plans`
+ * exclusion already names, over a whole tree rather than one file, and a guard that
+ * fails on ordinary work teaches people to stop reading it.
  *
  * A root here buys no exemption from anything else: `tools/vendor-check/digest.py`
  * is still in the universe, still diffed, and still has to carry a disposition the
@@ -273,7 +274,7 @@ export function classify(candidate) {
  * The vendoring commit laid down this repo's scaffolding as well as upstream's trees,
  * so `tools` and `docs/design` qualify on the first rule with no upstream file
  * anywhere in them — and the same pressure that took out `docs/plans` applies to every
- * tool and design note this port has written since, 78 of them. The exclusion rule
+ * tool and design note this port has written since, 66 of them. The exclusion rule
  * above cannot reach that case: those paths are in the universe on purpose and must
  * stay byte-identical, so declaring them out would trade a false untracked finding for
  * a real hole in the diff.
