@@ -29,8 +29,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { DIVERGENCES, INCIDENTAL, divergenceEvidenceHolds, readRepoFile } from "./dispositions.mjs";
-import { BASELINE, surveyVendored, vendoringCommitPaths } from "./universe.mjs";
+import {
+  DIVERGENCES,
+  INCIDENTAL,
+  deletedMessage,
+  divergenceEvidenceHolds,
+  readRepoFile,
+  staleMessage,
+  unclassifiedMessage,
+  untrackedMessage,
+} from "./dispositions.mjs";
+import { BASELINE, surveyVendored, vendoredUniverse, vendoringCommitPaths } from "./universe.mjs";
 
 const DOC = "docs/design/UPSTREAM.md";
 const SURVEY = surveyVendored();
@@ -193,5 +202,124 @@ describe("the divergence-list preamble", () => {
 
   it("says a deleted vendored file fails, which is the failure a diff cannot see", () => {
     assert.match(section, /\*deleted\* fails/);
+  });
+});
+
+/**
+ * The checklist section: everything from its heading to the end of the file.
+ *
+ * It is the part of this document that is *used* rather than read — someone works down
+ * it with upstream freshly copied over the tree — so the things it can get wrong are
+ * operational, not editorial. It can quote a failure the suite cannot produce, name a
+ * script that does not exist, or state a count that has moved. All three read as a
+ * correct checklist right up until someone follows it.
+ */
+function checklistSection(text = readRepoFile(DOC).replace(/\r\n/g, "\n")) {
+  const start = text.indexOf("## Re-vendoring checklist");
+  assert.notEqual(start, -1, `${DOC} has no re-vendoring checklist`);
+  return text.slice(start);
+}
+
+/** `*…quoted failure text*`, as the checklist's failure table writes it. */
+function quotedFailures(section = checklistSection()) {
+  return [...section.matchAll(/\*…([^*]+)\*/g)].map((match) => match[1].trim());
+}
+
+describe("the re-vendoring checklist", () => {
+  const section = checklistSection();
+
+  it("quotes failure text the guard can really produce", () => {
+    // The table tells a re-vendorer to match what the suite printed against a row. A
+    // quote that no message builder produces sends them looking for a row that will
+    // never appear — and it fails silently, because the checklist is only read while
+    // something is already broken. Every quote is held to the real message text.
+    const real = [
+      deletedMessage("PATH"),
+      unclassifiedMessage("PATH"),
+      untrackedMessage("PATH"),
+      staleMessage("PATH"),
+    ]
+      .join("\n")
+      .replace(/\s+/g, " ");
+
+    const quotes = quotedFailures(section);
+    assert.ok(quotes.length >= 4, "the failure table has lost its quoted messages");
+    for (const quote of quotes) {
+      assert.ok(
+        real.includes(quote.replace(/`/g, "").replace(/\s+/g, " ")),
+        `the checklist quotes "…${quote}" and nothing in dispositions.mjs says it. A ` +
+          `row nobody can match is worse than no row: it is read while something is ` +
+          `already wrong.`,
+      );
+    }
+  });
+
+  it("names scripts that exist, in the packages that define them", () => {
+    // Step 5 exists because `native-build.test.mjs` stopped skipping: a re-vendor makes
+    // every source file newer than the last build, so an unbuilt artifact now fails.
+    // A checklist that names the wrong command there hands the reader a failure with no
+    // way out of it.
+    for (const [manifest, script] of [
+      ["package.json", "test"],
+      ["engine/packages/pixel-react/package.json", "build:native"],
+    ]) {
+      assert.ok(
+        section.includes(script),
+        `the checklist does not tell a re-vendorer to run ${script}`,
+      );
+      assert.ok(
+        JSON.parse(readRepoFile(manifest)).scripts?.[script],
+        `the checklist names \`${script}\` and ${manifest} does not define it`,
+      );
+    }
+  });
+
+  it("names the files a re-vendorer has to edit, and they are there", () => {
+    for (const file of [
+      "tools/vendor-check/dispositions.mjs",
+      "tools/vendor-check/universe.mjs",
+    ]) {
+      assert.ok(section.includes(file), `the checklist does not name ${file}`);
+      assert.doesNotThrow(
+        () => readRepoFile(file),
+        `the checklist sends a re-vendorer to ${file}, which is not there`,
+      );
+    }
+  });
+});
+
+describe("what the docs claim the guard covers", () => {
+  // Two documents state the size of the vendored universe in prose — the preamble here
+  // and the Tests section of the README. Both are the kind of number that is right when
+  // written and wrong after the next vendoring commit, and a stale one overstates
+  // coverage in exactly the direction this plan existed to correct.
+  const counts = { commit: vendoringCommitPaths().length, universe: vendoredUniverse().length };
+
+  it("states the path count the vendoring commit really has", () => {
+    for (const doc of [DOC, "README.md"]) {
+      const text = readRepoFile(doc).replace(/\r\n/g, "\n");
+      const stated = [...text.matchAll(/(\d+) paths/g)].map((match) => Number(match[1]));
+      assert.ok(stated.length > 0, `${doc} no longer says how many paths are in scope`);
+      for (const number of stated) {
+        assert.equal(
+          number,
+          counts.commit,
+          `${doc} says ${number} paths where ${BASELINE} introduced ${counts.commit}. ` +
+            `A count written once and never re-derived is how a coverage claim goes ` +
+            `stale without anyone editing it.`,
+        );
+      }
+    }
+  });
+
+  it("states the guarded count left after the declared exclusions", () => {
+    const text = readRepoFile(DOC).replace(/\r\n/g, "\n");
+    const match = text.match(/remaining (\d+)/);
+    assert.ok(match, `${DOC} no longer says how many paths are left after EXCLUSIONS`);
+    assert.equal(
+      Number(match[1]),
+      counts.universe,
+      `${DOC} says ${match[1]} guarded paths and vendoredUniverse() has ${counts.universe}`,
+    );
   });
 });

@@ -554,3 +554,46 @@ The gap is recorded here rather than quietly closed because the failure mode is 
 interesting part. **A review that could not start was indistinguishable from a review
 that found nothing.** Anything downstream of an external tool needs to fail loudly when
 the tool does not run, or its absence reads as a pass.
+
+### The guard that covered one tree of three
+
+The same shape again, found by the review above. `tools/vendor-check/` exists to catch a
+silent edit to vendored upstream code, and until **2026-08-26** it did that for
+`engine/crates/pixel-core/src` and nowhere else: `unchanged.test.mjs` opened with
+`const SRC = "engine/crates/pixel-core/src"` and diffed the 46 paths named in
+`pixel-core-files.json`. `engine/crates/pixel-node/src` and `engine/packages/pixel-react`
+are vendored upstream trees too, and neither had a baseline check of any kind. Four files
+in them differed from the baseline, plus both edited `Cargo.toml`s. An edit there — or a
+re-vendor that dropped one — passed `pnpm test` in silence.
+
+**[`UPSTREAM.md`](UPSTREAM.md) said otherwise, in two sentences.** That the divergence list
+was "everything else, so the claim 'the other 43 files are untouched' stays checkable", and
+that each divergence "is asserted by a test in `tools/vendor-check/`, so a re-vendor that
+drops one fails loudly rather than at the Task 10 milestone". The second was true of two of
+the six entries. Both sentences are gone; the section now says which trees are guarded and
+where the scope comes from, and `upstream-doc.test.mjs` pins the retired claim by its own
+words so it cannot be copied forward from an old revision.
+
+Worse than the coverage gap was a recorded divergence whose recorded scope was wrong.
+Divergence 5 described `pixel-node/src/lib.rs` as "one line — `WATCH_RESIZE = cfg!(windows)`"
+against a diff of 237 insertions: the `SurfaceSink` trait, its `impl` for `Engine`, and the
+genericisation of `draw_frame` and `draw_pixels`. A re-vendorer working down the checklist
+would have restored the constant, lost the trait and the six tests hanging off it, and had
+nothing tell them so.
+
+The repair is [`20260826-vendor-check-gap.md`](../plans/20260826-vendor-check-gap.md), and
+its one design decision is that **the scope is derived, not listed**. `universe.mjs` asks
+`git show --name-only 45b5e43` what was vendored — 239 paths, four declared out with a
+reason each — so a newly vendored file is in scope the moment it is committed. A per-tree
+manifest was the first option and was rejected for reproducing the defect: the scope would
+still have been whatever someone remembered to write down. Everything that differs now
+carries a disposition in `dispositions.mjs`, deletions are caught, and an untracked file in
+a vendored tree is caught — that last one found by hand-testing the finished guard, which
+was still at 472/472 with an intruder sitting in each tree, because every check it had asked
+a question about a path the vendoring commit introduced.
+
+The gap is recorded here rather than quietly closed for the reason the revmux gap is. **A
+check that covers a third of its subject looks exactly like a check that covers all of it**
+— green, fast, and cited in the documentation as proof. It had been passing for five days.
+The question worth carrying forward is which other checks in this repo are trusted because
+they have never failed.

@@ -227,6 +227,19 @@ python tools/vendor-check/fmt-scope.py
 python tools/vendor-check/clippy-scope.py
 ```
 
+`tools/vendor-check/` is the suite that keeps this port honest about upstream. It takes its
+scope from the vendoring commit rather than from a checked-in list: the 239 paths `45b5e43`
+introduced, minus four declared exclusions, diffed against that commit on every run. So all
+three vendored trees are covered — `pixel-core`, `pixel-node` and `pixel-react` — along with
+`browser/`, `cli/`, `store/`, `terminals/` and the manifests, and a newly vendored file is in
+scope the moment it is committed. A path that differs must be the port's own subject matter,
+a numbered divergence in [`UPSTREAM.md`](docs/design/UPSTREAM.md), or a declared exclusion;
+anything else fails by name. Three failures a diff cannot show are checked separately: a
+vendored file that was **deleted**, an **untracked** file sitting inside a vendored tree, and
+a `native/pixel.node` that is missing or **older than its source**. Until 2026-08-26 the guard
+covered `pixel-core/src` and nothing else — see
+[`07-as-built.md`](docs/design/07-as-built.md#the-guard-that-covered-one-tree-of-three).
+
 The two `*-scope.py` scripts run `cargo fmt --check` and `cargo clippy` for real and then
 `git blame` every complaint against the vendoring commit. The vendored tree does not pass either
 check and reformatting it would be exactly the silent edit this project forbids — so the checks

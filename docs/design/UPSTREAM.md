@@ -340,11 +340,47 @@ there fails the suite.
 
 ## Re-vendoring checklist
 
-1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update this file.
+The guard is what makes this cheap, so the checklist is written around it rather than
+around this document. Work down the numbered divergences by hand — nothing can re-apply
+them for you — and then let `pnpm test` tell you what you missed. **The suite is the
+completeness check; this list is not.**
+
+1. Refresh `.reference/terminal-browser/`, re-run `digest.py`, update the Source table
+   above. A hash that moved is the only notice you get that upstream did.
 2. Copy per "What was copied"; do not copy per "What was deliberately not copied".
-3. Re-apply every divergence listed above.
-4. `pnpm install` and confirm `browser/node_modules/electron/dist/electron.exe`.
-5. `pnpm test` — the vendor-check suite fails if the `pixel-core` inventory drifted
-   or a new unix-bound module appeared.
-6. Re-run the disposition pass in `docs/design/01-baseline-errors.md` if the
-   inventory test reports additions.
+3. Re-apply every divergence numbered above. Divergences 1-3 are the ones a fresh copy
+   silently undoes without breaking a build: `browser/package.json`'s `postinstall`,
+   `pnpm-workspace.yaml`'s `onlyBuiltDependencies`, and the root `test` script.
+4. `corepack pnpm install`, then confirm `browser/node_modules/electron/dist/electron.exe`
+   exists. Divergence 1 is the reason it does; an install that succeeds and produces no
+   binary is what its absence looks like.
+5. `corepack pnpm --filter pixel-react build:native`, so `native/pixel.node` is newer
+   than `engine/crates/pixel-node/src`. `native-build.test.mjs` refuses a missing *or*
+   stale artifact rather than skipping, and a re-vendor makes every source file newer
+   than the last build by definition.
+6. `corepack pnpm test`. Every failure below names the path and what to do about it, so
+   read them as a worklist rather than as a verdict:
+
+   | what it says | what happened |
+   |---|---|
+   | *…no longer differs from 45b5e43* | a divergence you did not re-apply. The `expected` roster in the same output is the whole re-apply list, one line per path, with its reason |
+   | *…was vendored by 45b5e43 and is not in the working tree* | the copy dropped a file. No diff can show this one, which is why it is checked separately |
+   | *…is inside a vendored tree and git does not track it* | upstream added a module. Commit it — and give it a disposition — or name it in `.gitignore`. Both are decisions on the record; leaving it is not |
+   | *…differs from 45b5e43 and has no disposition* | a path that differs and is neither subject matter nor a numbered divergence. The message names the three choices |
+   | the `pixel-core` inventory drifted, or a new unix-bound module appeared | `inventory.test.mjs`; re-run the disposition pass in [`01-baseline-errors.md`](01-baseline-errors.md) |
+
+7. For anything upstream genuinely changed, edit `tools/vendor-check/dispositions.mjs`
+   as well as this file: `SUBJECT` for the port's own work, `INCIDENTAL` for an edit
+   that is not, keyed by path. A new incidental divergence needs a numbered entry here
+   too — `upstream-doc.test.mjs` parses this document and holds the numbering to
+   `DIVERGENCES`, so the two cannot drift apart quietly.
+8. `cd engine; cargo nextest run --workspace`, then
+   `python tools/vendor-check/fmt-scope.py` and `clippy-scope.py`. Both scope their
+   complaints to lines this port wrote by blaming against `45b5e43`, so a re-vendor
+   that moves upstream lines around moves what they ignore, automatically.
+
+**If the baseline commit itself is replaced** — a re-vendor committed as a new "vendor
+upstream" commit rather than as edits on top of `45b5e43` — then `BASELINE` in
+`tools/vendor-check/universe.mjs` moves with it, and every disposition and divergence
+whose edit is now *in* that commit stops having a diff to show. That is a rewrite of
+the table, not a maintenance edit, and the suite will say so path by path.

@@ -294,11 +294,37 @@ Final gate: `node --test` 480 passed / 0 failed / 0 skipped, `cargo nextest run
 
 ### Task 7: [Final] Update documentation
 
-- [ ] document the re-vendoring checklist against the new guard in `UPSTREAM.md`
-- [ ] note in the Tests section of `README.md` what the vendor-check suite now covers
-- [ ] record in `docs/design/07-as-built.md` that the guard covered one of three vendored
+- [x] document the re-vendoring checklist against the new guard in `UPSTREAM.md`
+- [x] note in the Tests section of `README.md` what the vendor-check suite now covers
+- [x] record in `docs/design/07-as-built.md` that the guard covered one of three vendored
       trees from the port until this plan, and that `UPSTREAM.md` claimed otherwise — the
       gap is part of the record, the same way the missing revmux review was
+
+**Found while doing it.** The checklist was the last place the old scope survived: step 5
+still said the suite "fails if the `pixel-core` inventory drifted or a new unix-bound
+module appeared", which was the whole of what it did and is now the smallest part. It is
+eight steps against the derived guard, and the failure table quotes the message builders
+in `dispositions.mjs` verbatim so a re-vendorer can match what the suite printed against a
+row. Three things worth recording:
+
+- **The quotes are checked against the real messages.** A table row nobody can match is
+  worse than no row, because it is only ever read while something is already broken.
+  `upstream-doc.test.mjs` pulls every `*…quoted*` fragment out of the section and requires
+  it in the output of `deletedMessage`, `unclassifiedMessage`, `untrackedMessage` or
+  `staleMessage`; a fabricated row fails by name, which is what a mutation of that row
+  confirmed.
+- **The prose counts are derived too.** Both this document and `README.md` state the size
+  of the vendored universe — 239 paths, 235 after exclusions — and those are exactly the
+  numbers that stay written while the tree moves underneath them. They are now asserted
+  against `vendoringCommitPaths()` and `vendoredUniverse()`, so the next vendoring commit
+  makes a stale coverage claim fail rather than merely be wrong.
+- **Two new steps exist because of what earlier tasks changed.** Step 5 tells the reader
+  to build `native/pixel.node` before running the suite, since Task 5 made a stale
+  artifact a failure and a re-vendor makes every source file newer than the last build by
+  definition. And the closing note says what happens if the *baseline commit itself* is
+  replaced: `BASELINE` moves, and every disposition whose edit is now inside that commit
+  stops having a diff to show. That is a rewrite of the table, and it is better said here
+  than discovered.
 
 ## Technical Details
 
