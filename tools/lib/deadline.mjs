@@ -100,14 +100,28 @@ export function onceWithin(emitter, event, what, ms = DEFAULT_DEADLINE_MS) {
  * die on the same tick its parent does, and a lock file removed on the way out has
  * no watcher worth the complexity — so the answer is polled. It belongs here for the
  * same reason everything else does: every wait in this tree says what it was waiting
- * for and is bounded, and three suites had each grown their own copy of this loop.
+ * for and is bounded.
+ *
+ * The predicate runs before the first sleep, which is what guarantees it is consulted
+ * at all: without it, an `ms` shorter than the caller's own setup rejects on the
+ * `left <= 0` check having never once asked the question. Most callers here are waiting
+ * on something at least a turn of the loop away and answer false the first time; the
+ * one that can already hold — `!stillRunning(pid)` after a synchronous `taskkill /F` —
+ * then costs no `every` at all. After that each sleep is capped to the time left,
+ * because an uncapped `every` overruns the deadline in both directions: with
+ * `ms = 50, every = 100` a never-settling predicate used to reject at ~100ms, and one
+ * that only became true at 75ms was *accepted* at ~100ms — a wait silently honouring a
+ * bound it had already missed. Capped, the last poll lands on the deadline and neither
+ * happens.
  */
 export async function settlesWithin(predicate, what, ms = DEFAULT_DEADLINE_MS, every = 25) {
   const until = Date.now() + ms;
+  if (predicate()) return;
   for (;;) {
+    const left = until - Date.now();
+    if (left <= 0) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, Math.min(every, left)));
     if (predicate()) return;
-    if (Date.now() >= until) throw new Error(`timed out after ${ms}ms waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, every));
   }
 }
 

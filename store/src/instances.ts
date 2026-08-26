@@ -31,8 +31,12 @@ function alive(pid: number): boolean {
     // for processes at a higher integrity level. ESRCH is the only "gone", and
     // that is the whole rule: anything else is a probe that failed rather than a
     // process that is missing, and answering "dead" to it deletes a running
-    // browser's row. `browser/src/profile.ts` reads the same code the same way,
-    // which is what `docs/design/UPSTREAM.md` divergence 13 claims of this file.
+    // browser's row. `browser/src/profile.ts` reaches the same verdict from the same
+    // code, which is what `docs/design/UPSTREAM.md` divergence 13 claims of this file.
+    // It also warns on an unrecognised one and this does not, deliberately: there the
+    // probe runs once per launch and decides which profile the user gets, here it runs
+    // once per row on every `ls`, and a per-row warning on a repeated listing is the
+    // kind of noise that stops being read.
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }

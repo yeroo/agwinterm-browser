@@ -23,6 +23,7 @@ import {
   closeServer,
   listen,
   onceWithin,
+  settlesWithin,
   teardown,
   withDeadline,
 } from "./deadline.mjs";
@@ -176,6 +177,57 @@ describe("waiting on one event", () => {
       /timed out after 50ms waiting for a host that answers/,
     );
     idle.destroy();
+  });
+});
+
+describe("a polled wait with no event behind it", () => {
+  it("fails on the deadline rather than spinning forever", async () => {
+    // The same regression as `withDeadline`'s, one file over. `settlesWithin` is
+    // now the only bound on five waits across three suites — move or drop the
+    // deadline check inside its loop and every one of them spins until
+    // `--test-timeout` reports "this file ran out of time" two minutes later,
+    // instead of naming the thing that never settled.
+    await assert.rejects(
+      () => settlesWithin(() => false, "a process that will not die", 50, 5),
+      /timed out after 50ms waiting for a process that will not die/,
+    );
+  });
+
+  it("returns as soon as the predicate holds", async () => {
+    // The other half: a wait that polls too lazily to notice is a wait that only
+    // ever reports its deadline.
+    let calls = 0;
+    await settlesWithin(() => ++calls >= 3, "the third poll", 1000, 1);
+    assert.equal(calls, 3);
+  });
+
+  it("does not poll again once it has settled", async () => {
+    // Checked before the first sleep, so a predicate that is already true costs no
+    // `every` — and, more importantly, is consulted at all however short `ms` is.
+    // The elapsed assertion is the half that matters: move the check to after the
+    // `await` and `calls` is still 1, but this test sleeps the full ten seconds, a
+    // stall the 120s `--test-timeout` is too far away to report. `every` is given as
+    // the deadline rather than under it precisely so the sleep cap cannot shorten
+    // that regression into a boundary-exact pass; the wait that turned into a slow
+    // pass instead of a named failure is the reason this file exists.
+    let calls = 0;
+    const started = Date.now();
+    await settlesWithin(() => (++calls, true), "something already done", 10_000, 10_000);
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - started < 1000, "the predicate was checked after the first sleep");
+  });
+
+  it("does not let a lazy poll interval outlive the deadline", async () => {
+    // `every` larger than `ms` used to mean the first sleep ran past `until` and the
+    // predicate was consulted on the far side of it: a wait that rejected late, and
+    // worse, one that accepted a condition reached after the bound it promised. Each
+    // sleep is capped to the time left, so the deadline holds whatever `every` says.
+    const started = Date.now();
+    await assert.rejects(
+      () => settlesWithin(() => false, "a poll interval longer than the wait", 50, 10_000),
+      /timed out after 50ms waiting for a poll interval longer than the wait/,
+    );
+    assert.ok(Date.now() - started < 1000, "the sleep was not capped to the remaining deadline");
   });
 });
 

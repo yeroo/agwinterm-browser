@@ -144,12 +144,23 @@ async function withApp(dir, body) {
       if (dir === null) throw new Error("no userData path yet");
       return dir;
     },
-    exit: (code) => exits.push({ code, lockStillThere: fs.existsSync(lock) }),
+    // Only the first is recorded, because `app.exit` *terminates* — nothing already
+    // scheduled behind it ever runs. On the signal route both exit callbacks are in
+    // flight at once (`onClose`'s `setImmediate` and `stop`'s 200 ms fallback timer),
+    // and a stub that recorded both would be asserting on a callback the real process
+    // never reaches. That the second one is harmless when it *does* run is the
+    // separate claim, pinned by the double-release test below.
+    exit: (code) => {
+      if (exits.length === 0) exits.push({ code, lockStillThere: fs.existsSync(lock) });
+    },
   };
   try {
     await body(exits);
   } finally {
-    delete globalThis.__fgApp;
+    // Left dead rather than deleted: `stop`'s fallback timer can outlive the body it
+    // was scheduled from, and a bundle whose `app` had vanished would fail the run
+    // with a `TypeError` from a timer instead of modelling the process being gone.
+    globalThis.__fgApp = { getPath: () => dir, exit: () => {} };
   }
 }
 
@@ -173,9 +184,20 @@ async function startForeground() {
     }
     return realOn.call(process, event, handler);
   };
+  // `close` forwards to `onClose` because that is what the real handle does:
+  // `createSession` returns `close: (code) => session.shutdown(code)`
+  // (`browser/src/session/session.tsx:72`) and `shutdown` ends by calling
+  // `this.ctx.onClose(code)` synchronously (:529). A stub that swallowed `close`
+  // would send the signal tests down `stop`'s fallback timer instead of the route a
+  // real signal exit takes, leaving the coupling the "Safe twice" note in
+  // `foreground.ts` argues from unpinned here.
   globalThis.__fgSession = (given) => {
     ctx = given;
-    return { ready: Promise.resolve(), close: () => {}, nudgeResize: () => {} };
+    return {
+      ready: Promise.resolve(),
+      close: (code = 0) => given.onClose(code),
+      nudgeResize: () => {},
+    };
   };
   try {
     await runForeground(null, []);
@@ -193,6 +215,12 @@ describe("a normal foreground exit leaves no lock behind", () => {
     await withApp(userData, async (exits) => {
       const { ctx } = await startForeground();
       ctx.onClose(0);
+      // Not on this tick, and that is the whole point of the `setImmediate`:
+      // `Session.shutdown` has just queued `Registry.dispose`'s delete through the
+      // store's async proxy, and an `app.exit` before that microtask drains leaves an
+      // `instances` row naming a pid Windows will reissue. Asserting the deferral is
+      // the only way that stays pinned — every assertion below it holds either way.
+      assert.equal(exits.length, 0, "app.exit ran in the same tick as the shutdown");
       await settlesWithin(() => exits.length === 1, "app.exit after onClose", 1000);
       assert.equal(exits[0].code, 0);
       assert.equal(
@@ -218,6 +246,7 @@ describe("a normal foreground exit leaves no lock behind", () => {
         const handler = signals.get(signal);
         assert.ok(handler, `no ${signal} handler was registered`);
         handler();
+        assert.equal(exits.length, 0, `${signal} exited inside its own handler`);
         await settlesWithin(() => exits.length === 1, `app.exit after ${signal}`, 2000);
         assert.equal(exits[0].code, code, `${signal} exited with the wrong code`);
         assert.equal(exits[0].lockStillThere, false, `${signal} left the lock behind`);
@@ -250,9 +279,11 @@ describe("a lock this process does not own is not ours to remove", () => {
 });
 
 describe("the release path cannot itself break an exit", () => {
-  it("is safe called twice, because both exit routes can be in flight at once", async () => {
-    // A signal arriving during an `onClose` teardown reaches here twice. A recovery
-    // path that throws on its second call is worse than the leak it replaced.
+  it("is safe called twice, because the explicit call and the exit handler overlap", async () => {
+    // `main.tsx` calls this before `app.exit` *and* registers it as a Node `exit`
+    // handler, because neither route covers the other — so an exit that runs both
+    // reaches here twice. A recovery path that throws on its second call is worse
+    // than the leak it replaced.
     heldBy(process.pid);
     await withApp(userData, async () => {
       releaseProfileLock();

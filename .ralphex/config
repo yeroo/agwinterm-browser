@@ -2,8 +2,8 @@
 #
 # Deliberately minimal. Precedence is CLI flags > this file > ~/.config/ralphex/
 # > embedded defaults, so every key set here SHADOWS the global config — including
-# ones copied in by `ralphex --init` that you never meant to pin. The five keys below
-# are this project's own decision and each says why; everything else is left to
+# ones copied in by `ralphex --init` that you never meant to pin. Every key below
+# is this project's own decision and each says why; everything else is left to
 # inherit. Nothing here may encode a single plan's size — a cap chosen for one plan
 # silently truncates the next, larger one, and `--max-iterations` is where a per-run
 # budget belongs.

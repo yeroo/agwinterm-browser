@@ -11,8 +11,11 @@
 // `EPERM` for a process at a higher integrity level. An elevated browser probed by an
 // ordinary one is exactly that, and calling it dead puts two browsers on one Chromium
 // `userData` directory — whose symptom is a profile-lock failure or a concurrent-profile
-// conflict, not anything naming this function. `store/src/instances.ts:26-28` already
-// states the rule this file pins: `ESRCH` is the only "gone".
+// conflict, not anything naming this function. `alive()` in `store/src/instances.ts`
+// states the rule this file pins: `ESRCH` is the only "gone". Its comment said so
+// first; its code answered `code === "EPERM"` until this task brought both files to
+// the stated rule, so the two now agree. Cited by name, not by line: the same
+// reference has gone stale twice already on comment edits.
 //
 // The third case is the one with no obviously right answer, so it is pinned too. An
 // unrecognised code is treated as alive *and warned about*: refusing a free profile
@@ -278,7 +281,7 @@ describe("an unrecognised probe failure is loud, not silently either answer", ()
 });
 
 describe("when every numbered profile is taken", () => {
-  it("falls back to a throwaway directory rather than sharing a live one", () => {
+  it("falls back to a throwaway directory rather than sharing a live one", (t) => {
     // The end of the walk, and the change above made strictly more inputs reach it:
     // EPERM and every unrecognised code now skip where they used to reclaim. The
     // fallback profile has none of the user's cookies in it, which is the branch's own
@@ -286,6 +289,14 @@ describe("when every numbered profile is taken", () => {
     for (let index = 0; index < 32; index++) existingLock(index, 4242 + index);
     const { chosen, events } = claimWith(() => {
       throw errno("EPERM");
+    });
+    // The one thing in this suite that lands outside `scratch`: the fallback is
+    // `mkdtempSync(os.tmpdir(), ...)` inside `profile.ts`, so it goes to the real
+    // `%TEMP%` and nothing in the bundle's stubs can redirect it. Registered before
+    // the assertions so a failing one still cleans up — otherwise every run of this
+    // file leaves another empty `terminal-browser-XXXXXX` behind for good.
+    t.after(() => {
+      if (chosen && !chosen.startsWith(scratch)) fs.rmSync(chosen, { recursive: true, force: true });
     });
 
     assert.ok(chosen, "claimProfile set no userData path at all");

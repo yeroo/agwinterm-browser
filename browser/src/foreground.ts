@@ -59,9 +59,20 @@ const PROFILE_LOCK = "terminal-browser.lock";
  *   - **Safe with nothing owned.** `claimProfile` falls back to a `mkdtemp`
  *     directory with no lock in it when all 32 are taken, and this runs on that
  *     path too.
- *   - **Safe twice.** Both exit routes can be in flight at once (a signal during
- *     an `onClose` teardown), and a shutdown path that throws on its second call
- *     is a strictly worse bug than the one it was added to fix.
+ *   - **Safe twice.** Both exit routes below are in flight on every signal exit, and
+ *     `closing` is not what keeps that to one release. `stop` sets the flag itself
+ *     and then calls `session.close`, which is `Session.shutdown`, which ends by
+ *     calling `onClose` *synchronously* — so `onClose` schedules its `setImmediate`
+ *     from inside `stop`, and `stop` then schedules its own 200 ms timer on top. What
+ *     makes that a single release is the first `app.exit` ending the process before
+ *     the second callback runs; the `closing` guard covers the other ordering, a
+ *     signal arriving after the session already closed itself. The wider reason this
+ *     has to be idempotent is `main.tsx`, which registers this as a Node `exit`
+ *     handler *as well* as calling it explicitly, because neither covers the other: a
+ *     throw from a callback the IIFE is no longer awaiting reaches no explicit call,
+ *     and `app.exit` is not specified to run Node's exit handlers. On any exit where
+ *     both do run this is called twice, and a shutdown path that throws on its second
+ *     call is a strictly worse bug than the one it was added to fix.
  *
  * All three land as "read it, check it, remove it, and treat every failure as
  * nothing to do" — there is no failure here worth interrupting an exit for.
@@ -86,7 +97,14 @@ export async function runForeground(cdpPort: number | null, argv: string[]): Pro
     try {
       session?.close(code);
     } catch {}
-    // Give the session a beat to tear the surfaces down before the process goes.
+    // The fallback exit, not a grace period: whenever `session.close` reaches
+    // `Session.shutdown`'s last line, `onClose` fires synchronously from inside the
+    // `try` above and its `setImmediate` ends the process long before this timer —
+    // see the "Safe twice" note on `releaseProfileLock`. What is left for this to
+    // cover is the paths where `onClose` never runs at all: a signal arriving before
+    // `createSession` has assigned `session`, or a `shutdown` that threw into the
+    // `catch {}` on its way there. The delay is what gives a session that is midway
+    // through tearing its surfaces down a chance to finish first.
     setTimeout(() => {
       releaseProfileLock();
       app.exit(code);

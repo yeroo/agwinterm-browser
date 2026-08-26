@@ -32,12 +32,22 @@ Measured on 2026-08-26 against `main` at `678f702`.
 
 ### The correct model already exists in this repo
 
-`store/src/instances.ts:26-28` gets it right, and says why:
+`alive()` in `store/src/instances.ts` gets it right, and says why:
 
 > `EPERM` means the process exists and is someone else's — Windows reports it for
 > processes at a higher integrity level. `ESRCH` is the only "gone".
 
 `browser/src/profile.ts` is the same question answered wrongly, two directories away.
+
+**Scope correction, 2026-08-26.** The model was right about `EPERM` and wrong about
+everything else: its rule was `code === "EPERM"`, so every code that is neither `EPERM`
+nor `ESRCH` read as dead — the third case this plan makes Task 1 decide deliberately.
+Bringing `profile.ts` "up to it" would have copied that. So both files changed, not one:
+`instances.ts` moved to `code !== "ESRCH"` and gained the same non-int32 guard, and the
+comment quoted above grew the rest of the rule with it. Cited by name rather than by
+line throughout — `alive()` in `store/src/instances.ts` — because this note exists to
+fix a citation that line edits had already broken once. Recorded in
+`docs/design/UPSTREAM.md` divergence 13 and pinned by `tools/cli/store.test.mjs:317`.
 
 ### What each fix costs, which is not the same for the two
 
@@ -85,7 +95,9 @@ where there is no alternative — which is the `EPERM` fix alone.
 ### Task 1: Stop reading EPERM as a dead profile owner
 
 - [x] change `alive()` in `browser/src/profile.ts` so `ESRCH` is the only "gone", matching
-      `store/src/instances.ts:26-28` — inspect the error code rather than swallowing it
+      `alive()` in `store/src/instances.ts` — inspect the error code rather than swallowing it
+- [x] bring `store/src/instances.ts` to the same rule (it was `code === "EPERM"`, which
+      answered the third case the way this plan rejects), so the two files agree
 - [x] decide and record what an unexpected code does; do not let it fall silently into
       either answer
 - [x] add a numbered entry to `docs/design/UPSTREAM.md` for this divergence, saying why it
