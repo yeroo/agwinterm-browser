@@ -484,7 +484,7 @@ describe("the named-reason roster", () => {
     // How this was found: `guardVerdict` built its roster with
     // `.map(describeDisposition)`, `map` handed the index to the injectable second
     // argument, and every line came out "— not vendored: undefined". It parsed, it
-    // read like prose, and it was wrong about all 44 paths.
+    // read like prose, and it was wrong about every path in the roster.
     assert.throws(() => describeDisposition("engine/x.rs", 1), /hands it the array index/);
     assert.throws(() => describeDisposition("engine/x.rs", null), /Pass a dispositionOf/);
   });

@@ -1,7 +1,7 @@
 // What every diverged vendored file *is*, on the record, one entry per path.
 //
 // `universe.mjs` answers "what is in scope"; this file answers the question that
-// comes next and that the old guard never asked outside `pixel-core/src`: forty-four
+// comes next and that the old guard never asked outside `pixel-core/src`: forty-five
 // vendored paths differ from the baseline, so which of them is that supposed to be?
 //
 // Most of them are supposed to. `cli/src/main.ts`, `browser/src/page/controller.ts`
@@ -348,6 +348,14 @@ export const INCIDENTAL = Object.freeze({
       "is listed rather than excluded because a lockfile that moved without a manifest " +
       "moving is a real event, and the only way to notice one is to require a reason.",
   },
+  "browser/src/profile.ts": {
+    divergence: 13,
+    reason:
+      "`alive()` inspects the error code rather than swallowing it. Windows answers a " +
+      "`process.kill(pid, 0)` probe of a higher-integrity process with `EPERM`, and " +
+      "upstream's bare `catch { return false }` reads that as a dead lock holder — which " +
+      "is how a second browser takes a live one's `userData`. `ESRCH` is the only 'gone'.",
+  },
 });
 
 /**
@@ -436,6 +444,11 @@ export const DIVERGENCES = Object.freeze({
     path: "engine/Cargo.lock",
     appliedIn: "port",
     what: "cargo's regeneration of divergences 10 and 11",
+  },
+  13: {
+    path: "browser/src/profile.ts",
+    appliedIn: "port",
+    what: "`alive()` treats `ESRCH` as the only \"gone\", and warns on an unrecognised code",
   },
 });
 

@@ -84,20 +84,20 @@ where there is no alternative — which is the `EPERM` fix alone.
 
 ### Task 1: Stop reading EPERM as a dead profile owner
 
-- [ ] change `alive()` in `browser/src/profile.ts` so `ESRCH` is the only "gone", matching
+- [x] change `alive()` in `browser/src/profile.ts` so `ESRCH` is the only "gone", matching
       `store/src/instances.ts:26-28` — inspect the error code rather than swallowing it
-- [ ] decide and record what an unexpected code does; do not let it fall silently into
+- [x] decide and record what an unexpected code does; do not let it fall silently into
       either answer
-- [ ] add a numbered entry to `docs/design/UPSTREAM.md` for this divergence, saying why it
+- [x] add a numbered entry to `docs/design/UPSTREAM.md` for this divergence, saying why it
       is Windows-specific: probing a live higher-integrity browser returns `EPERM`, and
       reading that as death lets a second browser take the first one's `userData`
-- [ ] add the matching disposition to `tools/vendor-check/dispositions.mjs` as an
+- [x] add the matching disposition to `tools/vendor-check/dispositions.mjs` as an
       incidental divergence pointing at that entry
-- [ ] write tests for `EPERM` meaning alive and `ESRCH` meaning dead
-- [ ] write a test for the unexpected-code behaviour chosen above
-- [ ] confirm the vendored guard passes *because* the divergence is recorded — temporarily
+- [x] write tests for `EPERM` meaning alive and `ESRCH` meaning dead
+- [x] write a test for the unexpected-code behaviour chosen above
+- [x] confirm the vendored guard passes *because* the divergence is recorded — temporarily
       remove the disposition and see it fail, then restore it
-- [ ] run tests — must pass before Task 2
+- [x] run tests — must pass before Task 2
 
 ### Task 2: Release the profile lock on foreground exit
 

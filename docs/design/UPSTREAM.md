@@ -348,6 +348,27 @@ there fails the suite.
     manifest moving is a real event — an unpinned transitive bump arriving on somebody's
     machine — and requiring a written reason is the only way anyone notices one.
 
+13. **`browser/src/profile.ts` — `alive()` reads the error code instead of swallowing
+    it.** Upstream is `try { process.kill(pid, 0); return true } catch { return false }`,
+    so every failure means the lock's holder is dead. `process.kill(pid, 0)` sends no
+    signal; it asks whether the process *can* be signalled, and Windows answers `EPERM`
+    for a process at a higher integrity level — an elevated browser probed by an
+    ordinary one, which is an entirely routine pair here. Reading that as death makes a
+    second browser take the first's live `userData` directory, and what the user sees is
+    a Chromium profile-lock failure or a concurrent-profile conflict rather than anything
+    naming this function.
+
+    So `ESRCH` is the only "gone", which is the model `store/src/instances.ts` already
+    states in this repo two directories away. Any other code is `console.warn`ed and then
+    treated as alive: refusing a profile that was in fact free costs one numbered
+    directory, and taking one that was not costs the user their session, so the two
+    mistakes do not deserve the same default — but neither deserves silence, which is
+    what the warning is for.
+
+    Windows-specific, and therefore incidental rather than the port's subject: upstream's
+    version is correct on the platform it was written for, where a probe that is refused
+    is not a probe that found somebody.
+
 ## Re-vendoring checklist
 
 The guard is what makes this cheap, so the checklist is written around it rather than

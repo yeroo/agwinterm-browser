@@ -3,7 +3,7 @@
 // `universe.mjs` replaces a checked-in list with a query, which removes one failure
 // mode (a file nobody remembered to list) and introduces another (a query that
 // quietly answers something narrower than it claims). So the numbers are pinned
-// here: 239 paths introduced, 4 declared out, 235 in scope, 44 of them diverged and
+// here: 239 paths introduced, 4 declared out, 235 in scope, 45 of them diverged and
 // none deleted. Any of those moving is a real event and should be read, not
 // re-baselined.
 //
@@ -241,10 +241,10 @@ describe("the diff the universe is derived from", () => {
 });
 
 describe("the survey against the baseline", () => {
-  it("finds the 44 in-scope divergences and no deletions", () => {
+  it("finds the 45 in-scope divergences and no deletions", () => {
     const { changed, deleted } = surveyVendored();
     assert.deepEqual(deleted, [], "a vendored file is missing from the working tree");
-    assert.equal(changed.length, 44, `${changed.length} vendored paths differ, not 44`);
+    assert.equal(changed.length, 45, `${changed.length} vendored paths differ, not 45`);
   });
 
   it("sees the divergences the old guard was blind to", () => {

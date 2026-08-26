@@ -32,11 +32,35 @@ export function claimProfile() {
   app.setPath("userData", fs.mkdtempSync(path.join(os.tmpdir(), "terminal-browser-")));
 }
 
+/**
+ * Whether `pid` still holds the lock. `ESRCH` is the only "gone".
+ *
+ * Upstream answered every error with `false`, which is right on the platform it was
+ * written for and wrong here. `process.kill(pid, 0)` sends no signal; it asks whether
+ * the process *can* be signalled, and Windows answers `EPERM` for one that exists at a
+ * higher integrity level than the caller — an elevated browser probed by an ordinary
+ * one. Reading that as death lets the second browser take the first's `userData`, and
+ * the symptom is a Chromium profile-lock failure or a concurrent-profile conflict, not
+ * anything that names this line. `store/src/instances.ts` already gets this right.
+ *
+ * An unrecognised code is **not** silently either answer. It is reported and then
+ * treated as alive, because the two mistakes are not the same size: refusing a profile
+ * that was in fact free costs one numbered directory, and taking one that was not costs
+ * the user their session. The warning is what keeps that from being a guess nobody sees.
+ */
 function alive(pid: number) {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code !== "EPERM") {
+      console.warn(
+        `terminal-browser: probing profile-lock holder ${pid} failed with ${code ?? "no code"}; ` +
+          `treating it as alive. Only ESRCH means the holder is gone.`,
+      );
+    }
+    return true;
   }
 }

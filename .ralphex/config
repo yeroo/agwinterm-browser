@@ -33,3 +33,13 @@ max_external_iterations = 3
 # on. 2 is the standard loop-until-dry criterion: one quiet round can be luck, two is
 # convergence.
 review_patience = 2
+
+# max_iterations: the two-pane-loop note argues 50 is a planning smell rather than a
+# budget — "a plan that needs more has a planning problem; 35 more passes will not find
+# it." This plan is 5 tasks / 31 checkboxes, so 15 is generous for it.
+max_iterations = 15
+
+# idle_timeout: kills an executor that has wedged with no output. Note it does NOT cover
+# the external review phase — revmux runs its own 2m idle / 20m hard timeouts per agent,
+# and the bridge is invoked as one long-lived child.
+idle_timeout = 10m

@@ -8,7 +8,7 @@
 // starts lying: a stale row keeps its authority long after its subject is gone.
 //
 // So both directions are asserted, and the counts are pinned rather than derived
-// from the table itself. `44 changed, 44 dispositioned, 35 subject, 9 incidental`
+// from the table itself. `45 changed, 45 dispositioned, 35 subject, 10 incidental`
 // moving is a real event and should be read, not re-baselined.
 
 import assert from "node:assert/strict";
@@ -54,11 +54,11 @@ describe("the disposition table", () => {
     );
   });
 
-  it("covers the 44 divergences with 35 subject-matter and 9 incidental entries", () => {
-    assert.equal(SURVEY.changed.length, 44, `${SURVEY.changed.length} vendored paths differ, not 44`);
+  it("covers the 45 divergences with 35 subject-matter and 10 incidental entries", () => {
+    assert.equal(SURVEY.changed.length, 45, `${SURVEY.changed.length} vendored paths differ, not 45`);
     assert.equal(Object.keys(SUBJECT).length, 35);
-    assert.equal(Object.keys(INCIDENTAL).length, 9);
-    assert.equal(dispositionedPaths().length, 44);
+    assert.equal(Object.keys(INCIDENTAL).length, 10);
+    assert.equal(dispositionedPaths().length, 45);
     assert.deepEqual(dispositionedPaths(), [...SURVEY.changed].sort());
   });
 
@@ -160,14 +160,15 @@ describe("an incidental entry", () => {
   });
 });
 
-describe("the twelve divergences UPSTREAM.md numbers", () => {
-  it("is twelve, numbered 1 through 12 with no gaps", () => {
-    // Six until Task 4 of the vendor-check-gap plan. The numbers are the addressing
-    // scheme `INCIDENTAL` cites and a re-vendorer works down, so a gap or a renumber
-    // is a broken reference rather than a cosmetic change.
+describe("the thirteen divergences UPSTREAM.md numbers", () => {
+  it("is thirteen, numbered 1 through 13 with no gaps", () => {
+    // Six until Task 4 of the vendor-check-gap plan, twelve until Task 1 of the
+    // deferred-browser-defects plan added `browser/src/profile.ts`. The numbers are the
+    // addressing scheme `INCIDENTAL` cites and a re-vendorer works down, so a gap or a
+    // renumber is a broken reference rather than a cosmetic change.
     assert.deepEqual(
       Object.keys(DIVERGENCES),
-      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"],
     );
   });
 
@@ -240,7 +241,7 @@ describe("the twelve divergences UPSTREAM.md numbers", () => {
 
   it("refuses to content-check a divergence the port applied", () => {
     assert.throws(() => divergenceEvidenceHolds(4), /checked by diffing/);
-    assert.throws(() => divergenceEvidenceHolds(13), /there is no divergence 13/);
+    assert.throws(() => divergenceEvidenceHolds(99), /there is no divergence 99/);
   });
 
   it("fails the content check when the edit is gone", () => {
