@@ -239,9 +239,13 @@ user already knows. `cli/src/unsupported.ts` owns the wording and imports nothin
 `scripts/` (`install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh` — POSIX shell,
 and the second fetches the forbidden fork), `herdr-plugin/`, `release-worker/`, `skill/`,
 build output, and upstream's own `README.md`/`AGENTS.md`/`CLAUDE.md`. The full list and
-the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also records the six deliberate
-edits to vendored files — each pinned by a test in `tools/vendor-check/`, so a re-vendor
-that drops one fails loudly rather than at the milestone.
+the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also numbers the twelve deliberate
+edits to vendored files that are not the port's own subject matter. Since **2026-08-26**
+each is checked — by a diff against `45b5e43` for the nine the port applied, by content
+for the three the vendoring commit applied and so cannot show a diff — so a re-vendor
+that drops one fails by name. That sentence used to say "six" and used to claim each was
+pinned by a test; it was true of two of the six. See
+[the guard that covered one tree of three](#the-guard-that-covered-one-tree-of-three).
 
 ---
 
@@ -554,3 +558,69 @@ The gap is recorded here rather than quietly closed because the failure mode is 
 interesting part. **A review that could not start was indistinguishable from a review
 that found nothing.** Anything downstream of an external tool needs to fail loudly when
 the tool does not run, or its absence reads as a pass.
+
+### The guard that covered one tree of three
+
+The same shape again, found by the review above. `tools/vendor-check/` exists to catch a
+silent edit to vendored upstream code, and until **2026-08-26** it did that for
+`engine/crates/pixel-core/src` and nowhere else: `unchanged.test.mjs` opened with
+`const SRC = "engine/crates/pixel-core/src"` and diffed the 46 paths named in
+`pixel-core-files.json`. `engine/crates/pixel-node/src` and `engine/packages/pixel-react`
+are vendored upstream trees too, and neither had a baseline check of any kind. Four files
+in them differed from the baseline, plus both edited `Cargo.toml`s. An edit there — or a
+re-vendor that dropped one — passed `pnpm test` in silence.
+
+**[`UPSTREAM.md`](UPSTREAM.md) said otherwise, in two sentences.** That the divergence list
+was "everything else, so the claim 'the other 43 files are untouched' stays checkable", and
+that each divergence "is asserted by a test in `tools/vendor-check/`, so a re-vendor that
+drops one fails loudly rather than at the Task 10 milestone". The second was true of two of
+the six entries. Both sentences are gone; the section now says which trees are guarded and
+where the scope comes from, and `upstream-doc.test.mjs` pins the retired claim by its own
+words so it cannot be copied forward from an old revision.
+
+Worse than the coverage gap was a recorded divergence whose recorded scope was wrong.
+Divergence 5 described `pixel-node/src/lib.rs` as "one line — `WATCH_RESIZE = cfg!(windows)`"
+against a diff of 237 insertions: the `SurfaceSink` trait, its `impl` for `Engine`, and the
+genericisation of `draw_frame` and `draw_pixels`. A re-vendorer working down the checklist
+would have restored the constant, lost the trait and the six tests hanging off it, and had
+nothing tell them so.
+
+The repair is [`20260826-vendor-check-gap.md`](../plans/completed/20260826-vendor-check-gap.md), and
+its one design decision is that **the scope is derived, not listed**. `universe.mjs` asks
+`git show --name-only 45b5e43` what was vendored — 239 paths, four declared out with a
+reason each — so every path that commit carried is in scope with nobody to remind. That
+query is a **diff**, not an inventory: `45b5e43` has a parent, and its tree holds 291
+paths. The 52 it does not report are this repo's own harness, committed before the
+vendoring, which is why the two answers agree about upstream — a coincidence, now written
+down as `PRE_BASELINE` and held to `git ls-tree` by `assertUniverseIsTheWholeSnapshot`,
+because the day `BASELINE` moves to a re-vendor commit every upstream file unchanged
+across it would leave the universe with no count moving to say so. Note the other edge,
+because it is the one thing a one-commit scope cannot do: a file vendored
+*later* is not in the universe, and committing it under this baseline silences the
+untracked finding without putting it in scope. For genuinely new upstream code the answer
+is a re-vendor that moves `BASELINE`, which `untrackedMessage` and the checklist at the end
+of `UPSTREAM.md` both say out loud.
+
+A per-tree manifest was the first option and was rejected for reproducing the defect: the
+scope would still have been whatever someone remembered to write down. Everything that
+differs now carries a disposition in `dispositions.mjs`, deletions are caught, and an untracked file in
+a vendored tree is caught — that last one found by hand-testing the finished guard, which
+was still at 472/472 with an intruder sitting in each tree, because every check it had asked
+a question about a path the vendoring commit introduced.
+
+Deriving the *trees* from that same commit needed one declaration on top, and leaving it out
+made the untracked check a repo-wide nag for a review round. `45b5e43` did two jobs — it
+imported upstream and it laid down this repo's scaffolding — so `tools/` and `docs/design/`
+qualified as directories the commit put vendored files in, though `UPSTREAM.md`'s "What was
+copied" lists neither. Every tool and design note written since, 66 of them including the
+five files of this change, was an untracked-file failure until it was staged. `EXCLUSIONS`
+could not repair it: those paths belong in the universe and must stay byte-identical, so
+declaring them out would have traded a false finding for a real hole in the diff.
+`PROJECT_ROOTS` names the two roots instead, with a reason each and a staleness check of its
+own, and subtracts them from the tree derivation only.
+
+The gap is recorded here rather than quietly closed for the reason the revmux gap is. **A
+check that covers a third of its subject looks exactly like a check that covers all of it**
+— green, fast, and cited in the documentation as proof. It had been passing for five days.
+The question worth carrying forward is which other checks in this repo are trusted because
+they have never failed.

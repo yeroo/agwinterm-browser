@@ -28,7 +28,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 467 Rust tests and 389 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 467 Rust tests and 510 node tests
 pass on Windows, including the 203 inherited tests in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
@@ -226,6 +226,21 @@ cd engine; cargo test --workspace  # not redundant: one process, so it can see r
 python tools/vendor-check/fmt-scope.py
 python tools/vendor-check/clippy-scope.py
 ```
+
+`tools/vendor-check/` is the suite that keeps this port honest about upstream. It takes its
+scope from the vendoring commit rather than from a checked-in list: the 239 paths `45b5e43`
+introduced, minus four declared exclusions, diffed against that commit on every run. So all
+three vendored trees are covered — `pixel-core`, `pixel-node` and `pixel-react` — along with
+`browser/`, `cli/`, `store/`, `terminals/` and the manifests, with nobody to remind. A file
+vendored *later* is a different question: the universe is one commit's contents, so what covers
+it is the untracked check below, and the answer to that is a re-vendor that moves the baseline.
+A path that differs must be the port's own subject matter,
+a numbered divergence in [`UPSTREAM.md`](docs/design/UPSTREAM.md), or a declared exclusion;
+anything else fails by name. Three failures a diff cannot show are checked separately: a
+vendored file that was **deleted**, an **untracked** file sitting inside a vendored tree, and
+a `native/pixel.node` that is missing or **older than its source**. Until 2026-08-26 the guard
+covered `pixel-core/src` and nothing else — see
+[`07-as-built.md`](docs/design/07-as-built.md#the-guard-that-covered-one-tree-of-three).
 
 The two `*-scope.py` scripts run `cargo fmt --check` and `cargo clippy` for real and then
 `git blame` every complaint against the vendoring commit. The vendored tree does not pass either
