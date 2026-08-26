@@ -169,23 +169,42 @@ reads it. Two notes on what that cost and bought:
 
 ### Task 4: Correct UPSTREAM.md
 
-- [ ] rewrite divergence 5 to describe what `pixel-node/src/lib.rs` actually contains —
+- [x] rewrite divergence 5 to describe what `pixel-node/src/lib.rs` actually contains —
       the `SurfaceSink` trait, the `impl` for `Engine`, the genericisation of `draw_frame`
       and `draw_pixels`, **and** the `WATCH_RESIZE` constant — not "one line"
-- [ ] add entries for the incidental divergences that have none: `pixel-node/src/capture.rs`
+- [x] add entries for the incidental divergences that have none: `pixel-node/src/capture.rs`
       (the `read_exact_at` shim replacing `std::os::unix::fs::FileExt`),
       `pixel-node/src/surface.rs` (the `cfg_attr(windows, allow(irrefutable_let_patterns))`),
       `pixel-react/scripts/build-native.mjs` (rewritten, including the `win32` branch of
       `libraryName`), both `Cargo.toml` files, and `engine/Cargo.lock` (cargo's
       regeneration of those two, found in Task 2) — six in all, which is
       `UNRECORDED_BUDGET`; take it to 0
-- [ ] make the exhaustiveness claim true, or narrow it to what is actually checked — do not
+- [x] make the exhaustiveness claim true, or narrow it to what is actually checked — do not
       leave a sentence that promises more than the guard delivers
-- [ ] state which trees are guarded and how the scope is derived, so the next reader knows
+- [x] state which trees are guarded and how the scope is derived, so the next reader knows
       the list is not the boundary
-- [ ] write tests that every numbered divergence names a path that really differs
-- [ ] write tests that every incidental divergence in the table has a numbered entry
-- [ ] run tests — must pass before Task 5
+- [x] write tests that every numbered divergence names a path that really differs
+- [x] write tests that every incidental divergence in the table has a numbered entry
+- [x] run tests — must pass before Task 5
+
+**Found while doing it.** `UNRECORDED_BUDGET` is 0: the six unnumbered incidental
+divergences are now 7-12 in `UPSTREAM.md`, and `upstream-doc.test.mjs` parses the
+document and holds it to `DIVERGENCES` — same paths, same numbers, contiguous, each
+describing an edit that is really in the tree. Three things worth recording:
+
+- **The document is now checked, not just written.** Nothing in `tools/` had ever read
+  `UPSTREAM.md` before this task; the numbering was a convention two files agreed on by
+  hand. A renumber or a deleted entry now fails, which matters because `INCIDENTAL`
+  cites those numbers and a re-vendorer works down them.
+- **Divergence 3 is about an *excluded* path** (`package.json`), so "every numbered
+  divergence names a vendored path" had to be asked against the vendoring commit's whole
+  path set rather than against `vendoredUniverse()`. Exclusion decides whether a path
+  needs its *diff* explained, not whether it can carry a re-vendor instruction.
+- **A latent bug fell out of it.** `guardVerdict` built its roster with
+  `.map(describeDisposition)`; giving that function an injectable second argument meant
+  `map` passed it the array index, and every line came out `— not vendored: undefined`.
+  Plausible prose, wrong about all 44 paths, and the guard's message is its whole
+  product. `describeDisposition` now refuses a verdict that is not one.
 
 ### Task 5: Make the napi artifact check refuse to skip
 

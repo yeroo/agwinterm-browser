@@ -341,7 +341,37 @@ describe("the named-reason roster", () => {
   });
 
   it("says so when an incidental path has no number yet", () => {
-    const line = describeDisposition("engine/crates/pixel-node/src/capture.rs");
+    // Fabricated, because no real path is in this state any more: Task 4 of the
+    // vendor-check-gap plan numbered the last six and `UNRECORDED_BUDGET` is 0. The
+    // branch stays and is tested because the next undocumented divergence is precisely
+    // when this line gets read, and the one thing it must not do is describe an
+    // unnumbered edit as though a re-vendorer could look it up.
+    const line = describeDisposition("engine/crates/pixel-node/src/somewhere-new.rs", {
+      kind: "incidental",
+      divergence: null,
+      reason: "an incidental edit nobody has written up yet",
+    });
     assert.match(line, /not yet numbered in UPSTREAM\.md/);
+  });
+
+  it("refuses a verdict that is not one, rather than printing a plausible lie", () => {
+    // How this was found: `guardVerdict` built its roster with
+    // `.map(describeDisposition)`, `map` handed the index to the injectable second
+    // argument, and every line came out "— not vendored: undefined". It parsed, it
+    // read like prose, and it was wrong about all 44 paths.
+    assert.throws(() => describeDisposition("engine/x.rs", 1), /hands it the array index/);
+    assert.throws(() => describeDisposition("engine/x.rs", null), /Pass a dispositionOf/);
+  });
+
+  it("names a divergence number for every incidental path the table holds", () => {
+    // The other half, against the real table: what the roster prints for a diverged
+    // vendored file is now always something a re-vendorer can act on.
+    for (const file of Object.keys(INCIDENTAL)) {
+      assert.match(
+        describeDisposition(file),
+        /incidental divergence, divergence \d+ in UPSTREAM\.md/,
+        `${file}'s roster line does not point at a numbered entry`,
+      );
+    }
   });
 });

@@ -103,7 +103,11 @@ describe("a subject-matter entry", () => {
 });
 
 describe("an incidental entry", () => {
-  it("carries an UPSTREAM.md number, or is counted against the unrecorded budget", () => {
+  it("carries an UPSTREAM.md number — the budget for entries with none is 0", () => {
+    // Was 6 while `UPSTREAM.md` was behind this table. Task 4 of the vendor-check-gap
+    // plan wrote those six up as divergences 7-12, so the budget is spent: an
+    // incidental edit with no number is a re-vendor instruction nobody wrote down.
+    assert.equal(UNRECORDED_BUDGET, 0, "the unrecorded budget does not go back up");
     const unrecorded = Object.entries(INCIDENTAL)
       .filter(([, entry]) => entry.divergence === null)
       .map(([file]) => file);
@@ -111,8 +115,28 @@ describe("an incidental entry", () => {
       unrecorded.length,
       UNRECORDED_BUDGET,
       `${unrecorded.length} incidental divergences have no UPSTREAM.md entry, not ` +
-        `${UNRECORDED_BUDGET}: ${unrecorded.join(", ")}. Task 4 of the vendor-check-gap ` +
-        `plan writes these up and takes the budget to 0 — it does not go up.`,
+        `${UNRECORDED_BUDGET}: ${unrecorded.join(", ")}. Number it in ` +
+        `docs/design/UPSTREAM.md and cite the number here — that list is what a ` +
+        `re-vendor re-applies by hand, and an entry missing from it is an edit that ` +
+        `comes back only if somebody happens to remember it.`,
+    );
+  });
+
+  it("is matched one-for-one by a port-applied divergence in UPSTREAM.md", () => {
+    // Both directions, because they fail differently. An incidental path with no
+    // numbered entry is an edit a re-vendorer never re-applies. A numbered entry with
+    // no incidental path is a re-vendor instruction for an edit that is not there —
+    // and if it is `appliedIn: "port"` it should have shown up in the survey, so its
+    // absence means the edit was reverted or the file moved.
+    const portApplied = Object.entries(DIVERGENCES)
+      .filter(([, entry]) => entry.appliedIn === "port")
+      .map(([, entry]) => entry.path)
+      .sort();
+    assert.deepEqual(
+      portApplied,
+      Object.keys(INCIDENTAL).sort(),
+      "the numbered divergences the port applied and the incidental table must be the " +
+        "same set of paths",
     );
   });
 
@@ -136,9 +160,15 @@ describe("an incidental entry", () => {
   });
 });
 
-describe("the six divergences UPSTREAM.md already numbers", () => {
-  it("is still six, numbered 1 through 6", () => {
-    assert.deepEqual(Object.keys(DIVERGENCES), ["1", "2", "3", "4", "5", "6"]);
+describe("the twelve divergences UPSTREAM.md numbers", () => {
+  it("is twelve, numbered 1 through 12 with no gaps", () => {
+    // Six until Task 4 of the vendor-check-gap plan. The numbers are the addressing
+    // scheme `INCIDENTAL` cites and a re-vendorer works down, so a gap or a renumber
+    // is a broken reference rather than a cosmetic change.
+    assert.deepEqual(
+      Object.keys(DIVERGENCES),
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"],
+    );
   });
 
   it("describes an edit that is really in the tree", () => {
@@ -178,7 +208,7 @@ describe("the six divergences UPSTREAM.md already numbers", () => {
 
   it("refuses to content-check a divergence the port applied", () => {
     assert.throws(() => divergenceEvidenceHolds(4), /checked by diffing/);
-    assert.throws(() => divergenceEvidenceHolds(7), /there is no divergence 7/);
+    assert.throws(() => divergenceEvidenceHolds(13), /there is no divergence 13/);
   });
 
   it("fails the content check when the edit is gone", () => {

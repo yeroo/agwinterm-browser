@@ -54,14 +54,41 @@ in this plan run from `engine/`, not the repo root.
 
 ## Intentional divergences from upstream
 
-Edits to vendored files that are *not* the port's own subject matter. The three
-unix-bound modules (`terminal.rs`, `ghostty.rs`, `herdr.rs`) and `pixel-core`'s
-`lib.rs` are excluded — replacing those is what the port *is*, and the plan tracks
-them task by task. What is listed here is everything else, so the claim "the other
-43 files are untouched" stays checkable.
+Edits to vendored files that are *not* the port's own subject matter. The port's own
+work is excluded — `terminal.rs`, `pixel-core`'s `lib.rs`, the CLI, the store, the
+browser's input path and the rest — because replacing those is what the port *is*.
+Those files are not unrecorded, they are recorded elsewhere: `SUBJECT` in
+`tools/vendor-check/dispositions.mjs` names the plan task that owns each.
 
-Each is asserted by a test in `tools/vendor-check/`, so a re-vendor that drops one
-fails loudly rather than at the Task 10 milestone.
+**What is guarded, and how the scope is decided.** The vendoring commit `45b5e43`
+introduced 239 paths. Four are declared out (`EXCLUSIONS` in
+`tools/vendor-check/universe.mjs`, with a reason each); the remaining 235 are the
+vendored universe, and every one of them is diffed against that commit on every
+`pnpm test`. That covers all three vendored trees — `engine/crates/pixel-core`,
+`engine/crates/pixel-node` and `engine/packages/pixel-react` — plus `browser/`,
+`cli/`, `store/`, `terminals/`, `assets/` and the two `Cargo.toml` files. A path that
+differs must be one of exactly three things: the port's subject matter with a task
+that owns it, an incidental divergence numbered below, or a declared exclusion. A
+vendored file that is *deleted* fails too, which is the failure a diff cannot see.
+
+**The scope comes from git, not from this file.** `universe.mjs` asks
+`git show --name-only 45b5e43` what was vendored, so a newly vendored file is in scope
+the moment it is committed, with nobody to remind. **This list is therefore not the
+boundary of what is checked** — it is the subset of checked paths whose edits a
+re-vendorer has to re-apply by hand.
+
+That distinction is the correction this section needed. Until 2026-08-26 the guard was
+scoped to a checked-in inventory of `engine/crates/pixel-core/src`, and the sentence
+that stood here — that each divergence "is asserted by a test in
+`tools/vendor-check/`" — was true of divergences 4 and 6 and false of every other
+one. `docs/plans/20260826-vendor-check-gap.md` is the repair.
+
+Two limits worth naming. Divergences 1-3 were applied by the vendoring commit itself
+— the port needed `pnpm install` to work before it could write a line — so they *are*
+the baseline and no diff can show them; they are checked by content instead
+(`divergenceEvidenceHolds`). And the numbering below is what `INCIDENTAL` in
+`dispositions.mjs` cites, so an entry renumbered or deleted here without being changed
+there fails the suite.
 
 1. **`browser/package.json` — `postinstall` replaced.** Upstream runs
    `bash ../scripts/fetch-electron.sh`. That is forbidden twice over: it needs a
@@ -165,19 +192,52 @@ fails loudly rather than at the Task 10 milestone.
    screen that cleared all 43 cannot see this class of problem. Task 14's
    unchanged-check should expect this list to grow.
 
-5. **`engine/crates/pixel-node/src/lib.rs` — `watch_resize` is on under Windows**
-   (Task 10). Upstream passes `watch_resize: false` unconditionally, which is right
-   for it: its engine lives in a daemon that is not the tty's foreground process
-   group, so `SIGWINCH` would not arrive anyway, and in the no-tty shape
-   `pixel-react` nudges the engine from `process.stdout.on("resize", …)` instead.
+5. **`engine/crates/pixel-node/src/lib.rs` — the `SurfaceSink` seam, and
+   `watch_resize` on under Windows** (Task 10). Two edits, 237 insertions and 5
+   deletions between them.
+
+   ⚠️ **This entry said "It is one line — `WATCH_RESIZE = cfg!(windows)`" until
+   2026-08-26.** That was true of the second edit and silent about the first, which
+   is worse than an omission: a re-vendorer working through this checklist would have
+   restored the constant, lost the trait and the six tests that hang off it, and had
+   nothing tell them so. A recorded divergence whose recorded scope is wrong is the
+   one failure mode a checklist cannot survive.
+
+   **`watch_resize`.** Upstream passes `watch_resize: false` unconditionally, which
+   is right for it: its engine lives in a daemon that is not the tty's foreground
+   process group, so `SIGWINCH` would not arrive anyway, and in the no-tty shape
+   `pixel-react` nudges the engine from `process.stdout.on("resize", …)`
+   (`index.ts:583`) instead.
 
    Neither route exists on Windows — there is no `SIGWINCH`, and Electron's stdout
    is a pipe rather than a `tty.WriteStream`, so that event never fires. Without
    this the pane resizes and the browser goes on drawing the old size; agwinterm
-   then places a canvas it has to clip, silently. It is one line —
-   `WATCH_RESIZE = cfg!(windows)` — and off Windows it is byte-for-byte upstream's
-   behaviour, but a re-vendor that drops it fails as a picture that stops being
-   right rather than as a build error, so it is listed here and pinned by a test.
+   then places a canvas it has to clip, silently. The value is *named* —
+   `pub(crate) const WATCH_RESIZE: bool = cfg!(windows)` — rather than written
+   inline at the `EngineConfig`, so a test can pin both halves without constructing
+   an `Engine`, which opens a real console. Off Windows the behaviour is byte-for-byte
+   upstream's. A re-vendor that drops it fails as a picture that stops being right
+   rather than as a build error, which is why it is listed here at all.
+
+   **`SurfaceSink`.** A one-method trait (`draw_surface`), an `impl` of it for
+   `Engine`, and `draw_frame`/`draw_pixels` made generic over it. Nothing observable
+   changes: the `impl` delegates to `Engine`'s inherent method of the same name, so
+   every call site does exactly what it did.
+
+   It exists because `draw_frame` is where a submitted frame stops being
+   platform-shaped — an IOSurface on macOS, a shared-memory region on Linux, an owned
+   buffer and nothing else on Windows — and the Windows arm is the only arm that
+   compiles here. Naming the single thing `draw_frame` asks of the engine lets that
+   arm be exercised against a recording sink, because `Engine::new` opens a real
+   console and cannot be built in a unit test. What that buys is in the same file: six
+   tests, pinning stride handling (an `Owned` buffer has no stride field, so padded
+   rows must be repacked at submit time rather than described on the way out) and the
+   two damage-rect cases that must not be confused — absent means "the whole surface",
+   zero-area means "nothing".
+
+   Upstream would plausibly take this one: it is a testability seam over its own code,
+   not a Windows behaviour. It is listed here because it is 200 lines of a vendored
+   file that a re-vendor overwrites wholesale.
 
 6. **`engine/crates/pixel-core/src/engine/mod.rs` — one added `#[test]`** (Task 11).
    No production line changed, and the test asserts something about *upstream's*
@@ -193,6 +253,90 @@ fails loudly rather than at the Task 10 milestone.
    The lightest possible touch to one of the 43, and still a touch: recorded so the
    `git diff`-against-baseline check in `tools/vendor-check/unchanged.test.mjs` has
    a written reason for every file it finds.
+
+7. **`engine/crates/pixel-node/src/capture.rs` — a `read_exact_at` shim.** Upstream
+   imports `std::os::unix::fs::FileExt` and calls `read_exact_at` on the segment file
+   from `Segment::apply`, reading at an explicit offset without moving a shared
+   cursor. That import does not exist on Windows, so the crate did not compile.
+
+   Windows' `std::os::windows::fs::FileExt` offers `seek_read`, which takes the offset
+   but is a *short* read like `Read::read` — the `pread` half without the `read_exact`
+   half. The replacement is a free function of the same name with two `cfg` bodies:
+   the unix one delegates to upstream's method unchanged, and the Windows one loops
+   over `seek_read`, retries `Interrupted`, and turns a zero-byte read into
+   `UnexpectedEof` carrying `std`'s own "failed to fill whole buffer" message. The
+   call site becomes `read_exact_at(&self.seg, …)`.
+
+   ⚠️ `seek_read` also moves the file pointer, which `read_exact_at` does not. That
+   is harmless here only because every read on this handle carries its own offset; a
+   future caller that mixed `Read::read` with this shim on the same `File` would find
+   the cursor somewhere it did not put it.
+
+   The same file carries one `#[cfg_attr(windows, allow(dead_code))]`, on
+   `Registry::wants`. Only the zero-copy submit paths ask it before paying for a
+   surface lock, and Windows' `update_surface` already holds plain pixels and calls
+   `capture` directly, so it has no caller on this platform.
+
+8. **`engine/crates/pixel-node/src/surface.rs` — three
+   `#[cfg_attr(windows, allow(irrefutable_let_patterns))]`.** `SurfacePixels` has
+   exactly one variant on Windows — `Owned`; the zero-copy variants are `cfg`'d out —
+   so the `Owned` patterns in `SurfaceMailbox::submit`, `SurfaceMailbox::recycle` and
+   the test module are irrefutable there, and the lint fires on code that is correct
+   on all three platforms.
+
+   Scoped to those three sites rather than to the crate, deliberately: crate-wide it
+   would silence the unix builds too, where an arm that becomes genuinely unreachable
+   is worth hearing about. No production line changed.
+
+9. **`engine/packages/pixel-react/scripts/build-native.mjs` — rewritten around
+   `libraryName(platform)`.** This script produces `native/pixel.node`, the napi
+   artifact `pixel-react` loads. Upstream picks the source filename with
+   `platform === "darwin" ? "libpixel_node.dylib" : "libpixel_node.so"`. Windows
+   differs in both halves of that name — no `lib` prefix, `.dll` rather than `.so` —
+   so the script looked for `libpixel_node.so`, `copyFileSync` failed with `ENOENT`,
+   and the error read as a missing build rather than a wrong filename. `libraryName`
+   is exported so all three platforms can be checked without running cargo.
+
+   Three things were added around it, each for a failure that otherwise reads as
+   something else:
+
+   - an explicit `existsSync` on the source, so "cargo build reported success but the
+     artifact is not where we looked" says that, instead of surfacing as a copy error;
+   - `EBUSY`/`EPERM`/`EACCES` on the copy re-thrown as "a browser is still running on
+     the previous build. Close it and build again." Windows refuses to unlink or
+     overwrite a mapped DLL, and `rmSync`'s `force: true` covers a *missing* file, not
+     a busy one;
+   - an `isEntryPoint()` guard, so importing the module for `libraryName` does not
+     shell out to cargo. Both sides are compared through `realpath`, because
+     `import.meta.filename` arrives already resolved while `process.argv[1]` is the
+     path as typed — comparing them directly made any invocation through a symlink (a
+     linked `node_modules/.bin` entry, a junctioned checkout) build nothing and exit 0.
+
+10. **`engine/Cargo.toml` — the `windows-sys` workspace dependency.** Six features,
+    kept to what the port actually calls: `Win32_Foundation`, `Win32_Security`,
+    `Win32_Storage_FileSystem`, `Win32_System_Console`, `Win32_System_IO` and
+    `Win32_System_Pipes`. Declared at the workspace root so the two crates that need
+    it cannot disagree about the version. Nothing else in upstream's manifest changed.
+
+    `Win32_System_Pipes` is the one that looks unnecessary and is not: the control-pipe
+    client dials with `OpenOptions`, but its test fixture is a real `CreateNamedPipeW`
+    server rather than a mock of one.
+
+11. **`engine/crates/pixel-core/Cargo.toml` — `windows-sys` as a `cfg(windows)` target
+    dependency.** One `[target.'cfg(windows)'.dependencies]` block taking the workspace
+    entry, for the Windows console backend (`terminal_windows.rs`): attaching to the
+    pane's console, opening `CONIN$`/`CONOUT$` by name, the mode pair VT input needs,
+    and the screen-buffer query that stands in for `SIGWINCH`. Under a target gate
+    rather than a plain dependency, so a unix build of `pixel-core` resolves
+    byte-for-byte upstream's dependency graph.
+
+12. **`engine/Cargo.lock` — one line: `windows-sys 0.61.2` in `pixel-core`'s
+    dependency list.** Cargo's regeneration of divergences 10 and 11 — resolved, not
+    authored, and re-applied by running cargo rather than by editing the file.
+
+    It gets an entry rather than an exclusion because a lockfile that moves without a
+    manifest moving is a real event — an unpinned transitive bump arriving on somebody's
+    machine — and requiring a written reason is the only way anyone notices one.
 
 ## Re-vendoring checklist
 

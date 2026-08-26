@@ -285,9 +285,10 @@ export const SUBJECT = Object.freeze({
  * the `UPSTREAM.md` divergence that records each.
  *
  * `divergence: null` means "incidental, and `UPSTREAM.md` does not say so yet" — a
- * real gap, not a category. It is tolerated only because Task 4 of
- * `docs/plans/20260826-vendor-check-gap.md` is what closes it, and it is bounded by
- * `UNRECORDED_BUDGET` below so it cannot quietly become the normal case while it waits.
+ * real gap, not a category. Six entries carried one until Task 4 of
+ * `docs/plans/20260826-vendor-check-gap.md` wrote them up as divergences 7-12;
+ * `UNRECORDED_BUDGET` is 0 now, so the field is kept only to make the next one fail
+ * loudly rather than to make room for it.
  */
 export const INCIDENTAL = Object.freeze({
   "engine/crates/pixel-core/src/clipboard_image.rs": {
@@ -299,9 +300,9 @@ export const INCIDENTAL = Object.freeze({
   "engine/crates/pixel-node/src/lib.rs": {
     divergence: 5,
     reason:
-      "the `SurfaceSink` seam and `WATCH_RESIZE = cfg!(windows)`. The recorded scope is " +
-      "wrong today — divergence 5 calls this 'one line' and the diff is 237 insertions; " +
-      "Task 4 of the vendor-check-gap plan corrects it.",
+      "the `SurfaceSink` seam and `WATCH_RESIZE = cfg!(windows)` — 237 insertions across " +
+      "two edits. Divergence 5 called this 'one line' until Task 4 of the vendor-check-gap " +
+      "plan rewrote it; the constant was the one line, the trait was the other 200.",
   },
   "engine/crates/pixel-core/src/engine/mod.rs": {
     divergence: 6,
@@ -309,39 +310,39 @@ export const INCIDENTAL = Object.freeze({
       "one added `#[test]`, asserting something about upstream's code. No production line changed.",
   },
   "engine/crates/pixel-node/src/capture.rs": {
-    divergence: null,
+    divergence: 7,
     reason:
       "a `read_exact_at` shim: upstream reaches for `std::os::unix::fs::FileExt`, and " +
       "Windows' `seek_read` takes the offset but is a short read, so the loop supplies " +
       "the 'exact' half. Plus one `allow(dead_code)` on a path Windows does not call.",
   },
   "engine/crates/pixel-node/src/surface.rs": {
-    divergence: null,
+    divergence: 8,
     reason:
       "`cfg_attr(windows, allow(irrefutable_let_patterns))` on two recycling sites and " +
       "the test module — `SurfacePixels` has one variant on Windows. Scoped rather than " +
       "crate-wide so unix keeps warning if a variant becomes genuinely unreachable.",
   },
   "engine/packages/pixel-react/scripts/build-native.mjs": {
-    divergence: null,
+    divergence: 9,
     reason:
       "rewritten, including the `win32` branch of `libraryName` — the napi artifact is " +
       "`pixel_node.dll`, not a `.so`, and nothing else in the tree knew that.",
   },
   "engine/Cargo.toml": {
-    divergence: null,
+    divergence: 10,
     reason:
       "the `windows-sys` workspace dependency and the six feature gates the console " +
       "backend and the control-pipe test fixture need.",
   },
   "engine/crates/pixel-core/Cargo.toml": {
-    divergence: null,
+    divergence: 11,
     reason:
       "`windows-sys` as a `cfg(windows)` target dependency, kept to the smallest feature " +
       "set that compiles `terminal_windows.rs`.",
   },
   "engine/Cargo.lock": {
-    divergence: null,
+    divergence: 12,
     reason:
       "cargo's regeneration of the two manifest edits above — resolved, not authored. It " +
       "is listed rather than excluded because a lockfile that moved without a manifest " +
@@ -352,11 +353,13 @@ export const INCIDENTAL = Object.freeze({
 /**
  * How many `INCIDENTAL` entries are allowed to have no `UPSTREAM.md` number.
  *
- * Pinned debt. Six paths are incidental divergences the document does not record,
- * which is half of what this plan exists to fix; Task 4 writes them up and drops this
- * to 0. Pinning the count means the gap cannot grow while it waits.
+ * Zero, as of Task 4 of `docs/plans/20260826-vendor-check-gap.md`. It was 6 while the
+ * document was behind the table — pinned debt, so the gap could not grow while it
+ * waited — and it is kept at 0 rather than deleted because the constant is what makes
+ * the *next* undocumented divergence a failure instead of a habit. An incidental edit
+ * with no number is a re-vendor instruction nobody wrote down.
  */
-export const UNRECORDED_BUDGET = 6;
+export const UNRECORDED_BUDGET = 0;
 
 /**
  * The `UPSTREAM.md` divergence list, as paths this module can check.
@@ -400,6 +403,39 @@ export const DIVERGENCES = Object.freeze({
     path: "engine/crates/pixel-core/src/engine/mod.rs",
     appliedIn: "port",
     what: "one added `#[test]`",
+  },
+  // 7-12 were written up by Task 4 of the vendor-check-gap plan. They were incidental
+  // divergences the whole time; what they lacked was a number, which is what a
+  // re-vendorer works from.
+  7: {
+    path: "engine/crates/pixel-node/src/capture.rs",
+    appliedIn: "port",
+    what: "a `read_exact_at` shim over `seek_read`, replacing `std::os::unix::fs::FileExt`",
+  },
+  8: {
+    path: "engine/crates/pixel-node/src/surface.rs",
+    appliedIn: "port",
+    what: "three `cfg_attr(windows, allow(irrefutable_let_patterns))`",
+  },
+  9: {
+    path: "engine/packages/pixel-react/scripts/build-native.mjs",
+    appliedIn: "port",
+    what: "rewritten around `libraryName(platform)`, whose `win32` branch is `pixel_node.dll`",
+  },
+  10: {
+    path: "engine/Cargo.toml",
+    appliedIn: "port",
+    what: "the `windows-sys` workspace dependency and its six features",
+  },
+  11: {
+    path: "engine/crates/pixel-core/Cargo.toml",
+    appliedIn: "port",
+    what: "`windows-sys` as a `cfg(windows)` target dependency",
+  },
+  12: {
+    path: "engine/Cargo.lock",
+    appliedIn: "port",
+    what: "cargo's regeneration of divergences 10 and 11",
   },
 });
 
@@ -513,9 +549,27 @@ export function divergenceEvidenceHolds(number, read = readRepoFile) {
  * not lose. Its failure named the file and the recorded reason; a check over 235
  * paths that answered "something changed" would be a wider guard and a worse one, so
  * the reason travels with every path the guard reports.
+ *
+ * `verdict` is injectable for the same reason `dispositionCount` is elsewhere here:
+ * one branch below describes an incidental edit with no `UPSTREAM.md` number, and
+ * since Task 4 of the vendor-check-gap plan numbered the last six, no real path is in
+ * that state. The branch has to keep working — the next undocumented divergence is
+ * exactly when this line gets read — so it is exercised against a fabricated verdict
+ * rather than by leaving a real one unnumbered to have something to test with.
  */
-export function describeDisposition(file) {
-  const verdict = dispositionOf(file);
+export function describeDisposition(file, verdict = dispositionOf(file)) {
+  // Because the injectable second argument makes `.map(describeDisposition)` wrong:
+  // `map` passes the index there, and an index is not `"subject"` or `"incidental"`,
+  // so every roster line came out as "not vendored: undefined" — a plausible-looking
+  // sentence, which is the worst kind of wrong for a guard whose whole product is its
+  // message. Loud here rather than legible-but-false three frames later.
+  if (typeof verdict !== "object" || verdict === null || !verdict.kind) {
+    throw new TypeError(
+      `describeDisposition(${file}) was given ${JSON.stringify(verdict)} as a verdict. ` +
+        `Pass a dispositionOf()-shaped object or nothing at all — a bare ` +
+        `\`.map(describeDisposition)\` hands it the array index.`,
+    );
+  }
   if (verdict.kind === "subject") {
     return `${file} — subject matter, owned by ${verdict.task}: ${verdict.reason}`;
   }
@@ -587,6 +641,8 @@ export function guardVerdict({ changed, deleted = [] }, count = dispositionCount
     expected: changed
       .filter((file) => !gone.has(file) && count(file) === 1)
       .sort()
-      .map(describeDisposition),
+      // Not point-free: `describeDisposition` takes an optional verdict as its second
+      // argument, and `map` hands every callback the index there.
+      .map((file) => describeDisposition(file)),
   };
 }
