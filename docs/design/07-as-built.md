@@ -602,6 +602,17 @@ a vendored tree is caught — that last one found by hand-testing the finished g
 was still at 472/472 with an intruder sitting in each tree, because every check it had asked
 a question about a path the vendoring commit introduced.
 
+Deriving the *trees* from that same commit needed one declaration on top, and leaving it out
+made the untracked check a repo-wide nag for a review round. `45b5e43` did two jobs — it
+imported upstream and it laid down this repo's scaffolding — so `tools/` and `docs/design/`
+qualified as directories the commit put vendored files in, though `UPSTREAM.md`'s "What was
+copied" lists neither. Every tool and design note written since, 78 of them including the
+four files of this change, was an untracked-file failure until it was staged. `EXCLUSIONS`
+could not repair it: those paths belong in the universe and must stay byte-identical, so
+declaring them out would have traded a false finding for a real hole in the diff.
+`PROJECT_ROOTS` names the two roots instead, with a reason each and a staleness check of its
+own, and subtracts them from the tree derivation only.
+
 The gap is recorded here rather than quietly closed for the reason the revmux gap is. **A
 check that covers a third of its subject looks exactly like a check that covers all of it**
 — green, fast, and cited in the documentation as proof. It had been passing for five days.

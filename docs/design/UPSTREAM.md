@@ -80,7 +80,10 @@ by hand.
 The edge of that is worth stating, because it is the one thing the derived scope cannot
 do: a file vendored *later* is not in the universe, since the universe is one commit's
 contents. What covers it is `untrackedInVendoredTrees`, which fails while the file sits
-in a vendored tree untracked. Committing it under this baseline clears the finding
+in a vendored tree untracked. "Vendored tree" there means the trees under **What was
+copied** above: `45b5e43` also laid down this repo's own `tools/` and `docs/`, so those
+two roots are declared out of that check by `PROJECT_ROOTS` — they stay in the diffed
+universe, they are just not places upstream code arrives. Committing it under this baseline clears the finding
 without putting the file in scope, so for genuinely new upstream code the answer is a
 re-vendor that moves `BASELINE` — see the closing note below.
 

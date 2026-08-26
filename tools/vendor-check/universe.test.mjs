@@ -21,7 +21,9 @@ import { describe, it } from "node:test";
 import {
   BASELINE,
   EXCLUSIONS,
+  PROJECT_ROOTS,
   assertExclusionsAreReal,
+  assertProjectRootsAreReal,
   classify,
   inVendoredTree,
   partitionDivergences,
@@ -258,9 +260,48 @@ describe("vendored trees, as directories rather than paths", () => {
     // took to write. A guard whose answer to ordinary work is "stop" gets silenced.
     assert.ok(!dirs().has("docs/plans"), "an excluded path still makes its directory a tree");
     assert.ok(!inVendoredTree("docs/plans/20260826-vendor-check-gap.md", dirs()));
-    // `docs/design` stays, and for the opposite reason: `01-baseline-errors.md` and
-    // the rest of the design set are in the universe, and only `UPSTREAM.md` is out.
-    assert.ok(dirs().has("docs/design"), "docs/design lost its vendored paths");
+  });
+
+  it("leaves this repo's own scaffolding out, though the commit carried it", () => {
+    // The same pressure as `docs/plans`, eight times the size, and the exclusion rule
+    // cannot reach it: `tools/vendor-check/digest.py` and
+    // `docs/design/01-baseline-errors.md` are in the universe on purpose and must stay
+    // byte-identical, so they qualify their directories on the first rule while no
+    // upstream file has ever landed in either. `UPSTREAM.md`'s "What was copied" lists
+    // `engine/`, `browser/`, `cli/`, `store/`, `terminals/`, `assets/` and four root
+    // files — `tools/` and `docs/` are not in it.
+    assert.ok(!dirs().has("tools"), "tools/ is a tree upstream code arrives in");
+    assert.ok(!dirs().has("tools/vendor-check"), "the guard's own directory is a vendored tree");
+    assert.ok(!dirs().has("tools/conpty-probe"));
+    assert.ok(!dirs().has("docs/design"), "docs/design is a tree upstream code arrives in");
+    assert.ok(!inVendoredTree("tools/vendor-check/universe.mjs", dirs()));
+    assert.ok(!inVendoredTree("tools/milestone/anything.mjs", dirs()));
+    assert.ok(!inVendoredTree("docs/design/08-whatever.md", dirs()));
+    // And the roots buy no exemption from the diff: those paths are still in scope.
+    const universe = new Set(vendoredUniverse());
+    assert.ok(universe.has("tools/vendor-check/digest.py"), "a project root left the universe");
+    assert.ok(universe.has("docs/design/01-baseline-errors.md"));
+  });
+
+  it("names only roots the vendoring commit actually filled", () => {
+    // The staleness hazard `assertExclusionsAreReal` covers, one level up: a root
+    // naming no real directory reads as a decision while doing nothing, and the day
+    // upstream code lands under that name it is outside the untracked check already.
+    assert.deepEqual(Object.keys(PROJECT_ROOTS).sort(), ["docs", "tools"]);
+    assert.throws(
+      () => assertProjectRootsAreReal({ ghost: "why" }, ["tools/x.py"]),
+      (error) => {
+        assert.match(error.message, /ghost/);
+        assert.match(error.message, /before anyone reads it/);
+        return true;
+      },
+    );
+    assert.doesNotThrow(() => assertProjectRootsAreReal({ tools: "why" }, ["tools/x.py"]));
+    // And the subtraction reaches no further than it is meant to: every tree
+    // `UPSTREAM.md` says upstream filled is still one.
+    for (const root of ["engine", "browser", "cli", "store", "terminals", "assets"]) {
+      assert.ok(dirs().has(root), `${root} stopped being a vendored tree`);
+    }
   });
 
   it("counts a tree whose vendored paths all sit a level down", () => {

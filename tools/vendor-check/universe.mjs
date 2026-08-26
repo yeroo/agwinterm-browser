@@ -84,6 +84,69 @@ export const EXCLUSIONS = Object.freeze({
     "port proceeded. Changing is what a plan does.",
 });
 
+/**
+ * Top-level directories the vendoring commit laid down as this repo's own workspace,
+ * where upstream code has never landed and never will.
+ *
+ * This is a different question from `EXCLUSIONS` and answering it with that list
+ * would be wrong. An exclusion says "this path is not vendored code, so do not diff
+ * it"; the paths below *are* diffed, and must stay byte-identical to `45b5e43`. What
+ * these entries say is narrower: an untracked file appearing here is somebody writing
+ * a tool or a design note, not a re-vendor dropping in an upstream module.
+ *
+ * Without it the derivation in `vendoredDirectories` reads the commit's own
+ * scaffolding — `tools/summarize-baseline.py`, `tools/conpty-probe/`,
+ * `tools/vendor-check/` and `docs/design/01-baseline-errors.md` — as evidence that
+ * `tools` and `docs/design` are trees upstream code arrives in. `UPSTREAM.md`'s "What
+ * was copied" says otherwise in as many words: upstream gave `engine/`, `browser/`,
+ * `cli/`, `store/`, `terminals/`, `assets/` and four root files, and nothing else.
+ * 78 paths this port has since committed sit under these two roots — every tool in
+ * `tools/`, every design note, and the four files of this very change — and each was
+ * an untracked-file failure for as long as it took to write. That is the
+ * guard-gets-silenced pressure the `docs/plans` note below already names, at eight
+ * times the size, and a guard that fails on ordinary work teaches people to stop
+ * reading it.
+ *
+ * A root here buys no exemption from anything else: `tools/vendor-check/digest.py`
+ * is still in the universe, still diffed, and still has to carry a disposition the
+ * day it changes.
+ */
+export const PROJECT_ROOTS = Object.freeze({
+  tools: "this repo's own tooling. `UPSTREAM.md` does not list it among what was copied.",
+  docs: "this repo's own design notes, plans and vendoring record — none of it upstream's.",
+});
+
+/**
+ * Fails if a project root holds nothing the vendoring commit introduced.
+ *
+ * The same staleness hazard `assertExclusionsAreReal` covers, one level up and worse:
+ * a root that names no real directory reads as a considered decision while doing
+ * nothing, and the day upstream code lands under that name it is outside the untracked
+ * check before anyone looks. Injectable for the same reason — a guard branch that has
+ * never run is a guard nobody has evidence for.
+ */
+export function assertProjectRootsAreReal(
+  roots = PROJECT_ROOTS,
+  paths = vendoringCommitPaths(),
+) {
+  const tops = new Set(paths.map((p) => p.split("/")[0]));
+  const empty = Object.keys(roots).filter((root) => !tops.has(root));
+  if (empty.length > 0) {
+    throw new Error(
+      `PROJECT_ROOTS names ${empty.length} director(ies) ${BASELINE} put nothing in: ` +
+        `${empty.join(", ")}. Either the directory was renamed (update the key) or the ` +
+        `entry is stale (delete it) — a root for a directory that does not exist takes ` +
+        `a future tree of that name out of the untracked check before anyone reads it.`,
+    );
+  }
+}
+
+/** Whether `dir` is a project root or sits beneath one. */
+function underProjectRoot(dir, roots) {
+  const cut = dir.indexOf("/");
+  return Object.hasOwn(roots, cut === -1 ? dir : dir.slice(0, cut));
+}
+
 function git(args) {
   return execFileSync("git", args, {
     cwd: REPO,
@@ -200,13 +263,20 @@ export function classify(candidate) {
  * exists to close.
  *
  * A path that is *declared out* is a declaration that the file is this repo's own, so
- * an ancestor of one qualifies only under the first rule. `docs` is the case: it holds
- * no vendored file directly, and two of the four `EXCLUSIONS` — `UPSTREAM.md` and the
- * port's plan — live beneath it. Counting it would put `docs/plans` back in scope, and
- * every plan document was an untracked-file failure for as long as it took to write,
- * which is the guard-gets-silenced pressure this whole directory exists to avoid.
- * `docs/design` stays, on the first rule: the design notes sit directly in it and all
- * but `UPSTREAM.md` are in the universe.
+ * an ancestor of one qualifies only under the first rule. `docs/plans` is the case: its
+ * one baseline path is the port's plan, declared out because changing is what a plan
+ * does, so the directory is this repo's own and not a vendored tree. Counting it made
+ * every plan document an untracked-file failure for as long as it took to write, which
+ * is the guard-gets-silenced pressure this whole directory exists to avoid.
+ *
+ * Then `PROJECT_ROOTS` is subtracted, and it is what stops both rules over-reaching.
+ * The vendoring commit laid down this repo's scaffolding as well as upstream's trees,
+ * so `tools` and `docs/design` qualify on the first rule with no upstream file
+ * anywhere in them — and the same pressure that took out `docs/plans` applies to every
+ * tool and design note this port has written since, 78 of them. The exclusion rule
+ * above cannot reach that case: those paths are in the universe on purpose and must
+ * stay byte-identical, so declaring them out would trade a false untracked finding for
+ * a real hole in the diff.
  *
  * The repo root is deliberately not in it either. `LICENSE`, `pnpm-lock.yaml` and
  * `pnpm-workspace.yaml` are root-level paths in the universe, so `.` qualifies on the
@@ -214,7 +284,8 @@ export function classify(candidate) {
  * from the root, including it would make "is this inside a vendored tree" true of
  * everything. The root is this workspace's floor, not a tree.
  */
-export function vendoredDirectories() {
+export function vendoredDirectories(roots = PROJECT_ROOTS) {
+  assertProjectRootsAreReal(roots);
   const universe = new Set(vendoredUniverse());
   const above = new Set();
   const holdsVendored = new Set();
@@ -237,7 +308,11 @@ export function vendoredDirectories() {
     }
   }
   return new Set(
-    [...above].filter((dir) => holdsVendored.has(dir) || !aboveExcluded.has(dir)),
+    [...above].filter(
+      (dir) =>
+        !underProjectRoot(dir, roots) &&
+        (holdsVendored.has(dir) || !aboveExcluded.has(dir)),
+    ),
   );
 }
 
