@@ -109,17 +109,33 @@ following the checklist restores one line and loses the trait.
 
 ### Task 2: Classify all 48 changed paths
 
-- [ ] build the disposition table: every changed vendored path is **subject matter** (with
+- [x] build the disposition table: every changed vendored path is **subject matter** (with
       the task that owns it), **incidental divergence** (with its `UPSTREAM.md` number), or
       **excluded** (with its reason)
-- [ ] key it by path, so a file moving does not silently lose its entry
-- [ ] verify the six existing divergences still describe real edits
-- [ ] make an unclassified changed path a test failure naming the path and the three
+- [x] key it by path, so a file moving does not silently lose its entry
+- [x] verify the six existing divergences still describe real edits
+- [x] make an unclassified changed path a test failure naming the path and the three
       choices, so the next person is told what to do rather than only what went wrong
-- [ ] write tests that every changed path has exactly one disposition
-- [ ] write tests that a disposition for a path that no longer differs also fails — a stale
+- [x] write tests that every changed path has exactly one disposition
+- [x] write tests that a disposition for a path that no longer differs also fails — a stale
       entry is how the table starts lying
-- [ ] run tests — must pass before Task 3
+- [x] run tests — must pass before Task 3
+
+**Found while doing it.** The 48 split 35 subject-matter / 9 incidental / 4 excluded, in
+`tools/vendor-check/dispositions.mjs`. Two things the discovery pass did not have:
+
+- **Divergences 1, 2 and 3 have no diff against the baseline, because the vendoring
+  commit applied them itself** — the port needed `pnpm install` to work before it could
+  write a line. `browser/package.json`, `pnpm-workspace.yaml` and the root `package.json`
+  therefore never appear in the survey, and *no check has ever covered them*: a re-vendor
+  that dropped the `postinstall` replacement leaves every diff-based check green while
+  producing no Electron binary. They are checked by content instead
+  (`divergenceEvidenceHolds`), which is the only honest question to ask of an edit that
+  is the baseline.
+- **Six incidental divergences have no `UPSTREAM.md` number yet** — the five Task 4 names
+  plus `engine/Cargo.lock`, which is cargo's regeneration of the two manifest edits. The
+  gap is pinned by `UNRECORDED_BUDGET = 6` so it cannot grow while it waits; Task 4 takes
+  it to 0.
 
 ### Task 3: Rewrite `unchanged.test.mjs` onto the derived scope
 
@@ -145,7 +161,9 @@ following the checklist restores one line and loses the trait.
       (the `read_exact_at` shim replacing `std::os::unix::fs::FileExt`),
       `pixel-node/src/surface.rs` (the `cfg_attr(windows, allow(irrefutable_let_patterns))`),
       `pixel-react/scripts/build-native.mjs` (rewritten, including the `win32` branch of
-      `libraryName`), and both `Cargo.toml` files
+      `libraryName`), both `Cargo.toml` files, and `engine/Cargo.lock` (cargo's
+      regeneration of those two, found in Task 2) — six in all, which is
+      `UNRECORDED_BUDGET`; take it to 0
 - [ ] make the exhaustiveness claim true, or narrow it to what is actually checked — do not
       leave a sentence that promises more than the guard delivers
 - [ ] state which trees are guarded and how the scope is derived, so the next reader knows
