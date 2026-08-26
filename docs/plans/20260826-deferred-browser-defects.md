@@ -167,15 +167,50 @@ while the verb ran*. `cookConsoleModes` hands that stdin to `cmd.exe` with
 
 ### Task 4: Verify acceptance criteria
 
-- [ ] confirm a second browser launched against a live first one does not take its profile
-- [ ] confirm no `terminal-browser.lock` remains after a normal foreground quit
-- [ ] confirm a stale lock naming a dead pid is still reclaimed — the fix must not make
-      recovery from a real crash worse
-- [ ] confirm `node --test` fails if the new `profile.ts` divergence loses either its
-      `UPSTREAM.md` entry or its disposition
-- [ ] rebuild, then run the full suite: `node --test "tools/*/*.test.mjs"`,
-      `cargo nextest run --workspace`
-- [ ] run `python tools/vendor-check/fmt-scope.py` and `clippy-scope.py` — 0 on port lines
+The two unit suites answer these with `process.kill` replaced, which is the only way to
+make Windows return a chosen code — but it means no test yet ran the real probe against a
+real process. `tools/acceptance/profile-lock.test.mjs` is that half: every pid in it is a
+child this suite spawned, live or `taskkill /F`ed, and the Electron stub is a working
+object (`setPath` moves `userData`, `exit` is `process.exit`, `on` is a deliberate no-op
+because `app.exit` emitting no `will-quit` is the thing being worked around).
+
+- [x] confirm a second browser launched against a live first one does not take its profile
+      — two real processes against one `appData`: the second chose profile 2 and the
+      first's lock still named the first's pid afterwards. The probe's real answer is
+      asserted rather than assumed (`ok` or `EPERM`, never `ESRCH`), so a platform that
+      started reporting a running process as gone fails here by name. Peers cannot
+      produce `EPERM` — a test cannot elevate a child — so that branch stays pinned by
+      `tools/browser/profile.test.mjs`; this covers the criterion, not the branch
+- [x] confirm no `terminal-browser.lock` remains after a normal foreground quit — both
+      exit routes, each in a process that really terminated through `app.exit`, checked
+      after it was gone rather than against a recorded call. The signal is emitted
+      *inside* the child: delivering one from outside on Windows terminates the target
+      without running handlers, which would report a leak the fix does prevent. Both
+      discriminate — deleting the two `releaseProfileLock()` calls fails both, checked
+- [x] confirm a stale lock naming a dead pid is still reclaimed — the fix must not make
+      recovery from a real crash worse — the holder is killed with `taskkill /F`, which
+      runs no destructor, so the lock genuinely outlives it; the next launch probes that
+      pid, gets a real `ESRCH`, and takes profile 1 back. The wait for its death uses
+      `tasklist`, not `process.kill`, so the wait cannot agree with the answer by
+      construction
+- [x] confirm `node --test` fails if the new `profile.ts` divergence loses either its
+      `UPSTREAM.md` entry or its disposition — both halves removed in turn and restored.
+      Dropping the disposition fails 4 tests (unclassified path, the 45/35/10 counts, the
+      one-for-one match, and `unchanged`); dropping entry 13 fails 3 (the path
+      `UPSTREAM.md` mentions, the numbered-entry set, and every incidental having a
+      number). The guard needs both, which is what makes it a record rather than a note
+- [x] rebuild, then run the full suite: `node --test "tools/*/*.test.mjs"`,
+      `cargo nextest run --workspace` — `corepack pnpm -r build`, then 539 node tests
+      (the 4 new ones included) and 467 cargo tests, all green
+- [x] run `python tools/vendor-check/fmt-scope.py` and `clippy-scope.py` — 0 on port lines
+      — 297 rustfmt complaints and 12 clippy warnings, all 0 on port lines
+
+One thing is deliberately **not** asserted: that the next launch reuses the freed profile.
+It does — and it does without the fix too, because a leaked lock names a pid that has just
+died and `alive()` correctly reclaims it. The leak only costs the user anything once
+Windows hands that pid to something else, and no test can force a recycle. A test written
+that way passes on the defect while reading like it covers it, so it was removed rather
+than kept; the lock's absence is the assertion that discriminates.
 
 ### Task 5: [Final] Update documentation
 
