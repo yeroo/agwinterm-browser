@@ -463,12 +463,17 @@ export function dispositionedPaths() {
  * without a test that edits or deletes a vendored file out from under the rest of the
  * run. `deleted` is passed through rather than folded into `stale`: a file that is
  * gone is one event, and reporting it twice under two names reads as two problems.
+ *
+ * `count` is injectable for one reason: a test needs to ask "what would this guard
+ * have said about `pixel-node/src/surface.rs` before anyone declared it?", and the
+ * honest answer requires the table to be missing that row. Simulating the row's
+ * absence beats editing the working tree out from under the rest of the run.
  */
-export function auditDispositions({ changed, deleted = [] }) {
+export function auditDispositions({ changed, deleted = [] }, count = dispositionCount) {
   const gone = new Set(deleted);
   const live = new Set(changed);
   return {
-    unclassified: changed.filter((file) => dispositionCount(file) === 0).sort(),
+    unclassified: changed.filter((file) => count(file) === 0).sort(),
     stale: dispositionedPaths().filter((file) => !live.has(file) && !gone.has(file)),
     deleted: [...deleted].sort(),
   };
@@ -498,4 +503,90 @@ export function divergenceEvidenceHolds(number, read = readRepoFile) {
     );
   }
   return entry.evidence.test(read(entry.path));
+}
+
+/**
+ * One line of "what this path is and why it was expected to differ", for a path the
+ * table dispositions.
+ *
+ * This is the output the old `SRC`-scoped guard had and that the derived scope must
+ * not lose. Its failure named the file and the recorded reason; a check over 235
+ * paths that answered "something changed" would be a wider guard and a worse one, so
+ * the reason travels with every path the guard reports.
+ */
+export function describeDisposition(file) {
+  const verdict = dispositionOf(file);
+  if (verdict.kind === "subject") {
+    return `${file} — subject matter, owned by ${verdict.task}: ${verdict.reason}`;
+  }
+  if (verdict.kind === "incidental") {
+    const where =
+      verdict.divergence === null
+        ? "not yet numbered in UPSTREAM.md"
+        : `divergence ${verdict.divergence} in UPSTREAM.md`;
+    return `${file} — incidental divergence, ${where}: ${verdict.reason}`;
+  }
+  return `${file} — not vendored: ${verdict.reason}`;
+}
+
+/**
+ * What to tell someone whose vendored file is gone.
+ *
+ * The failure this directory exists to catch and the one nothing detected until now:
+ * a file that is missing has no diff to inspect, so every diff-based check stays
+ * green while the tree is short a module.
+ */
+export function deletedMessage(file) {
+  return (
+    `${file} was vendored by ${BASELINE} and is not in the working tree. A re-vendor ` +
+    `that drops a file entirely is the failure this guard exists to catch, and a ` +
+    `missing file has no diff to inspect — so nothing else in the suite will say so. ` +
+    `Restore it (\`git checkout ${BASELINE} -- ${file}\`), or, if removing it is the ` +
+    `intent, make that a decision on the record rather than an absence.`
+  );
+}
+
+/**
+ * What to tell someone holding a disposition whose subject reverted or moved.
+ *
+ * The quieter of the two failures: a row that describes nothing still reads as a
+ * considered decision about a live edit, which is how the table starts lying.
+ */
+export function staleMessage(file) {
+  return (
+    `${file} has a disposition in tools/vendor-check/dispositions.mjs and no longer ` +
+    `differs from ${BASELINE}. Either the edit was reverted — delete the entry — or ` +
+    `the file moved, in which case re-key it at the new path. An entry whose subject ` +
+    `is gone keeps its authority and covers nothing.`
+  );
+}
+
+/**
+ * The guard's whole verdict on a survey: `{ ok, message, expected }`.
+ *
+ * Pure, and the reason it is pure is that the interesting cases are all things a test
+ * must not do to the working tree — edit a vendored file, delete one, or un-declare
+ * one — while the rest of the run is reading it.
+ *
+ * `count` is passed to `auditDispositions` so a caller can ask what the guard would
+ * have said before a given row existed. `expected` is the named-reason roster: one
+ * line per diverged path, in the same shape the old check's `EXPECTED_DIFFS` gave for
+ * `pixel-core` alone.
+ */
+export function guardVerdict({ changed, deleted = [] }, count = dispositionCount) {
+  const audit = auditDispositions({ changed, deleted }, count);
+  const problems = [
+    ...audit.deleted.map(deletedMessage),
+    ...audit.unclassified.map(unclassifiedMessage),
+    ...audit.stale.map(staleMessage),
+  ];
+  const gone = new Set(audit.deleted);
+  return {
+    ok: problems.length === 0,
+    message: problems.join("\n\n"),
+    expected: changed
+      .filter((file) => !gone.has(file) && count(file) === 1)
+      .sort()
+      .map(describeDisposition),
+  };
 }

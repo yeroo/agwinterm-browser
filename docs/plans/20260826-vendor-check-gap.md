@@ -139,18 +139,33 @@ following the checklist restores one line and loses the trait.
 
 ### Task 3: Rewrite `unchanged.test.mjs` onto the derived scope
 
-- [ ] replace the `SRC` + `pixel-core-files.json` scoping with the derived universe
-- [ ] keep the existing named-reason output: the message must still name the file and say
+- [x] replace the `SRC` + `pixel-core-files.json` scoping with the derived universe
+- [x] keep the existing named-reason output: the message must still name the file and say
       why it was expected to differ
-- [ ] keep `pixel-core-files.json` as the inventory assertion it already is, but stop it
+- [x] keep `pixel-core-files.json` as the inventory assertion it already is, but stop it
       deciding what gets checked
-- [ ] keep the assertion that `45b5e43` is the vendoring commit
-- [ ] confirm the three `pixel-node` files, the one `pixel-react` file and the two
+- [x] keep the assertion that `45b5e43` is the vendoring commit
+- [x] confirm the three `pixel-node` files, the one `pixel-react` file and the two
       `Cargo.toml` files are now covered
-- [ ] write tests for a simulated undeclared edit to `pixel-node/src/surface.rs` failing
-- [ ] write tests for a simulated edit under `pixel-react` failing
-- [ ] write tests for a simulated deletion failing
-- [ ] run tests — must pass before Task 4
+- [x] write tests for a simulated undeclared edit to `pixel-node/src/surface.rs` failing
+- [x] write tests for a simulated edit under `pixel-react` failing
+- [x] write tests for a simulated deletion failing
+- [x] run tests — must pass before Task 4
+
+**Found while doing it.** The named-reason output is now `guardVerdict` in
+`dispositions.mjs` — pure, so the three simulated failures are driven by a fabricated
+survey rather than by a test writing to `pixel-node/src` while the rest of the suite
+reads it. Two notes on what that cost and bought:
+
+- **Simulating an undeclared `surface.rs` needs the row withheld, not the file edited.**
+  `surface.rs` is dispositioned *today* precisely because this check now demands it, so
+  asking "would the guard have caught it?" means asking the question with the row
+  missing. `auditDispositions` and `guardVerdict` take an injectable `dispositionCount`
+  for that one reason.
+- **`pixel-react` is 23 vendored paths, not 35.** The discovery table said 23 and was
+  right; a first pass here counted the `pixel-node` and `pixel-react` greps together.
+  Both counts are now pinned in the test (12 and 23), so the scope silently shrinking
+  is a failure rather than an observation nobody makes.
 
 ### Task 4: Correct UPSTREAM.md
 
