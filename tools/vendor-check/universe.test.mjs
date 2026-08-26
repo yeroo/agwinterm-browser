@@ -12,6 +12,7 @@
 // undone itself and the test says so in those words.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,13 @@ import {
 } from "./universe.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(HERE, "..", "..");
+
+/** `git show`'s NUL-terminated path list, for asking the same question two ways. */
+function gitPaths(args) {
+  const out = execFileSync("git", args, { cwd: REPO, encoding: "utf8", timeout: 30_000 });
+  return out.split("\u0000").filter((field) => field !== "");
+}
 
 /** The trees the old `SRC`-scoped guard could not see. */
 const PREVIOUSLY_UNGUARDED = [
@@ -49,6 +57,34 @@ describe("the vendored universe", () => {
     assert.equal(paths.length, 239, `${BASELINE} no longer introduces 239 paths`);
     assert.deepEqual(paths, [...paths].sort(), "the universe is not sorted");
     assert.equal(new Set(paths).size, paths.length, "the universe has a duplicate");
+  });
+
+  it("leaves out what a vendoring commit deletes rather than adds", () => {
+    // `--name-only` lists a commit's removals beside its additions, so without
+    // `--diff-filter=d` a path the baseline *deleted* would enter the scope, survey as
+    // `deleted`, and be reported with a `git checkout` restoring a file that was meant
+    // to go. `45b5e43` deletes nothing, so the live call cannot show the difference —
+    // the query is checked instead, against a commit in this repo that does delete.
+    const source = fs.readFileSync(path.join(HERE, "universe.mjs"), "utf8");
+    assert.match(source, /"--diff-filter=d"/, "the scope query no longer drops deletions");
+    const deleting = "0e71f05";
+    const withDeletes = gitPaths(["show", "--name-only", "--format=", "-z", deleting]);
+    const without = gitPaths([
+      "show",
+      "--name-only",
+      "--format=",
+      "-z",
+      "--diff-filter=d",
+      deleting,
+    ]);
+    assert.ok(
+      withDeletes.length > without.length,
+      `${deleting} was chosen because it deletes paths; if it no longer does, this ` +
+        `test is checking that two identical lists are identical`,
+    );
+    for (const file of without) {
+      assert.ok(withDeletes.includes(file), "the filter dropped a path it should keep");
+    }
   });
 
   it("contains the trees the old guard could not see", () => {
@@ -196,15 +232,22 @@ describe("the survey against the baseline", () => {
 });
 
 describe("vendored trees, as directories rather than paths", () => {
-  const DIRS = vendoredDirectories();
+  // Lazy, and called from inside each test, for the reason `native-build.test.mjs`
+  // spells out: `vendoredDirectories` reaches `assertExclusionsAreReal`, which throws
+  // on a stale exclusion, and a throw from a `describe` callback prints `not ok` while
+  // counting as neither pass nor fail -- `node --test` still exits 0 (v22.19.0). At
+  // describe-time a stale exclusion would delete all seven tests below and leave the
+  // run green, which is the precise condition `assertExclusionsAreReal` exists to
+  // shout about. Inside a test, a throw is a failure the exit code knows about.
+  const dirs = () => vendoredDirectories();
 
   it("derives the directories from the commit and leaves the root out", () => {
     // Every path in the repo descends from `.`, so a root that qualified would make
     // `inVendoredTree` true of everything and the untracked check a repo-wide nag.
-    assert.ok(DIRS.has("engine/crates/pixel-node/src"));
-    assert.ok(DIRS.has("engine/packages/pixel-react/src"));
-    assert.ok(!DIRS.has("."), "the repo root is a vendored directory by the same rule");
-    assert.ok(!DIRS.has(""), "an empty directory name reached the set");
+    assert.ok(dirs().has("engine/crates/pixel-node/src"));
+    assert.ok(dirs().has("engine/packages/pixel-react/src"));
+    assert.ok(!dirs().has("."), "the repo root is a vendored directory by the same rule");
+    assert.ok(!dirs().has(""), "an empty directory name reached the set");
   });
 
   it("does not make a tree out of a directory only an excluded path put there", () => {
@@ -213,16 +256,16 @@ describe("vendored trees, as directories rather than paths", () => {
     // repo's own and not a vendored tree. Derived from the raw commit it qualified
     // anyway, and every plan document was an untracked-file failure for as long as it
     // took to write. A guard whose answer to ordinary work is "stop" gets silenced.
-    assert.ok(!DIRS.has("docs/plans"), "an excluded path still makes its directory a tree");
-    assert.ok(!inVendoredTree("docs/plans/20260826-vendor-check-gap.md", DIRS));
+    assert.ok(!dirs().has("docs/plans"), "an excluded path still makes its directory a tree");
+    assert.ok(!inVendoredTree("docs/plans/20260826-vendor-check-gap.md", dirs()));
     // `docs/design` stays, and for the opposite reason: `01-baseline-errors.md` and
     // the rest of the design set are in the universe, and only `UPSTREAM.md` is out.
-    assert.ok(DIRS.has("docs/design"), "docs/design lost its vendored paths");
+    assert.ok(dirs().has("docs/design"), "docs/design lost its vendored paths");
   });
 
   it("places a file by its own directory", () => {
-    assert.ok(inVendoredTree("engine/crates/pixel-node/src/shm.rs", DIRS));
-    assert.ok(inVendoredTree("engine/packages/pixel-react/src/surface.ts", DIRS));
+    assert.ok(inVendoredTree("engine/crates/pixel-node/src/shm.rs", dirs()));
+    assert.ok(inVendoredTree("engine/packages/pixel-react/src/surface.ts", dirs()));
   });
 
   it("places a file in a subdirectory no vendored path lives in", () => {
@@ -230,12 +273,12 @@ describe("vendored trees, as directories rather than paths", () => {
     // directory: a re-vendor that adds `backends/` under `pixel-node/src` puts files
     // in a directory that shares no vendored path, and it is plainly still inside the
     // tree.
-    assert.ok(inVendoredTree("engine/crates/pixel-node/src/backends/win32.rs", DIRS));
+    assert.ok(inVendoredTree("engine/crates/pixel-node/src/backends/win32.rs", dirs()));
   });
 
   it("leaves alone what is not in a vendored tree at all", () => {
-    assert.ok(!inVendoredTree("scratch/notes.md", DIRS));
-    assert.ok(!inVendoredTree("notes.md", DIRS), "a root-level file counted as vendored");
+    assert.ok(!inVendoredTree("scratch/notes.md", dirs()));
+    assert.ok(!inVendoredTree("notes.md", dirs()), "a root-level file counted as vendored");
   });
 
   it("agrees with the survey", () => {
@@ -257,7 +300,7 @@ describe("vendored trees, as directories rather than paths", () => {
           "engine/packages/pixel-react/src/surface.ts",
           "docs/plans/20260826-vendor-check-gap.md",
         ],
-        DIRS,
+        dirs(),
       ),
       [
         "engine/crates/pixel-node/src/backends/win32.rs",
@@ -270,7 +313,7 @@ describe("vendored trees, as directories rather than paths", () => {
     assert.deepEqual(
       untrackedInVendoredTrees(
         ["engine/crates/pixel-node/src/z.rs", "engine/crates/pixel-node/src/a.rs"],
-        DIRS,
+        dirs(),
       ),
       ["engine/crates/pixel-node/src/a.rs", "engine/crates/pixel-node/src/z.rs"],
     );

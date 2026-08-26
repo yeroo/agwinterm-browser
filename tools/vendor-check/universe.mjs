@@ -100,16 +100,29 @@ function splitNul(output) {
 let universeCache = null;
 
 /**
- * Every path the vendoring commit introduced, sorted. This is the raw 239, before
- * the exclusions are taken out — `vendoredUniverse` is what most callers want.
+ * Every path the vendoring commit put in the tree, sorted. This is the raw 239,
+ * before the exclusions are taken out — `vendoredUniverse` is what most callers want.
  *
  * `-z` rather than plain `--name-only` because `core.quotepath` will otherwise
  * mangle any path outside ASCII into a C-style escape, and a path that reads back
  * differently than it is on disk is a silent hole in the scope.
+ *
+ * `--diff-filter=d` — lowercase, so deletions are the one status left out — because
+ * `--name-only` otherwise lists what a commit *removed* alongside what it added, and
+ * a path this commit deleted is not vendored code, it is the absence of some. It
+ * changes nothing today: `45b5e43` deletes nothing, and the count is 239 either way.
+ * It matters the moment `BASELINE` moves, which is what `untrackedMessage` and the
+ * `UPSTREAM.md` checklist both tell a re-vendorer to do — a re-vendor that drops
+ * upstream files is the ordinary case, and without this every dropped path would join
+ * the universe, survey as `deleted`, and be reported with a `git checkout` telling the
+ * reader to restore a file upstream deliberately removed. The guard would fail loudly
+ * on the exact workflow it documents.
  */
 export function vendoringCommitPaths() {
   if (universeCache) return universeCache;
-  universeCache = splitNul(git(["show", "--name-only", "--format=", "-z", BASELINE])).sort();
+  universeCache = splitNul(
+    git(["show", "--name-only", "--format=", "-z", "--diff-filter=d", BASELINE]),
+  ).sort();
   return universeCache;
 }
 

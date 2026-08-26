@@ -588,10 +588,16 @@ nothing tell them so.
 The repair is [`20260826-vendor-check-gap.md`](../plans/20260826-vendor-check-gap.md), and
 its one design decision is that **the scope is derived, not listed**. `universe.mjs` asks
 `git show --name-only 45b5e43` what was vendored — 239 paths, four declared out with a
-reason each — so a newly vendored file is in scope the moment it is committed. A per-tree
-manifest was the first option and was rejected for reproducing the defect: the scope would
-still have been whatever someone remembered to write down. Everything that differs now
-carries a disposition in `dispositions.mjs`, deletions are caught, and an untracked file in
+reason each — so every path that commit carried is in scope with nobody to remind. Note the
+edge of that, because it is the one thing a one-commit scope cannot do: a file vendored
+*later* is not in the universe, and committing it under this baseline silences the
+untracked finding without putting it in scope. For genuinely new upstream code the answer
+is a re-vendor that moves `BASELINE`, which `untrackedMessage` and the checklist at the end
+of `UPSTREAM.md` both say out loud.
+
+A per-tree manifest was the first option and was rejected for reproducing the defect: the
+scope would still have been whatever someone remembered to write down. Everything that
+differs now carries a disposition in `dispositions.mjs`, deletions are caught, and an untracked file in
 a vendored tree is caught — that last one found by hand-testing the finished guard, which
 was still at 472/472 with an intruder sitting in each tree, because every check it had asked
 a question about a path the vendoring commit introduced.

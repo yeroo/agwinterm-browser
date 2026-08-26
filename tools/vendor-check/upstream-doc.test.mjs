@@ -76,14 +76,22 @@ function numberedEntries(section = divergenceSection()) {
 }
 
 describe("the UPSTREAM.md divergence list", () => {
-  const entries = numberedEntries();
+  // Lazy, and called from inside each test, for the reason `native-build.test.mjs`
+  // spells out: `numberedEntries` reaches `divergenceSection`, which *asserts* the
+  // heading is there, and a throw from a `describe` callback prints `not ok` while
+  // counting as neither pass nor fail -- `node --test` still exits 0 (v22.19.0). At
+  // describe-time a renamed heading would silently drop every test in this suite and
+  // leave the run green, which is the same silent pass the branch exists to remove.
+  // Inside a test, a throw is a failure the runner's exit code knows about.
+  const entries = () => numberedEntries();
 
   it("numbers its entries 1..N with no gaps and no repeats", () => {
-    const numbers = entries.map((entry) => entry.number);
+    const list = entries();
+    const numbers = list.map((entry) => entry.number);
     // Before the comparison, because `deepEqual([], [])` passes: a change to the
     // `N. **\`path\`` convention would make `numberedEntries` parse nothing and leave
     // this test green on a list it could no longer read at all.
-    assert.ok(entries.length > 0, `${DOC}'s numbered entries no longer parse`);
+    assert.ok(list.length > 0, `${DOC}'s numbered entries no longer parse`);
     assert.deepEqual(
       numbers,
       numbers.map((_, index) => index + 1),
@@ -94,7 +102,7 @@ describe("the UPSTREAM.md divergence list", () => {
 
   it("has exactly the entries DIVERGENCES claims, at the same numbers", () => {
     assert.deepEqual(
-      entries,
+      entries(),
       Object.entries(DIVERGENCES).map(([number, entry]) => ({
         number: Number(number),
         path: entry.path,
@@ -112,7 +120,7 @@ describe("the UPSTREAM.md divergence list", () => {
     // still a real divergence a re-vendorer re-applies. Exclusion decides whether a
     // path needs a *diff* explained, not whether it can carry an instruction.
     const vendored = new Set(vendoringCommitPaths());
-    for (const { number, path: file } of entries) {
+    for (const { number, path: file } of entries()) {
       assert.ok(
         vendored.has(file),
         `divergence ${number} is about ${file}, which ${BASELINE} never introduced. ` +
@@ -126,7 +134,7 @@ describe("the UPSTREAM.md divergence list", () => {
     // The two halves of "really there" are different questions. An edit the *port*
     // applied shows up as a diff against the baseline. An edit the *vendoring commit*
     // applied cannot — it is the baseline — so the only honest check is the content.
-    for (const { number, path: file } of entries) {
+    for (const { number, path: file } of entries()) {
       if (DIVERGENCES[number].appliedIn === "port") {
         assert.ok(
           SURVEY.changed.includes(file),
@@ -145,7 +153,7 @@ describe("the UPSTREAM.md divergence list", () => {
   });
 
   it("gives every incidental divergence in the table a numbered entry", () => {
-    const documented = new Set(entries.map((entry) => entry.path));
+    const documented = new Set(entries().map((entry) => entry.path));
     const missing = Object.keys(INCIDENTAL).filter((file) => !documented.has(file));
     assert.deepEqual(
       missing,
@@ -161,7 +169,7 @@ describe("the UPSTREAM.md divergence list", () => {
     // list: these five paths are why the plan exists, and an entry for each is the
     // deliverable. `Cargo.lock` is left out on purpose — it is cargo's output, and
     // pinning it here would make a lockfile refresh look like a lost divergence.
-    const documented = new Set(entries.map((entry) => entry.path));
+    const documented = new Set(entries().map((entry) => entry.path));
     for (const file of [
       "engine/crates/pixel-node/src/capture.rs",
       "engine/crates/pixel-node/src/surface.rs",
@@ -175,7 +183,8 @@ describe("the UPSTREAM.md divergence list", () => {
 });
 
 describe("the divergence-list preamble", () => {
-  const section = divergenceSection();
+  // Lazy for the reason the divergence-list suite above gives.
+  const section = () => divergenceSection();
 
   it("no longer claims the list makes the untouched files checkable", () => {
     // The exact sentence that stood here until 2026-08-26. It was false: the guard
@@ -183,12 +192,12 @@ describe("the divergence-list preamble", () => {
     // the port's subject matter. Pinned by its own words so it cannot be restored by
     // someone copying an old revision forward.
     assert.ok(
-      !section.includes('the claim "the other\n43 files are untouched" stays checkable'),
+      !section().includes('the claim "the other\n43 files are untouched" stays checkable'),
       `${DOC} has the retired exhaustiveness claim back. What is checked is derived ` +
         `from the vendoring commit, not from this list — say that instead.`,
     );
     assert.ok(
-      !/Each is asserted by a test in `tools\/vendor-check\/`/.test(section),
+      !/Each is asserted by a test in `tools\/vendor-check\/`/.test(section()),
       `${DOC} claims every divergence is asserted by a test. That was true of two of ` +
         `six when it was written; if it is true now, say what makes it true.`,
     );
@@ -197,15 +206,16 @@ describe("the divergence-list preamble", () => {
   it("says where the scope comes from, so the list is not read as the boundary", () => {
     // Prose, so held to the facts a reader needs and not to wording: the baseline
     // commit, that git decides the scope, and the three vendored trees.
-    assert.match(section, /45b5e43/, "the preamble does not name the vendoring commit");
-    assert.match(section, /git show --name-only/, "the preamble does not say git decides the scope");
+    const text = section();
+    assert.match(text, /45b5e43/, "the preamble does not name the vendoring commit");
+    assert.match(text, /git show --name-only/, "the preamble does not say git decides the scope");
     for (const tree of ["pixel-core", "pixel-node", "pixel-react"]) {
-      assert.match(section, new RegExp(tree), `the preamble does not name ${tree} as guarded`);
+      assert.match(text, new RegExp(tree), `the preamble does not name ${tree} as guarded`);
     }
   });
 
   it("says a deleted vendored file fails, which is the failure a diff cannot see", () => {
-    assert.match(section, /\*deleted\* fails/);
+    assert.match(section(), /\*deleted\* fails/);
   });
 });
 
@@ -230,7 +240,10 @@ function quotedFailures(section = checklistSection()) {
 }
 
 describe("the re-vendoring checklist", () => {
-  const section = checklistSection();
+  // Lazy for the reason the divergence-list suite above gives: `checklistSection`
+  // asserts its heading exists, and at describe-time that throw would take all three
+  // tests below out of the run without failing it.
+  const section = () => checklistSection();
 
   it("quotes failure text the guard can really produce", () => {
     // The table tells a re-vendorer to match what the suite printed against a row. A
@@ -246,7 +259,7 @@ describe("the re-vendoring checklist", () => {
       .join("\n")
       .replace(/\s+/g, " ");
 
-    const quotes = quotedFailures(section);
+    const quotes = quotedFailures(section());
     assert.ok(quotes.length >= 4, "the failure table has lost its quoted messages");
     for (const quote of quotes) {
       const needle = quote.replace(/`/g, "").replace(/\s+/g, " ").trim();
@@ -272,7 +285,7 @@ describe("the re-vendoring checklist", () => {
       ["engine/packages/pixel-react/package.json", "build:native"],
     ]) {
       assert.ok(
-        section.includes(script),
+        section().includes(script),
         `the checklist does not tell a re-vendorer to run ${script}`,
       );
       assert.ok(
@@ -287,7 +300,7 @@ describe("the re-vendoring checklist", () => {
       "tools/vendor-check/dispositions.mjs",
       "tools/vendor-check/universe.mjs",
     ]) {
-      assert.ok(section.includes(file), `the checklist does not name ${file}`);
+      assert.ok(section().includes(file), `the checklist does not name ${file}`);
       assert.doesNotThrow(
         () => readRepoFile(file),
         `the checklist sends a re-vendorer to ${file}, which is not there`,
@@ -301,7 +314,14 @@ describe("what the docs claim the guard covers", () => {
   // and the Tests section of the README. Both are the kind of number that is right when
   // written and wrong after the next vendoring commit, and a stale one overstates
   // coverage in exactly the direction this plan existed to correct.
-  const counts = { commit: vendoringCommitPaths().length, universe: vendoredUniverse().length };
+  // Lazy for the reason the divergence-list suite above gives -- doubly so here,
+  // because `vendoredUniverse` calls `assertExclusionsAreReal`, and a stale exclusion
+  // is exactly the condition that check exists to shout about. At describe-time it
+  // would silence both tests below instead of failing the run.
+  const counts = () => ({
+    commit: vendoringCommitPaths().length,
+    universe: vendoredUniverse().length,
+  });
 
   it("states the path count the vendoring commit really has", () => {
     // Anchored on the sentence each document actually makes the claim in, the way the
@@ -309,6 +329,7 @@ describe("what the docs claim the guard covers", () => {
     // any future correct sentence — "the 12 paths under `pixel-node/src`" — would fail
     // a vendoring-commit assertion, and a test that fails on unrelated true prose is
     // one that gets edited rather than obeyed.
+    const commit = counts().commit;
     for (const [doc, claim] of [
       [DOC, /introduced (\d+) paths/],
       ["README.md", /the (\d+) paths `45b5e43`/],
@@ -318,8 +339,8 @@ describe("what the docs claim the guard covers", () => {
       assert.ok(match, `${doc} no longer says how many paths ${BASELINE} put in scope`);
       assert.equal(
         Number(match[1]),
-        counts.commit,
-        `${doc} says ${match[1]} paths where ${BASELINE} introduced ${counts.commit}. ` +
+        commit,
+        `${doc} says ${match[1]} paths where ${BASELINE} introduced ${commit}. ` +
           `A count written once and never re-derived is how a coverage claim goes ` +
           `stale without anyone editing it.`,
       );
@@ -327,13 +348,14 @@ describe("what the docs claim the guard covers", () => {
   });
 
   it("states the guarded count left after the declared exclusions", () => {
+    const universe = counts().universe;
     const text = readRepoFile(DOC).replace(/\r\n/g, "\n");
     const match = text.match(/remaining (\d+)/);
     assert.ok(match, `${DOC} no longer says how many paths are left after EXCLUSIONS`);
     assert.equal(
       Number(match[1]),
-      counts.universe,
-      `${DOC} says ${match[1]} guarded paths and vendoredUniverse() has ${counts.universe}`,
+      universe,
+      `${DOC} says ${match[1]} guarded paths and vendoredUniverse() has ${universe}`,
     );
   });
 });
