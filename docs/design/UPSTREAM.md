@@ -370,7 +370,7 @@ completeness check; this list is not.**
 
    | what it says | what happened |
    |---|---|
-   | *…no longer differs from 45b5e43* | a divergence you did not re-apply. The `expected` roster in the same output is the whole re-apply list, one line per path, with its reason |
+   | *…no longer differs from 45b5e43* | a divergence you did not re-apply. The roster printed under "Every path that is supposed to differ" in the same output is the whole re-apply list, one line per path, with its reason |
    | *…was vendored by 45b5e43 and is not in the working tree* | the copy dropped a file. No diff can show this one, which is why it is checked separately |
    | *…is inside a vendored tree and git does not track it* | upstream added a module. Committing it under the old baseline only hides it — it is tracked and still outside the universe — so this one means moving `BASELINE`, per the closing note. If the file is this repo's own, commit it; otherwise name it in `.gitignore`. All three are decisions on the record; leaving it is not |
    | *…differs from 45b5e43 and has no disposition* | a path that differs and is neither subject matter nor a numbered divergence. The message names the three choices |

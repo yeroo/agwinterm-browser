@@ -583,6 +583,20 @@ export function describeDisposition(file, verdict = dispositionOf(file)) {
     return `${file} — subject matter, owned by ${verdict.task}: ${verdict.reason}`;
   }
   if (verdict.kind === "incidental") {
+    // `null` is the declaration that no `UPSTREAM.md` number exists yet; a missing
+    // field is not. `dispositionOf` spreads the table entry, so an `INCIDENTAL` row
+    // written without a `divergence` at all used to reach the numbered branch and
+    // print "divergence undefined in UPSTREAM.md" — a line that reads like a
+    // reference to something and points at nothing, which is what the `TypeError`
+    // above exists to keep out of the guard's product.
+    if (verdict.divergence !== null && !Number.isInteger(verdict.divergence)) {
+      throw new TypeError(
+        `${file} is INCIDENTAL with divergence ${JSON.stringify(verdict.divergence)}. It ` +
+          `is either a number in docs/design/UPSTREAM.md or an explicit \`null\` saying ` +
+          `nobody has written it up yet. Anything else describes a divergence a ` +
+          `re-vendorer cannot look up.`,
+      );
+    }
     const where =
       verdict.divergence === null
         ? "not yet numbered in UPSTREAM.md"
@@ -690,6 +704,15 @@ export function staleMessage(file) {
 }
 
 /**
+ * The line the roster prints under.
+ *
+ * Exported because `UPSTREAM.md`'s checklist tells a re-vendorer that the roster is in
+ * the same output as the failure, and `upstream-doc.test.mjs` holds the document to
+ * this string rather than to a paraphrase of it.
+ */
+export const ROSTER_HEADING = `Every path that is supposed to differ from ${BASELINE}, and why:`;
+
+/**
  * The guard's whole verdict on a survey: `{ ok, message, expected }`.
  *
  * Pure, and the reason it is pure is that the interesting cases are all things a test
@@ -700,6 +723,13 @@ export function staleMessage(file) {
  * have said before a given row existed. `expected` is the named-reason roster: one
  * line per diverged path, in the same shape the old check's `EXPECTED_DIFFS` gave for
  * `pixel-core` alone.
+ *
+ * A failing `message` ends with that roster, because the roster is the guard's product
+ * and it was reaching nobody. `unchanged.test.mjs` asserts with `message`, so a stale
+ * entry printed one line about the path that stopped differing and not a word about the
+ * forty-three a re-vendorer still has to re-apply — while the `UPSTREAM.md` checklist
+ * sent them to exactly that list, "in the same output". A field only the tests
+ * destructure is not output.
  */
 export function guardVerdict(
   { changed, deleted = [], untracked = [] },
@@ -714,14 +744,20 @@ export function guardVerdict(
     ...audit.stale.map(staleMessage),
   ];
   const gone = new Set(audit.deleted);
+  const expected = changed
+    .filter((file) => !gone.has(file) && count(file) === 1)
+    .sort()
+    // Not point-free: `describeDisposition` takes an optional verdict as its second
+    // argument, and `map` hands every callback the index there.
+    .map((file) => describeDisposition(file));
+  // Indented, so the roster reads as one block under its heading rather than as more
+  // findings. Empty only when every diverged path was itself a finding, in which case
+  // a heading over nothing is the misleading half.
+  const roster =
+    expected.length === 0 ? [] : [`${ROSTER_HEADING}\n  ${expected.join("\n  ")}`];
   return {
     ok: problems.length === 0,
-    message: problems.join("\n\n"),
-    expected: changed
-      .filter((file) => !gone.has(file) && count(file) === 1)
-      .sort()
-      // Not point-free: `describeDisposition` takes an optional verdict as its second
-      // argument, and `map` hands every callback the index there.
-      .map((file) => describeDisposition(file)),
+    message: problems.length === 0 ? "" : [...problems, ...roster].join("\n\n"),
+    expected,
   };
 }

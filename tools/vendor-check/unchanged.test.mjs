@@ -33,6 +33,7 @@ import { describe, it } from "node:test";
 
 import {
   INCIDENTAL,
+  ROSTER_HEADING,
   describeDisposition,
   dispositionCount,
   dispositionOf,
@@ -406,6 +407,54 @@ describe("the named-reason roster", () => {
       reason: "an incidental edit nobody has written up yet",
     });
     assert.match(line, /not yet numbered in UPSTREAM\.md/);
+  });
+
+  it("refuses an incidental entry with no divergence field at all", () => {
+    // `null` says "nobody has written this up yet" on purpose; a row that simply omits
+    // the field says nothing, and `dispositionOf` spreads the entry either way. The
+    // numbered branch used to take it and print "divergence undefined in UPSTREAM.md"
+    // — a reference to a thing that does not exist, in the one line a re-vendorer acts
+    // on.
+    assert.throws(
+      () =>
+        describeDisposition("engine/crates/pixel-node/src/somewhere-new.rs", {
+          kind: "incidental",
+          reason: "an incidental edit whose row was written without a number",
+        }),
+      /or an explicit `null` saying/,
+    );
+  });
+
+  it("puts the roster in the failure output, which is where UPSTREAM.md sends the reader", () => {
+    // The roster was built on every call and returned in a field only this file ever
+    // destructured, so the list a re-vendorer is told to read was in no output at all:
+    // a stale entry printed one line about the path that stopped differing and nothing
+    // about the forty-three still to re-apply by hand.
+    const reverted = "engine/crates/pixel-core/src/terminal.rs";
+    const verdict = guardVerdict({
+      changed: dispositionedPaths().filter((file) => file !== reverted),
+      deleted: [],
+    });
+    assert.ok(!verdict.ok, "a stale disposition passed");
+    assert.ok(
+      verdict.message.includes(ROSTER_HEADING),
+      `the failure output has no roster heading: ${verdict.message}`,
+    );
+    for (const line of verdict.expected) {
+      assert.ok(verdict.message.includes(line), `a roster line is not in the output: ${line}`);
+    }
+  });
+
+  it("prints no heading over an empty roster, and no message at all when the guard passes", () => {
+    // Both ways the heading could be printed at nobody. A survey whose diverged paths
+    // are all themselves findings has nothing to list, and a passing guard has no
+    // output — `message` is what this file hands `assert.ok` as failure text, so a
+    // message on success is a paragraph printed under a green run.
+    const gone = guardVerdict({ changed: [], deleted: ["engine/crates/pixel-core/src/lib.rs"] });
+    assert.ok(!gone.ok);
+    assert.deepEqual(gone.expected, []);
+    assert.ok(!gone.message.includes(ROSTER_HEADING), "a heading was printed over nothing");
+    assert.equal(guardVerdict({ changed: dispositionedPaths(), deleted: [] }).message, "");
   });
 
   it("says an excluded path is not vendored, and gives the declared reason", () => {

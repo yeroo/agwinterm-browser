@@ -32,6 +32,7 @@ import { describe, it } from "node:test";
 import {
   DIVERGENCES,
   INCIDENTAL,
+  ROSTER_HEADING,
   deletedMessage,
   divergenceEvidenceHolds,
   readRepoFile,
@@ -273,6 +274,21 @@ describe("the re-vendoring checklist", () => {
           `already wrong.`,
       );
     }
+  });
+
+  it("quotes the roster heading the guard really prints over the re-apply list", () => {
+    // The other half of "match what the suite printed against a row": this row does not
+    // quote a failure, it tells the reader that the whole re-apply list is in the same
+    // output and names the line it sits under. It said so while `expected` was returned
+    // in a field and printed nowhere, so the row was true of the code's intent and
+    // false of its output. Held to the exported heading, not to a paraphrase.
+    const quoted = section().match(/roster printed under "([^"]+)"/);
+    assert.ok(quoted, `the checklist no longer says where the re-apply list is printed`);
+    assert.ok(
+      ROSTER_HEADING.includes(quoted[1]),
+      `the checklist sends a re-vendorer to "${quoted[1]}" and the guard prints ` +
+        `"${ROSTER_HEADING}". A row nobody can match is worse than no row.`,
+    );
   });
 
   it("names scripts that exist, in the packages that define them", () => {

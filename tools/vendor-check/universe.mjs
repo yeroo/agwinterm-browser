@@ -188,15 +188,25 @@ export function classify(candidate) {
 }
 
 /**
- * Every directory holding a path of the vendored universe, derived rather than listed.
+ * Every directory of the vendored trees, derived rather than listed.
  *
- * Derived from `vendoredUniverse()` rather than from the raw commit, because an
- * excluded path is a declaration that the file is *this repo's own* — and a directory
- * that qualifies only through one of them is not a vendored tree. `docs/plans` is the
- * case: its single baseline path is `20260821-windows-port.md`, excluded because
- * "changing is what a plan does". Deriving from the raw set made every new plan
- * document an untracked-file failure while it was still being written, which is the
- * guard-gets-silenced pressure this whole directory exists to avoid.
+ * A directory qualifies on either of two rules: the commit put a vendored path
+ * *directly* in it, or everything the commit put anywhere beneath it is vendored. The
+ * first rule is what makes `pixel-node/src` a tree; the second is what makes `assets`
+ * one, whose only baseline paths sit a level down in `assets/fonts` and which
+ * `UPSTREAM.md` names among the guarded trees. Taking the immediate parent alone left
+ * a file dropped straight into `assets/` outside the untracked check while
+ * `assets/fonts/` was inside it — the same hole in miniature that this whole directory
+ * exists to close.
+ *
+ * A path that is *declared out* is a declaration that the file is this repo's own, so
+ * an ancestor of one qualifies only under the first rule. `docs` is the case: it holds
+ * no vendored file directly, and two of the four `EXCLUSIONS` — `UPSTREAM.md` and the
+ * port's plan — live beneath it. Counting it would put `docs/plans` back in scope, and
+ * every plan document was an untracked-file failure for as long as it took to write,
+ * which is the guard-gets-silenced pressure this whole directory exists to avoid.
+ * `docs/design` stays, on the first rule: the design notes sit directly in it and all
+ * but `UPSTREAM.md` are in the universe.
  *
  * The repo root is deliberately not in it either. `LICENSE`, `pnpm-lock.yaml` and
  * `pnpm-workspace.yaml` are root-level paths in the universe, so `.` qualifies on the
@@ -205,12 +215,30 @@ export function classify(candidate) {
  * everything. The root is this workspace's floor, not a tree.
  */
 export function vendoredDirectories() {
-  const dirs = new Set();
-  for (const file of vendoredUniverse()) {
-    const cut = file.lastIndexOf("/");
-    if (cut > 0) dirs.add(file.slice(0, cut));
+  const universe = new Set(vendoredUniverse());
+  const above = new Set();
+  const holdsVendored = new Set();
+  const aboveExcluded = new Set();
+  for (const file of vendoringCommitPaths()) {
+    const vendored = universe.has(file);
+    let at = file;
+    let immediate = true;
+    for (;;) {
+      const cut = at.lastIndexOf("/");
+      if (cut <= 0) break;
+      at = at.slice(0, cut);
+      if (vendored) {
+        above.add(at);
+        if (immediate) holdsVendored.add(at);
+      } else {
+        aboveExcluded.add(at);
+      }
+      immediate = false;
+    }
   }
-  return dirs;
+  return new Set(
+    [...above].filter((dir) => holdsVendored.has(dir) || !aboveExcluded.has(dir)),
+  );
 }
 
 /**

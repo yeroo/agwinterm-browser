@@ -263,6 +263,21 @@ describe("vendored trees, as directories rather than paths", () => {
     assert.ok(dirs().has("docs/design"), "docs/design lost its vendored paths");
   });
 
+  it("counts a tree whose vendored paths all sit a level down", () => {
+    // The second rule, and the hole the first one alone left: `assets/` holds nothing
+    // directly — its only baseline paths are under `assets/fonts` — so taking the
+    // immediate parent made `assets/fonts/new.ttf` inside a vendored tree and
+    // `assets/new.ttf` outside one, while `UPSTREAM.md` names `assets/` among the
+    // guarded trees. Everything the commit put beneath it is vendored, so it is a tree.
+    assert.ok(dirs().has("assets"), "a top-level vendored tree is not a directory");
+    assert.ok(inVendoredTree("assets/new.ttf", dirs()));
+    // And the rule stops where a declared-out path is: `docs` holds no vendored file
+    // directly and two exclusions live under it, so counting it would drag
+    // `docs/plans` back in through the ancestor walk.
+    assert.ok(!dirs().has("docs"), "a directory holding two exclusions became a tree");
+    assert.ok(!inVendoredTree("docs/README.md", dirs()));
+  });
+
   it("places a file by its own directory", () => {
     assert.ok(inVendoredTree("engine/crates/pixel-node/src/shm.rs", dirs()));
     assert.ok(inVendoredTree("engine/packages/pixel-react/src/surface.ts", dirs()));
