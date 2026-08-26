@@ -21,10 +21,11 @@ import { describe, it } from "node:test";
 import {
   BASELINE,
   EXCLUSIONS,
+  PRE_BASELINE,
   PROJECT_ROOTS,
   assertExclusionsAreReal,
   assertProjectRootsAreReal,
-  classify,
+  assertUniverseIsTheWholeSnapshot,
   inVendoredTree,
   partitionDivergences,
   surveyVendored,
@@ -168,36 +169,74 @@ describe("the exclusion list", () => {
   });
 });
 
-describe("classify", () => {
-  it("reports an excluded path as excluded, with its reason", () => {
-    const verdict = classify("package.json");
-    assert.equal(verdict.category, "excluded");
-    assert.equal(verdict.reason, EXCLUSIONS["package.json"]);
+describe("the diff the universe is derived from", () => {
+  // `git show --name-only` answers what a commit *introduced*, and `45b5e43` is not a
+  // root commit — its parent already carried 54 paths. So the query is a diff, and it
+  // equals "the upstream code in this snapshot" only because everything the parent
+  // held is this repo's own. `PRE_BASELINE` is that coincidence written down, and
+  // `assertUniverseIsTheWholeSnapshot` is what stops it being assumed.
+
+  it("is narrower than the snapshot, by exactly what PRE_BASELINE declares", () => {
+    const introduced = new Set(vendoringCommitPaths());
+    const tree = gitPaths(["ls-tree", "-r", "--name-only", "-z", BASELINE]);
+    assert.equal(tree.length, 291, `${BASELINE}'s tree no longer holds 291 paths`);
+    const missing = tree.filter((p) => !introduced.has(p));
+    assert.equal(missing.length, 52, `${missing.length} paths are in the tree and not the diff`);
+    assert.doesNotThrow(() => assertUniverseIsTheWholeSnapshot());
   });
 
-  it("reports a vendored path as vendored", () => {
-    for (const file of PREVIOUSLY_UNGUARDED) {
-      assert.equal(classify(file).category, "vendored", `${file} did not classify as vendored`);
+  it("declares a reason for every prefix it carries over", () => {
+    for (const [prefix, reason] of Object.entries(PRE_BASELINE)) {
+      assert.equal(typeof reason, "string", `${prefix} has no reason`);
+      assert.ok(reason.length > 30, `${prefix}'s reason is too short to be one`);
     }
   });
 
-  it("fails on an undeclared path rather than defaulting into a category", () => {
-    // This very file, which the vendoring commit obviously did not carry. The point
-    // is that there is no third answer and no silent one: an unrecognised path is a
-    // question the module refuses, not a path it waves through.
+  it("fails when the snapshot holds a path neither the diff nor the list accounts for", () => {
+    // The re-vendor this exists for: `BASELINE` moves to a commit that vendors
+    // upstream afresh, and every upstream file byte-identical across it is in the new
+    // tree and absent from the new diff. Without this the universe shrinks by that
+    // many files while every pinned count still has a number to re-baseline.
     assert.throws(
-      () => classify("tools/vendor-check/universe.mjs"),
-      /is not a path .* introduced/,
+      () =>
+        assertUniverseIsTheWholeSnapshot(
+          ["engine/crates/pixel-core/src/lib.rs"],
+          ["engine/crates/pixel-core/src/lib.rs", "engine/crates/pixel-core/src/terminal.rs"],
+          PRE_BASELINE,
+        ),
+      (error) => {
+        assert.match(error.message, /terminal\.rs/);
+        assert.match(error.message, /fell out of the guard's scope/);
+        return true;
+      },
     );
-    assert.throws(() => classify("engine/crates/pixel-core/src/nonexistent.rs"), /will not guess/);
-    assert.throws(() => classify(""), /will not guess/);
   });
 
-  it("does not treat inherited object properties as declarations", () => {
-    // `EXCLUSIONS` is looked up with `hasOwn`, not `in`. Without that, `constructor`
-    // and `toString` are excluded project files.
-    assert.throws(() => classify("constructor"), /will not guess/);
-    assert.throws(() => classify("toString"), /will not guess/);
+  it("accepts a carried-over path by any ancestor prefix, and only a declared one", () => {
+    assert.doesNotThrow(() =>
+      assertUniverseIsTheWholeSnapshot([], [".revmux/lenses/bugs.md", "README.md"], PRE_BASELINE),
+    );
+    assert.throws(
+      () => assertUniverseIsTheWholeSnapshot([], ["docs/design/00-port-brief.md.bak"], PRE_BASELINE),
+      /PRE_BASELINE does not declare/,
+    );
+    // `hasOwn`, not `in`: without it `constructor` is a declared carry-over.
+    assert.throws(() => assertUniverseIsTheWholeSnapshot([], ["constructor"], PRE_BASELINE), /1 path/);
+  });
+
+  it("names every declared prefix against something really in the snapshot", () => {
+    // The staleness hazard `assertExclusionsAreReal` covers, for this list: a prefix
+    // covering nothing reads as a decision while silently waiving whatever lands
+    // under that name next.
+    const tree = gitPaths(["ls-tree", "-r", "--name-only", "-z", BASELINE]);
+    const introduced = new Set(vendoringCommitPaths());
+    const carried = tree.filter((p) => !introduced.has(p));
+    for (const prefix of Object.keys(PRE_BASELINE)) {
+      assert.ok(
+        carried.some((p) => p === prefix || p.startsWith(`${prefix}/`)),
+        `PRE_BASELINE names ${prefix}, which covers nothing the snapshot carried over`,
+      );
+    }
   });
 });
 
@@ -238,9 +277,11 @@ describe("vendored trees, as directories rather than paths", () => {
   // spells out: `vendoredDirectories` reaches `assertExclusionsAreReal`, which throws
   // on a stale exclusion, and a throw from a `describe` callback prints `not ok` while
   // counting as neither pass nor fail -- `node --test` still exits 0 (v22.19.0). At
-  // describe-time a stale exclusion would delete all seven tests below and leave the
-  // run green, which is the precise condition `assertExclusionsAreReal` exists to
-  // shout about. Inside a test, a throw is a failure the exit code knows about.
+  // describe-time a stale exclusion would delete every test below and leave the run
+  // green, which is the precise condition `assertExclusionsAreReal` exists to shout
+  // about. Inside a test, a throw is a failure the exit code knows about. A count is
+  // deliberately not written here: it would go stale the next time a case is added,
+  // in a comment whose whole subject is how much a silent skip would cost.
   const dirs = () => vendoredDirectories();
 
   it("derives the directories from the commit and leaves the root out", () => {
@@ -252,14 +293,62 @@ describe("vendored trees, as directories rather than paths", () => {
     assert.ok(!dirs().has(""), "an empty directory name reached the set");
   });
 
-  it("does not make a tree out of a directory only an excluded path put there", () => {
+  it("keeps docs/plans out, which today is PROJECT_ROOTS' doing and not the exclusion's", () => {
     // `docs/plans` holds exactly one baseline path — `20260821-windows-port.md`,
     // declared out because changing is what a plan does — so the directory is this
     // repo's own and not a vendored tree. Derived from the raw commit it qualified
     // anyway, and every plan document was an untracked-file failure for as long as it
     // took to write. A guard whose answer to ordinary work is "stop" gets silenced.
+    //
+    // Which rule keeps it out is worth being exact about, because the comment that
+    // used to sit here credited the wrong one. `docs` is a `PROJECT_ROOTS` key, so
+    // `docs/plans` is subtracted before the excluded-ancestor clause is ever consulted
+    // and these two assertions hold with that clause deleted. The clause is covered on
+    // its own terms by the injected case below.
     assert.ok(!dirs().has("docs/plans"), "an excluded path still makes its directory a tree");
     assert.ok(!inVendoredTree("docs/plans/20260826-vendor-check-gap.md", dirs()));
+  });
+
+  it("does not make a tree out of a directory only an excluded path put there", () => {
+    // The excluded-ancestor rule, driven against a case it can actually decide.
+    // With the four real exclusions it decides nothing — all four are at the repo
+    // root or under `docs`, which `PROJECT_ROOTS` removes first — so a regression that
+    // inverted or dropped it would pass every assertion above. Injected instead.
+    //
+    // The directory the clause decides here is `engine`, not `engine/generated`. Only a
+    // *vendored* file puts its ancestors in `above`, so `engine/generated` — holding
+    // nothing but a declared-out path — is never a candidate and stays out however the
+    // clause is written. `engine` is a candidate: `lib.rs` puts it in `above`, no
+    // vendored file sits directly in it, and `manifest.json` puts it in `aboveExcluded`.
+    // Delete `!aboveExcluded.has(dir)` from `vendoredDirectories` and `engine` becomes a
+    // vendored tree — which is what the last two assertions here catch, `new.json` being
+    // "inside a vendored tree" by way of its grandparent and so an untracked failure.
+    const paths = [
+      "engine/crates/pixel-core/src/lib.rs",
+      "engine/generated/manifest.json",
+    ];
+    const declared = { "engine/generated/manifest.json": "a build artifact, checked in." };
+    // No project roots, so nothing but the two derivation rules decides the answer.
+    const derived = vendoredDirectories({}, paths, declared);
+    assert.ok(derived.has("engine/crates/pixel-core/src"), "the vendored tree was lost");
+    assert.ok(
+      !derived.has("engine/generated"),
+      "a directory holding only a declared-out path became a vendored tree",
+    );
+    assert.ok(
+      !derived.has("engine"),
+      "a directory holding a vendored file only indirectly, and sitting above a " +
+        "declared-out one, became a vendored tree",
+    );
+    assert.ok(!inVendoredTree("engine/generated/new.json", derived));
+    // And the same commit *with* an upstream file beside the excluded one is a tree,
+    // so the rule is narrow rather than a blanket veto on any directory holding one.
+    const alsoVendored = vendoredDirectories(
+      {},
+      [...paths, "engine/generated/real.rs"],
+      declared,
+    );
+    assert.ok(alsoVendored.has("engine/generated"), "the first rule stopped applying");
   });
 
   it("leaves this repo's own scaffolding out, though the commit carried it", () => {
@@ -312,10 +401,11 @@ describe("vendored trees, as directories rather than paths", () => {
     // guarded trees. Everything the commit put beneath it is vendored, so it is a tree.
     assert.ok(dirs().has("assets"), "a top-level vendored tree is not a directory");
     assert.ok(inVendoredTree("assets/new.ttf", dirs()));
-    // And the rule stops where a declared-out path is: `docs` holds no vendored file
-    // directly and two exclusions live under it, so counting it would drag
+    // And the second rule stops at `PROJECT_ROOTS`: `docs` holds no vendored file
+    // directly, and every path beneath it that is not declared out is this repo's own
+    // design notes, so without the subtraction it would qualify here and drag
     // `docs/plans` back in through the ancestor walk.
-    assert.ok(!dirs().has("docs"), "a directory holding two exclusions became a tree");
+    assert.ok(!dirs().has("docs"), "a project root became a vendored tree");
     assert.ok(!inVendoredTree("docs/README.md", dirs()));
   });
 

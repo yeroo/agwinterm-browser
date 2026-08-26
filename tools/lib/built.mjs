@@ -40,10 +40,27 @@ function newestUnder(dir) {
 
 /**
  * Asserts that `builtRelative` exists and is no older than everything in
- * `sourceRelative`, and returns its absolute path. Throws with the build command
- * otherwise.
+ * `sourceRelative` or in `alsoRelative`, and returns its absolute path. Throws with
+ * the build command otherwise.
+ *
+ * `alsoRelative` is for build inputs that are not *under* the source root: the
+ * napi artifact is compiled from `engine/crates`, but `engine/Cargo.toml` and
+ * `engine/Cargo.lock` decide which dependencies, features and opt-levels go into it,
+ * `engine/rust-toolchain.toml` decides which compiler does the compiling, and the
+ * fonts the crates `include_bytes!` are literally part of the output. A `cargo update`,
+ * a feature-flag edit, a channel bump or a re-hinted font leaves the binary just as
+ * stale as a source edit. Widening the root instead is not the fix -- `engine/target`
+ * is a sibling of `crates`, so `engine` would walk the build output, whose mtimes are
+ * always newest, and every run would report stale. The caller owns that list, so the
+ * caller is also where it is held to the sources -- see `native-build.test.mjs`.
  */
-export function requireBuilt(repo, builtRelative, sourceRelative, buildCommand) {
+export function requireBuilt(
+  repo,
+  builtRelative,
+  sourceRelative,
+  buildCommand,
+  alsoRelative = [],
+) {
   const built = path.join(repo, builtRelative);
   if (!fs.existsSync(built)) {
     throw new Error(
@@ -60,10 +77,22 @@ export function requireBuilt(repo, builtRelative, sourceRelative, buildCommand) 
   if (!fs.statSync(sourceRoot).isDirectory()) {
     throw new Error(`${sourceRelative} is not a directory — nothing to compare ${builtRelative} against`);
   }
-  const source = newestUnder(sourceRoot);
-  if (source > fs.statSync(built).mtimeMs) {
+  let newest = newestUnder(sourceRoot);
+  let newestRelative = sourceRelative;
+  // `statSync` uncaught for the same reason the source root is: a build input named
+  // here and no longer on disk has been renamed or removed, and silently dropping it
+  // from the comparison is how this check goes quiet about exactly the file somebody
+  // just moved.
+  for (const relative of alsoRelative) {
+    const at = fs.statSync(path.join(repo, relative)).mtimeMs;
+    if (at > newest) {
+      newest = at;
+      newestRelative = relative;
+    }
+  }
+  if (newest > fs.statSync(built).mtimeMs) {
     throw new Error(
-      `${builtRelative} is older than ${sourceRelative} — this suite would pass ` +
+      `${builtRelative} is older than ${newestRelative} — this suite would pass ` +
         `against the previous build. Run: ${buildCommand}`,
     );
   }

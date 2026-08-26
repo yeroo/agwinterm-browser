@@ -231,9 +231,13 @@ describe("the forty-three, still checked as such", () => {
 describe("the numbered divergences", () => {
   it("names a path UPSTREAM.md really mentions", () => {
     // The test says which files; the document says why, and is what a re-vendor
-    // reads. Neither is useful if they drift apart. The unnumbered incidentals are
-    // Task 4's to write up — `UNRECORDED_BUDGET` in `dispositions.mjs` pins how many
-    // are still owed, so they cannot hide behind this `continue`.
+    // reads. Neither is useful if they drift apart. Nothing reaches the `continue`
+    // below: Task 4 of the vendor-check-gap plan numbered the last six incidentals and
+    // `UNRECORDED_BUDGET` is 0, which `dispositions.test.mjs` pins. It is kept so that
+    // a future `divergence: null` entry fails on the budget rather than crashing this
+    // loop. The strong version of this check — the numbering itself, parsed out of the
+    // document and held to `DIVERGENCES` — is `upstream-doc.test.mjs`; this one only
+    // asks whether the document mentions the path at all.
     const upstream = fs.readFileSync(path.join(REPO, "docs", "design", "UPSTREAM.md"), "utf8");
     for (const [file, entry] of Object.entries(INCIDENTAL)) {
       if (entry.divergence === null) continue;

@@ -211,7 +211,7 @@ about a tree that no longer exists.
 |---|---|
 | `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
 | `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **504 passed**, 112 suites, **0 skipped**, 8.9 s wall clock |
+| `node --test "tools/*/*.test.mjs"` | **510 passed**, 112 suites, **0 skipped**, 8.9 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -277,24 +277,31 @@ every one is:
 |---|---|---|---|---|
 | `terminal_windows.rs` | 59 | | `cli/pane-clear.test.mjs` | 88 |
 | `agwinterm.rs` | 50 | | `vendor-check/inventory.test.mjs` | 37 |
-| `frame_file.rs` | 43 | | `cli/endpoint.test.mjs` | 33 |
-| `frame_shm.rs` | 10 | | `cli/unsupported.test.mjs` | 31 |
-| `terminal_backend.rs` | 9 | | `vendor-check/universe.test.mjs` | 34 |
-| `terminal_types.rs` | 5 | | `vendor-check/unchanged.test.mjs` | 33 |
+| `frame_file.rs` | 43 | | `vendor-check/universe.test.mjs` | 36 |
+| `frame_shm.rs` | 10 | | `cli/endpoint.test.mjs` | 33 |
+| `terminal_backend.rs` | 9 | | `vendor-check/unchanged.test.mjs` | 33 |
+| `terminal_types.rs` | 5 | | `cli/unsupported.test.mjs` | 31 |
 | | | | `vendor-check/dispositions.test.mjs` | 30 |
 | | | | `launcher/launch.test.mjs` | 28 |
 | | | | `input/page-input.test.mjs` | 23 |
 | | | | `offscreen/present.test.mjs` | 18 |
+| | | | `vendor-check/native-build.test.mjs` | 18 |
 | | | | `vendor-check/upstream-doc.test.mjs` | 15 |
-| | | | `vendor-check/native-build.test.mjs` | 14 |
 | | | | the rest | 120 |
 
-Re-counted on **2026-08-26**; the node column sums to the 504 above. `vendor-check/`
+Re-counted on **2026-08-26**; the node column sums to the 510 above. `vendor-check/`
 is now seven files rather than four: the vendor-check-gap plan derived the scope from
 the vendoring commit, gave every diverged path a disposition, and parsed `UPSTREAM.md`
 against the table that cites it. `native-build.test.mjs`'s three artifact tests are in
-that 14 because they no longer skip — an unbuilt or stale `pixel.node` is a failure now
-rather than a silent pass, which is why the run above records **0 skipped**.
+that 18 because they no longer skip — an unbuilt or stale `pixel.node` is a failure now
+rather than a silent pass, which is why the run above records **0 skipped**. Stale is
+measured against `engine/crates` plus every build input outside it: the manifest and the
+lockfile decide the dependency versions, `windows-sys` features and opt-levels the
+artifact is compiled with, `rust-toolchain.toml` decides the compiler, the two fonts are
+`include_bytes!`d into the binary, and `build-native.mjs` decides which profile is
+copied — none of them under the source root. That last list is hand-written, so the
+suite derives the embedded-asset half from the crate sources and fails if an
+`include_bytes!` appears that no compared path covers.
 
 The three biggest movers since 2026-08-21 are the corrections plan's: `pane-clear.test.mjs` (13 → 84),
 `agwinterm.rs` (29 → 49, the exchange deadline) and `terminal_windows.rs` (38 → 54).

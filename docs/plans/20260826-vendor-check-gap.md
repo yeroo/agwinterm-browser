@@ -215,20 +215,22 @@ it is present. `tools/lib/built.mjs` exists to make both loud and says why: "a s
 sites use it; this file is the outlier, and it guards the artifact this directory exists
 to protect.
 
-- [x] route the artifact check through `requireBuilt` against `engine/crates/pixel-node/src`
-      so a missing or stale `pixel.node` fails with the build command instead of skipping
+- [x] route the artifact check through `requireBuilt` against `engine/crates` — both
+      crates, since `pixel-node` depends on `pixel-core` and so `pixel-core/src` is
+      compiled into the artifact — plus `engine/Cargo.toml` and `engine/Cargo.lock`, so a
+      missing or stale `pixel.node` fails with the build command instead of skipping
 - [x] check the three degraded tests then run rather than skip
 - [x] write a test that a stale artifact fails
 - [x] write a test that a missing artifact fails with the build command in the message
 - [x] run tests — must pass before Task 6
 
 **Found while doing it.** The file no longer contains a `skip`, and `node --test`
-reports 14 passed / 0 skipped where it reported 11 / 3. Both failures were then driven
+reports 18 passed / 0 skipped where it reported 11 / 3. Both failures were then driven
 against the real tree rather than only against fixtures: moving `pixel.node` aside exits
 1 with *"...is missing — this suite tests the built package. Run: corepack pnpm --filter
 pixel-react build:native"*, and `touch`ing `pixel-node/src/lib.rs` exits 1 with *"...is
-older than engine/crates/pixel-node/src — this suite would pass against the previous
-build"*. Two things worth recording:
+older than engine/crates — this suite would pass against the previous build"*. Three
+things worth recording:
 
 - **The obvious fix was itself a silent pass.** Calling `requireBuilt` once in the
   `describe` body — which is how the other three call sites do it, at module scope —
@@ -241,6 +243,21 @@ build"*. Two things worth recording:
   directory it cannot read, which would make every staleness comparison pass; a renamed
   `pixel-node/src` is exactly how this check would go quiet again, so the fixture that
   deletes the source tree asserts the refusal names the path.
+- **A source root is not the whole set of build inputs.** `engine/Cargo.toml` carries the
+  `windows-sys` feature list, the workspace lints and the `opt-level = 2` overrides for
+  both crates, and `engine/Cargo.lock` carries what they resolve to — neither is under
+  `engine/crates`, so a `cargo update`, a feature flag or a profile edit left all three
+  tests passing against the previous binary. Widening the root to `engine` is not the fix:
+  `engine/target` is a sibling of `crates`, so the walk would find the build output, whose
+  mtimes are always newest, and every run would report stale. `requireBuilt` takes an
+  optional list of extra inputs instead, and reports *which* one is newer so the reader is
+  not sent to the tree the edit was not in. Review then found the same argument reached
+  three inputs further than the list did: `engine/rust-toolchain.toml` picks the compiler
+  (cargo runs with `cwd` inside `pixel-react`, so rustup walks up to `engine/` for it),
+  both fonts under `engine/assets/fonts/` are `include_bytes!`d into the cdylib, and
+  `build-native.mjs` decides which profile is copied. All four are now compared, and
+  because a hand-written list is exactly what goes quiet, the embedded-asset half is
+  derived from the crate sources by a test rather than restated.
 
 ### Task 6: Verify acceptance criteria
 
@@ -333,6 +350,21 @@ truth: 239 paths. `git diff --quiet 45b5e43 HEAD -- <path>` per path gives the c
 set; a missing working-tree path is a deletion. Both are cheap enough to run per test —
 the whole sweep takes well under a second — so there is no reason to cache it into a file
 that can go stale.
+
+**That query is a diff, not an inventory, and the difference is load-bearing.** `45b5e43`
+is not a root commit — its parent `0b526fe` already carried 54 paths — so `--name-only`
+answers what the commit *introduced*, and its tree holds 291 paths against the 239 it
+reports. The gap is benign today only because every one of those 52 is this repo's own
+harness (`.ralphex/`, `.revmux/`, `README.md`, the port brief and the revmux shims), which
+`PRE_BASELINE` in `universe.mjs` now declares with a reason each. It stops being benign the
+moment `BASELINE` moves to a re-vendor commit: every upstream file byte-identical across
+that re-vendor would be in the new tree, absent from the new diff, and so out of the
+guard's scope — with no count moving to say so, since the pinned 239 would simply be
+re-baselined to whatever the new diff reported. `assertUniverseIsTheWholeSnapshot` holds
+the diff to `git ls-tree` and fails naming the paths that fell out. Reading the snapshot
+directly is not the simpler alternative it looks: it would pull `.revmux/` and `README.md`
+into the universe and demand a divergence reason for the review harness this port is run
+with.
 
 **Why not a manifest per tree.** It was the first option considered and rejected: adding
 `pixel-node-files.json` and `pixel-react-files.json` would be symmetric and quick, but it

@@ -588,8 +588,14 @@ nothing tell them so.
 The repair is [`20260826-vendor-check-gap.md`](../plans/20260826-vendor-check-gap.md), and
 its one design decision is that **the scope is derived, not listed**. `universe.mjs` asks
 `git show --name-only 45b5e43` what was vendored — 239 paths, four declared out with a
-reason each — so every path that commit carried is in scope with nobody to remind. Note the
-edge of that, because it is the one thing a one-commit scope cannot do: a file vendored
+reason each — so every path that commit carried is in scope with nobody to remind. That
+query is a **diff**, not an inventory: `45b5e43` has a parent, and its tree holds 291
+paths. The 52 it does not report are this repo's own harness, committed before the
+vendoring, which is why the two answers agree about upstream — a coincidence, now written
+down as `PRE_BASELINE` and held to `git ls-tree` by `assertUniverseIsTheWholeSnapshot`,
+because the day `BASELINE` moves to a re-vendor commit every upstream file unchanged
+across it would leave the universe with no count moving to say so. Note the other edge,
+because it is the one thing a one-commit scope cannot do: a file vendored
 *later* is not in the universe, and committing it under this baseline silences the
 untracked finding without putting it in scope. For genuinely new upstream code the answer
 is a re-vendor that moves `BASELINE`, which `untrackedMessage` and the checklist at the end
@@ -607,7 +613,7 @@ made the untracked check a repo-wide nag for a review round. `45b5e43` did two j
 imported upstream and it laid down this repo's scaffolding — so `tools/` and `docs/design/`
 qualified as directories the commit put vendored files in, though `UPSTREAM.md`'s "What was
 copied" lists neither. Every tool and design note written since, 66 of them including the
-four files of this change, was an untracked-file failure until it was staged. `EXCLUSIONS`
+five files of this change, was an untracked-file failure until it was staged. `EXCLUSIONS`
 could not repair it: those paths belong in the universe and must stay byte-identical, so
 declaring them out would have traded a false finding for a real hole in the diff.
 `PROJECT_ROOTS` names the two roots instead, with a reason each and a staleness check of its

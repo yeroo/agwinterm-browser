@@ -365,9 +365,13 @@ completeness check; this list is not.**
    exists. Divergence 1 is the reason it does; an install that succeeds and produces no
    binary is what its absence looks like.
 5. `corepack pnpm --filter pixel-react build:native`, so `native/pixel.node` is newer
-   than `engine/crates/pixel-node/src`. `native-build.test.mjs` refuses a missing *or*
-   stale artifact rather than skipping, and a re-vendor makes every source file newer
-   than the last build by definition.
+   than every input it is built from: `engine/crates`, `engine/Cargo.toml`,
+   `engine/Cargo.lock`, `engine/rust-toolchain.toml`, both fonts under
+   `engine/assets/fonts/` and `pixel-react`'s `scripts/build-native.mjs`. Both crates
+   count, not just `pixel-node/src`: `pixel-node` depends on `pixel-core`, so
+   `pixel-core/src` is compiled *into* the artifact. `native-build.test.mjs` refuses a missing *or* stale
+   artifact rather than skipping, and a re-vendor makes every source file newer than the
+   last build by definition.
 6. `corepack pnpm test`. Every failure below names the path and what to do about it, so
    read them as a worklist rather than as a verdict:
 
@@ -394,3 +398,10 @@ upstream" commit rather than as edits on top of `45b5e43` — then `BASELINE` in
 `tools/vendor-check/universe.mjs` moves with it, and every disposition and divergence
 whose edit is now *in* that commit stops having a diff to show. That is a rewrite of
 the table, not a maintenance edit, and the suite will say so path by path.
+
+It is also a rewrite of the *scope*. `vendoringCommitPaths` asks `git show --name-only`
+what the commit introduced, which is a diff against its parent — so once the baseline is
+a re-vendor on top of the port, every upstream file byte-identical across it is in the
+new tree and absent from the new diff, and would leave the guard's universe silently.
+`assertUniverseIsTheWholeSnapshot` fails naming those paths. Re-derive the query against
+the snapshot; do not re-baseline the counts until it passes.

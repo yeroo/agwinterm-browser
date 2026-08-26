@@ -20,11 +20,14 @@
 // re-vendor that moves `BASELINE`, which `untrackedMessage` and the checklist at the
 // end of `UPSTREAM.md` both say out loud.
 //
-// This module answers three questions and refuses to guess at any of them:
+// This module answers two questions and refuses to guess at either:
 //
 //   - what is in the vendored universe (`vendoredUniverse`)
-//   - what a given path is (`classify`) — vendored, excluded, or not ours to say
 //   - what has diverged since the baseline (`surveyVendored`) — edits *and* deletions
+//
+// What a given path *is* — subject matter, incidental divergence, or declared out —
+// is `dispositionOf` in `dispositions.mjs`, which is the one function that refuses to
+// guess about all three categories rather than about two of them.
 //
 // Deletions matter more than the old check admitted. A re-vendor that drops a file
 // entirely is the exact failure this directory was built to catch, and until now
@@ -161,11 +164,106 @@ function splitNul(output) {
   return output.split("\0").filter((field) => field !== "");
 }
 
+/**
+ * Paths `45b5e43`'s tree carries that `45b5e43` did not *introduce*: this repo's own
+ * work, committed before the vendoring, and so absent from the commit's diff.
+ *
+ * This list is what makes the query below sound, and it is here because the query is
+ * a diff rather than an inventory — see `vendoringCommitPaths`. `45b5e43` is not a
+ * root commit: its parent `0b526fe` already carried 54 paths, every one of them this
+ * repo's own harness and notes. That is why "what the commit introduced" and "what
+ * upstream code the commit's tree holds" happen to be the same set today, and the
+ * coincidence is exactly the kind this directory exists to stop relying on quietly.
+ *
+ * Entries are prefixes: a key matches a path that *is* it, or that sits anywhere
+ * beneath it, at any depth — `docs/design/00-port-brief.md` names one file and
+ * `.ralphex` names a tree, and nothing about the key's own shape decides which.
+ *
+ * `assertUniverseIsTheWholeSnapshot` reads this list in one direction only: it fails
+ * when the snapshot holds a path neither the commit's diff nor a key here accounts for.
+ * It does not read it back. A key covering nothing has nothing to fail against there,
+ * and a key that is too broad only makes it *more* permissive. Rot is caught instead by
+ * `universe.test.mjs` — "names every declared prefix against something really in the
+ * snapshot" — which runs against the real snapshot under `node --test` rather than at
+ * guard time, and only asks that a key cover at least one carried-over path. Absorption
+ * is caught by nothing at all, so keep each key as narrow as its reason: a widened key
+ * silently waives whatever upstream lands under that name next.
+ */
+export const PRE_BASELINE = Object.freeze({
+  ".ralphex": "the plan-execution harness, wired up two commits before the vendoring.",
+  ".revmux": "the external review tool `.ralphex` shells out to, and its recorded runs.",
+  "README.md": "this repo's own front page, written before there was anything vendored.",
+  "docs/design/00-port-brief.md": "the brief the port was commissioned from.",
+  "tools/ralphex-revmux.cmd": "the shim `.ralphex/config` names as its review command.",
+  "tools/ralphex-revmux.sh": "the same shim, for the shell side.",
+});
+
 let universeCache = null;
+let treeCache = null;
+
+/** Every path in `BASELINE`'s tree, sorted — the snapshot, not the diff. */
+function baselineTreePaths() {
+  if (treeCache) return treeCache;
+  treeCache = splitNul(git(["ls-tree", "-r", "--name-only", "-z", BASELINE])).sort();
+  return treeCache;
+}
+
+/** Whether `file` is, or sits beneath, one of `prefixes`' keys. */
+function underPrefix(file, prefixes) {
+  let at = file;
+  for (;;) {
+    if (Object.hasOwn(prefixes, at)) return true;
+    const cut = at.lastIndexOf("/");
+    if (cut <= 0) return false;
+    at = at.slice(0, cut);
+  }
+}
 
 /**
- * Every path the vendoring commit put in the tree, sorted. This is the raw 239,
- * before the exclusions are taken out — `vendoredUniverse` is what most callers want.
+ * Fails if `BASELINE`'s tree holds a path the commit did not introduce and
+ * `PRE_BASELINE` does not declare.
+ *
+ * The one check standing between this module and the hazard `vendoringCommitPaths`
+ * describes. Today the difference is exactly the 52 paths `PRE_BASELINE` names, so
+ * the diff and the snapshot agree about upstream and nothing is wrong. The day
+ * `BASELINE` moves to a re-vendor commit they stop agreeing wholesale — every
+ * upstream file byte-identical across that re-vendor is in the new tree and absent
+ * from its diff — and without this the universe would shrink by however many files
+ * upstream left alone, silently, while every count in the suite still had a number to
+ * re-baseline. Injectable so the throw itself is exercised.
+ */
+export function assertUniverseIsTheWholeSnapshot(
+  introduced = vendoringCommitPaths(),
+  tree = baselineTreePaths(),
+  carried = PRE_BASELINE,
+) {
+  const inDiff = new Set(introduced);
+  const unaccounted = tree.filter((p) => !inDiff.has(p) && !underPrefix(p, carried));
+  if (unaccounted.length > 0) {
+    throw new Error(
+      `${BASELINE}'s tree holds ${unaccounted.length} path(s) the commit did not ` +
+        `introduce and PRE_BASELINE does not declare: ${unaccounted.slice(0, 5).join(", ")}` +
+        `${unaccounted.length > 5 ? ", ..." : ""}. The universe is derived from the ` +
+        `commit's *diff*, so a path already present in its parent is outside it. If ` +
+        `BASELINE has just moved to a re-vendor commit, these are upstream files that ` +
+        `fell out of the guard's scope without a single count moving — the derivation ` +
+        `has to be rewritten to read the snapshot, not re-baselined. If they really ` +
+        `are this repo's own, declare them here with a reason each.`,
+    );
+  }
+}
+
+/**
+ * Every path the vendoring commit *introduced*, sorted. This is the raw 239, before
+ * the exclusions are taken out — `vendoredUniverse` is what most callers want.
+ *
+ * "Introduced" and not "carried": `git show --name-only` is a diff against the
+ * parent, and `45b5e43` has one. It answers the question this module wants only while
+ * everything its parent already held is this repo's own, which `PRE_BASELINE` declares
+ * and `assertUniverseIsTheWholeSnapshot` holds to the tree. Reading the snapshot
+ * instead is not the simpler fix it looks: `git ls-tree` would pull `.ralphex/`,
+ * `.revmux/` and `README.md` into the universe and demand a divergence reason for the
+ * review harness this port is run with.
  *
  * `-z` rather than plain `--name-only` because `core.quotepath` will otherwise
  * mangle any path outside ASCII into a C-style escape, and a path that reads back
@@ -196,6 +294,7 @@ export function vendoringCommitPaths() {
  */
 export function vendoredUniverse() {
   assertExclusionsAreReal();
+  assertUniverseIsTheWholeSnapshot();
   const excluded = new Set(Object.keys(EXCLUSIONS));
   return vendoringCommitPaths().filter((p) => !excluded.has(p));
 }
@@ -228,30 +327,6 @@ export function assertExclusionsAreReal(
 }
 
 /**
- * What a path is, as far as this module is entitled to say: `"excluded"` with the
- * declared reason, or `"vendored"`.
- *
- * Throws for anything the vendoring commit did not introduce. That is the point:
- * there is no default category, because a default is how an unrecognised path gets
- * quietly treated as fine. The caller either knows the path is vendored or finds out
- * here that it is asking the wrong module.
- */
-export function classify(candidate) {
-  if (Object.hasOwn(EXCLUSIONS, candidate)) {
-    return { category: "excluded", reason: EXCLUSIONS[candidate] };
-  }
-  if (vendoringCommitPaths().includes(candidate)) {
-    return { category: "vendored", reason: null };
-  }
-  throw new Error(
-    `${candidate} is not a path ${BASELINE} introduced, so it is neither vendored nor ` +
-      `an excluded project file. If it was vendored later, it belongs to whatever ` +
-      `commit brought it in; if it is this repo's own, it was never in scope. This ` +
-      `module will not guess.`,
-  );
-}
-
-/**
  * Every directory of the vendored trees, derived rather than listed.
  *
  * A directory qualifies on either of two rules: the commit put a vendored path
@@ -264,11 +339,21 @@ export function classify(candidate) {
  * exists to close.
  *
  * A path that is *declared out* is a declaration that the file is this repo's own, so
- * an ancestor of one qualifies only under the first rule. `docs/plans` is the case: its
- * one baseline path is the port's plan, declared out because changing is what a plan
- * does, so the directory is this repo's own and not a vendored tree. Counting it made
- * every plan document an untracked-file failure for as long as it took to write, which
- * is the guard-gets-silenced pressure this whole directory exists to avoid.
+ * an ancestor of one qualifies only under the first rule. `docs/plans` was the case it
+ * was written for: its one baseline path is the port's plan, declared out because
+ * changing is what a plan does, so the directory is this repo's own and not a vendored
+ * tree. Counting it made every plan document an untracked-file failure for as long as
+ * it took to write, which is the guard-gets-silenced pressure this whole directory
+ * exists to avoid.
+ *
+ * With today's four exclusions that rule no longer decides anything: all four sit at
+ * the repo root or under `docs`, and `PROJECT_ROOTS` removes `docs` first. It is kept
+ * because it is the only rule that covers an exclusion declared *outside* a project
+ * root — a generated file in a vendored tree, say — where the alternative is that the
+ * declaration itself turns the directory into a tree and every new file in it into an
+ * untracked failure. Kept means exercised: `exclusions` and `paths` are injectable so
+ * the branch runs against a case it can actually decide, rather than being a rule the
+ * suite believes in because two tests named it in a comment.
  *
  * Then `PROJECT_ROOTS` is subtracted, and it is what stops both rules over-reaching.
  * The vendoring commit laid down this repo's scaffolding as well as upstream's trees,
@@ -285,13 +370,19 @@ export function classify(candidate) {
  * from the root, including it would make "is this inside a vendored tree" true of
  * everything. The root is this workspace's floor, not a tree.
  */
-export function vendoredDirectories(roots = PROJECT_ROOTS) {
-  assertProjectRootsAreReal(roots);
-  const universe = new Set(vendoredUniverse());
+export function vendoredDirectories(
+  roots = PROJECT_ROOTS,
+  paths = vendoringCommitPaths(),
+  exclusions = EXCLUSIONS,
+) {
+  assertProjectRootsAreReal(roots, paths);
+  assertExclusionsAreReal(exclusions, paths);
+  const declaredOut = new Set(Object.keys(exclusions));
+  const universe = new Set(paths.filter((p) => !declaredOut.has(p)));
   const above = new Set();
   const holdsVendored = new Set();
   const aboveExcluded = new Set();
-  for (const file of vendoringCommitPaths()) {
+  for (const file of paths) {
     const vendored = universe.has(file);
     let at = file;
     let immediate = true;
