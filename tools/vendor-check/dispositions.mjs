@@ -513,6 +513,11 @@ export function auditDispositions(
   const live = new Set(changed);
   return {
     unclassified: changed.filter((file) => count(file) === 0).sort(),
+    // `> 1`, not `!== 1`: zero is the bucket above, and the two failures want
+    // different sentences. A path claimed twice is the quieter of the two, because
+    // nothing about it looks empty — which is why it needs its own bucket rather
+    // than a filter that drops it from the roster and reports nothing.
+    conflicted: changed.filter((file) => count(file) > 1).sort(),
     stale: dispositionedPaths().filter((file) => !live.has(file) && !gone.has(file)),
     deleted: [...deleted].sort(),
     untracked: [...untracked].sort(),
@@ -584,7 +589,18 @@ export function describeDisposition(file, verdict = dispositionOf(file)) {
         : `divergence ${verdict.divergence} in UPSTREAM.md`;
     return `${file} — incidental divergence, ${where}: ${verdict.reason}`;
   }
-  return `${file} — not vendored: ${verdict.reason}`;
+  if (verdict.kind === "excluded") {
+    return `${file} — not vendored: ${verdict.reason}`;
+  }
+  // Explicit rather than a fall-through, for the reason the TypeError above exists:
+  // "not vendored" is the most reassuring line this function can print, so anything
+  // unrecognised landing there by default would be the one wrong answer that reads
+  // as fine. A fourth kind is a change to this function, not to its default.
+  throw new TypeError(
+    `describeDisposition(${file}) got kind ${JSON.stringify(verdict.kind)}, which is ` +
+      `none of subject, incidental or excluded. Give the new kind a line here rather ` +
+      `than letting it describe itself as not vendored.`,
+  );
 }
 
 /**
@@ -615,6 +631,12 @@ export function deletedMessage(file) {
  * commit.
  *
  * Two answers, both of them a decision on the record — which is the whole ask.
+ *
+ * The wording of the first answer matters, and an earlier draft got it wrong by
+ * saying "commit it — and it probably wants a disposition too". Committing a *new
+ * upstream* file under `45b5e43` tracks it without putting it in the universe:
+ * nothing diffs it ever again, and a disposition for it would then fail as stale.
+ * So the two cases are named apart — this repo's own file, or a re-vendor.
  */
 export function untrackedMessage(file) {
   return (
@@ -622,10 +644,33 @@ export function untrackedMessage(file) {
     `here asks about a path ${BASELINE} introduced, so an untracked file is the one ` +
     `divergence the derived scope cannot see: nothing diffs it, nothing misses it, ` +
     `and a re-vendor that dropped in a new upstream module looks exactly like this. ` +
-    `Either commit it — and if it is inside a vendored tree it probably wants a ` +
-    `disposition too — or name it in .gitignore, which is where this repo's build ` +
-    `output and scratch directories already go. What it may not do is sit there ` +
-    `undecided.`
+    `If it is this repo's own file, commit it. If it is upstream code, committing it ` +
+    `here only hides it — the universe is one commit's contents, so it belongs to a ` +
+    `re-vendor that moves BASELINE in tools/vendor-check/universe.mjs and rewrites ` +
+    `the tables with it. Otherwise name it in .gitignore, which is where this repo's ` +
+    `build output and scratch directories already go. What it may not do is sit ` +
+    `there undecided.`
+  );
+}
+
+/**
+ * What to tell someone whose path is claimed by two of the three tables.
+ *
+ * The failure with no visible symptom. `dispositionOf` answers with whichever table
+ * it checks first, so the path reads as classified everywhere; without this it passed
+ * the guard *and* dropped out of the `expected` roster, so the guard's whole product
+ * quietly lost a line. Two rows for one path are also a disagreement about substance
+ * — one says a plan task owns the edit, the other says a re-vendorer must re-apply it
+ * by hand — and only a person can say which.
+ */
+export function conflictedMessage(file) {
+  return (
+    `${file} is claimed by more than one disposition table in ` +
+    `tools/vendor-check/dispositions.mjs. Exactly one is the only right answer: ` +
+    `SUBJECT means the port rewrote it and a plan task owns it, INCIDENTAL means a ` +
+    `re-vendorer re-applies it by hand from docs/design/UPSTREAM.md, and EXCLUSIONS ` +
+    `in universe.mjs means it was never upstream source. Those are three different ` +
+    `instructions to three different readers. Delete the rows that are wrong.`
   );
 }
 
@@ -664,6 +709,7 @@ export function guardVerdict(
   const problems = [
     ...audit.deleted.map(deletedMessage),
     ...audit.unclassified.map(unclassifiedMessage),
+    ...audit.conflicted.map(conflictedMessage),
     ...audit.untracked.map(untrackedMessage),
     ...audit.stale.map(staleMessage),
   ];

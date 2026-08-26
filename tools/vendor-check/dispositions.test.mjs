@@ -171,6 +171,38 @@ describe("the twelve divergences UPSTREAM.md numbers", () => {
     );
   });
 
+  it("gives every entry a path, a shape and a way of being checked", () => {
+    // `SUBJECT` and `INCIDENTAL` have per-entry shape tests above and this table had
+    // none, which matters because `appliedIn` is a two-value enum that decides which
+    // check runs. A typo — `appliedIn: "vendoring"` — falls into the *port* branch and
+    // dies inside `divergenceEvidenceHolds` saying the edit "is applied by the port",
+    // the opposite of the truth; a `vendoring-commit` entry with no `evidence` dies
+    // reading `.test` of undefined. Both are the entry being wrong, reported as
+    // something else.
+    for (const [number, entry] of Object.entries(DIVERGENCES)) {
+      assert.equal(typeof entry.path, "string", `divergence ${number} has no path`);
+      assert.ok(entry.path.length > 0, `divergence ${number}'s path is empty`);
+      assert.ok(
+        ["port", "vendoring-commit"].includes(entry.appliedIn),
+        `divergence ${number} is appliedIn ${JSON.stringify(entry.appliedIn)}, which is ` +
+          `neither "port" nor "vendoring-commit" — those are the only two ways an edit ` +
+          `gets checked here`,
+      );
+      assert.ok(
+        typeof entry.what === "string" && entry.what.length > 10,
+        `divergence ${number} does not say what the edit is, and that string is what ` +
+          `every failure message about it quotes`,
+      );
+      if (entry.appliedIn === "vendoring-commit") {
+        assert.ok(
+          entry.evidence instanceof RegExp,
+          `divergence ${number} is in the baseline, so content is the only thing that ` +
+            `can check it, and it carries no evidence pattern`,
+        );
+      }
+    }
+  });
+
   it("describes an edit that is really in the tree", () => {
     // The two halves of "real" are different questions, and conflating them is what
     // let three of these go unchecked. A divergence the *port* applied shows up as a
@@ -311,7 +343,23 @@ describe("auditing a survey", () => {
     assert.deepEqual(audit.deleted, [KNOWN]);
   });
 
+  it("reports a path two tables both claim, and does not call it unclassified", () => {
+    // The third way the table can be wrong, and the one that used to be invisible:
+    // `unclassified` tested `count === 0` only, so two rows for one path produced no
+    // finding at all. Zero and two are different failures — nothing was said, versus
+    // two things were said that contradict each other — so they get separate buckets.
+    const doubled = (file) => (file === KNOWN ? 2 : dispositionCount(file));
+    const audit = auditDispositions({ changed: dispositionedPaths() }, doubled);
+    assert.deepEqual(audit.conflicted, [KNOWN]);
+    assert.deepEqual(audit.unclassified, []);
+    assert.deepEqual(audit.stale, []);
+  });
+
   it("treats a missing `deleted` as none, not as undefined", () => {
     assert.deepEqual(auditDispositions({ changed: dispositionedPaths() }).deleted, []);
+  });
+
+  it("reports nothing conflicted on the real table", () => {
+    assert.deepEqual(auditDispositions(SURVEY).conflicted, []);
   });
 });

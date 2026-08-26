@@ -41,6 +41,7 @@ import {
 } from "./dispositions.mjs";
 import {
   BASELINE,
+  EXCLUSIONS,
   GIT_TIMEOUT_MS,
   REPO,
   surveyVendored,
@@ -349,6 +350,29 @@ describe("a simulated re-vendor going wrong", () => {
     assert.doesNotMatch(verdict.message, /is not in the working tree/);
   });
 
+  it("fails a path that two disposition tables both claim", () => {
+    // The failure with no symptom, and the one the guard used to pass. `unclassified`
+    // only ever tested `count === 0` and the roster filter only kept `count === 1`, so
+    // a path in both SUBJECT and INCIDENTAL was reported by nothing *and* dropped out
+    // of `expected` — the guard's whole product quietly one line short. The tables
+    // disagree about substance too: one says a plan task owns the edit, the other says
+    // a re-vendorer re-applies it by hand.
+    const doubled = (file) => (file === SURFACE ? 2 : dispositionCount(file));
+    const verdict = guardVerdict({ changed: dispositionedPaths() }, doubled);
+    assert.ok(!verdict.ok, "a path claimed by two tables passed the guard");
+    assert.match(verdict.message, /surface\.rs is claimed by more than one disposition table/);
+    assert.match(verdict.message, /Delete the rows that are wrong/);
+    assert.ok(
+      !verdict.expected.some((line) => line.startsWith(SURFACE)),
+      "a conflicted path is still described as though one table owned it",
+    );
+    assert.doesNotMatch(
+      verdict.message,
+      /has no disposition/,
+      "a doubly-claimed path was also reported as unclassified",
+    );
+  });
+
   it("fails an entry whose file no longer differs", () => {
     const changed = dispositionedPaths().filter((file) => file !== SURFACE);
     const verdict = guardVerdict({ changed, deleted: [] });
@@ -382,6 +406,25 @@ describe("the named-reason roster", () => {
       reason: "an incidental edit nobody has written up yet",
     });
     assert.match(line, /not yet numbered in UPSTREAM\.md/);
+  });
+
+  it("says an excluded path is not vendored, and gives the declared reason", () => {
+    // The fourth roster shape, and the only one nothing exercised. `EXCLUSIONS` paths
+    // are out of the universe by construction so a real survey never carries one, but
+    // `dispositionOf` still answers `"excluded"` for them and this is what it prints.
+    const line = describeDisposition("package.json");
+    assert.match(line, /^package\.json — not vendored: /);
+    assert.ok(line.includes(EXCLUSIONS["package.json"]), "the declared reason is not in the line");
+  });
+
+  it("refuses an unrecognised kind rather than calling it not vendored", () => {
+    // "not vendored" used to be the fall-through, which made it the answer for
+    // anything unrecognised — the most reassuring sentence this function has, printed
+    // by default. A fourth kind is a change to the function, not to its default.
+    assert.throws(
+      () => describeDisposition("engine/x.rs", { kind: "provisional", reason: "who knows" }),
+      /none of subject, incidental or excluded/,
+    );
   });
 
   it("refuses a verdict that is not one, rather than printing a plausible lie", () => {

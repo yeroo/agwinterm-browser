@@ -80,6 +80,10 @@ describe("the UPSTREAM.md divergence list", () => {
 
   it("numbers its entries 1..N with no gaps and no repeats", () => {
     const numbers = entries.map((entry) => entry.number);
+    // Before the comparison, because `deepEqual([], [])` passes: a change to the
+    // `N. **\`path\`` convention would make `numberedEntries` parse nothing and leave
+    // this test green on a list it could no longer read at all.
+    assert.ok(entries.length > 0, `${DOC}'s numbered entries no longer parse`);
     assert.deepEqual(
       numbers,
       numbers.map((_, index) => index + 1),
@@ -245,8 +249,12 @@ describe("the re-vendoring checklist", () => {
     const quotes = quotedFailures(section);
     assert.ok(quotes.length >= 4, "the failure table has lost its quoted messages");
     for (const quote of quotes) {
+      const needle = quote.replace(/`/g, "").replace(/\s+/g, " ").trim();
+      // `includes("")` is true, so a row whose emphasis markers ended up empty would
+      // pass this loop while quoting nothing. Length first, match second.
+      assert.ok(needle.length > 15, `the checklist has a quoted row with no message in it`);
       assert.ok(
-        real.includes(quote.replace(/`/g, "").replace(/\s+/g, " ")),
+        real.includes(needle),
         `the checklist quotes "…${quote}" and nothing in dispositions.mjs says it. A ` +
           `row nobody can match is worse than no row: it is read while something is ` +
           `already wrong.`,
@@ -296,19 +304,25 @@ describe("what the docs claim the guard covers", () => {
   const counts = { commit: vendoringCommitPaths().length, universe: vendoredUniverse().length };
 
   it("states the path count the vendoring commit really has", () => {
-    for (const doc of [DOC, "README.md"]) {
+    // Anchored on the sentence each document actually makes the claim in, the way the
+    // `remaining (\d+)` check below is. A bare /(\d+) paths/ swept the whole file, so
+    // any future correct sentence — "the 12 paths under `pixel-node/src`" — would fail
+    // a vendoring-commit assertion, and a test that fails on unrelated true prose is
+    // one that gets edited rather than obeyed.
+    for (const [doc, claim] of [
+      [DOC, /introduced (\d+) paths/],
+      ["README.md", /the (\d+) paths `45b5e43`/],
+    ]) {
       const text = readRepoFile(doc).replace(/\r\n/g, "\n");
-      const stated = [...text.matchAll(/(\d+) paths/g)].map((match) => Number(match[1]));
-      assert.ok(stated.length > 0, `${doc} no longer says how many paths are in scope`);
-      for (const number of stated) {
-        assert.equal(
-          number,
-          counts.commit,
-          `${doc} says ${number} paths where ${BASELINE} introduced ${counts.commit}. ` +
-            `A count written once and never re-derived is how a coverage claim goes ` +
-            `stale without anyone editing it.`,
-        );
-      }
+      const match = text.match(claim);
+      assert.ok(match, `${doc} no longer says how many paths ${BASELINE} put in scope`);
+      assert.equal(
+        Number(match[1]),
+        counts.commit,
+        `${doc} says ${match[1]} paths where ${BASELINE} introduced ${counts.commit}. ` +
+          `A count written once and never re-derived is how a coverage claim goes ` +
+          `stale without anyone editing it.`,
+      );
     }
   });
 

@@ -34,10 +34,15 @@ const PIXEL_REACT = path.join(REPO, "engine", "packages", "pixel-react");
 // The three arguments the artifact check is made of, named once so the tests below
 // exercise the wiring this suite really uses rather than a plausible copy of it.
 const ARTIFACT_REL = "engine/packages/pixel-react/native/pixel.node";
-// `pixel.node` is a copy of the cdylib cargo builds from this crate, so this is the
-// source whose mtime decides whether the copy is current. `pixel-core` is upstream
-// of it again; `unchanged.test.mjs` is what guards that tree.
-const SOURCE_REL = "engine/crates/pixel-node/src";
+// `pixel.node` is a copy of the cdylib cargo builds from `pixel-node`, so this is the
+// source whose mtime decides whether the copy is current. Both crates, not just
+// `pixel-node/src`: `pixel-node` depends on `pixel-core`, so `pixel-core/src` is
+// compiled *into* the artifact and an edit there leaves it just as stale. Scoping
+// this to one crate meant the three tests below could pass against yesterday's build
+// of the tree this port actually rewrites. `unchanged.test.mjs` guards that tree's
+// *content* against the baseline, which is a different question from build freshness.
+// `engine/target` is a sibling of `crates`, so this does not walk the build output.
+const SOURCE_REL = "engine/crates";
 const BUILD = "corepack pnpm --filter pixel-react build:native";
 
 describe("the cdylib's name", () => {
@@ -186,11 +191,11 @@ describe("the artifact check", () => {
     });
   });
 
-  it("fails on a pixel.node older than pixel-node/src", () => {
+  it("fails on a pixel.node older than the crates it is built from", () => {
     // Staleness was never checked at all. An artifact from before the last edit to
     // `lib.rs` loads, exports every symbol, and answers for code that has gone.
     assert.throws(check(fixture("stale", "stale")), (error) => {
-      assert.match(error.message, /pixel\.node is older than engine\/crates\/pixel-node\/src/);
+      assert.match(error.message, /pixel\.node is older than engine\/crates/);
       assert.ok(error.message.includes(BUILD), error.message);
       return true;
     });
@@ -222,8 +227,17 @@ describe("the artifact check", () => {
 
   it("no longer lets any test here run conditionally", () => {
     // `requireBuilt` at the top of a describe is only loud while nothing downstream
-    // re-introduces the option it replaced.
+    // re-introduces the option it replaced. Both spellings, because the options-object
+    // form was only the one that happened to be used here: the dotted form on `it`,
+    // `describe` or `t`, and `todo` in either shape, all put a test back to reporting
+    // success on a tree where the artifact was never built.
+    //
+    // The prose above deliberately does not write either pattern out. This test reads
+    // its own source, so an example in a comment is a match, and a guard that fails on
+    // its own explanation is one nobody keeps.
     const self = fs.readFileSync(fileURLToPath(import.meta.url), "utf8");
-    assert.ok(!/\{\s*skip\b/.test(self), "a node:test skip option is back in this file");
+    for (const pattern of [/\{\s*(?:skip|todo)\b/, /\.(?:skip|todo)\(/]) {
+      assert.ok(!pattern.test(self), `${pattern} is back in this file — a test can go silent again`);
+    }
   });
 });

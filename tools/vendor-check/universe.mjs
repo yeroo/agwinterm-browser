@@ -8,10 +8,17 @@
 // decided what got checked, and lists rot.
 //
 // So the scope comes from the vendoring commit. Every path `45b5e43` introduced is
-// in the universe by construction; a newly vendored file is covered the moment it is
-// committed, with nobody to remind. What a human still owns is the *exceptions*, and
-// those are here as declarations with a reason each, so an exclusion is a decision on
-// the record rather than an absence.
+// in the universe by construction, with nobody to remind. What a human still owns is
+// the *exceptions*, and those are here as declarations with a reason each, so an
+// exclusion is a decision on the record rather than an absence.
+//
+// Note the edge of that, because it is the one thing this scope cannot do: a file
+// vendored *later* is not in the universe, since the universe is one commit's
+// contents. `untrackedInVendoredTrees` fails while it sits there undecided, and that
+// is the whole window. Committing it under this baseline silences the finding without
+// putting the file in scope — so for genuinely new upstream code the answer is a
+// re-vendor that moves `BASELINE`, which `untrackedMessage` and the checklist at the
+// end of `UPSTREAM.md` both say out loud.
 //
 // This module answers three questions and refuses to guess at any of them:
 //
@@ -122,10 +129,17 @@ export function vendoredUniverse() {
  * A stale exclusion is how the list starts lying: it reads as a considered decision
  * about a real file while covering nothing, and the day a path by that name *is*
  * vendored it is exempt before anyone looks at it.
+ *
+ * Both arguments are injectable so the throw can be tested. It is the only branch
+ * this function has, and a check whose failure path has never run once is a check
+ * nobody has evidence for.
  */
-export function assertExclusionsAreReal() {
-  const universe = new Set(vendoringCommitPaths());
-  const stale = Object.keys(EXCLUSIONS).filter((p) => !universe.has(p));
+export function assertExclusionsAreReal(
+  exclusions = EXCLUSIONS,
+  paths = vendoringCommitPaths(),
+) {
+  const universe = new Set(paths);
+  const stale = Object.keys(exclusions).filter((p) => !universe.has(p));
   if (stale.length > 0) {
     throw new Error(
       `EXCLUSIONS names ${stale.length} path(s) that ${BASELINE} never introduced: ` +
@@ -161,17 +175,25 @@ export function classify(candidate) {
 }
 
 /**
- * Every directory the vendoring commit put a file in, derived rather than listed.
+ * Every directory holding a path of the vendored universe, derived rather than listed.
  *
- * The repo root is deliberately not in it. `package.json`, `.gitignore` and
- * `pnpm-workspace.yaml` are all root-level vendored paths, so `.` qualifies on the
+ * Derived from `vendoredUniverse()` rather than from the raw commit, because an
+ * excluded path is a declaration that the file is *this repo's own* — and a directory
+ * that qualifies only through one of them is not a vendored tree. `docs/plans` is the
+ * case: its single baseline path is `20260821-windows-port.md`, excluded because
+ * "changing is what a plan does". Deriving from the raw set made every new plan
+ * document an untracked-file failure while it was still being written, which is the
+ * guard-gets-silenced pressure this whole directory exists to avoid.
+ *
+ * The repo root is deliberately not in it either. `LICENSE`, `pnpm-lock.yaml` and
+ * `pnpm-workspace.yaml` are root-level paths in the universe, so `.` qualifies on the
  * same rule every other directory does — and since every path in the repo descends
  * from the root, including it would make "is this inside a vendored tree" true of
  * everything. The root is this workspace's floor, not a tree.
  */
 export function vendoredDirectories() {
   const dirs = new Set();
-  for (const file of vendoringCommitPaths()) {
+  for (const file of vendoredUniverse()) {
     const cut = file.lastIndexOf("/");
     if (cut > 0) dirs.add(file.slice(0, cut));
   }
@@ -207,14 +229,24 @@ export function inVendoredTree(file, dirs = vendoredDirectories()) {
  *
  * `--exclude-standard` is what keeps this from being a nag: build output and scratch
  * directories are already named in `.gitignore`, whose whole declared purpose in
- * `EXCLUSIONS` is that it "grows whenever the port adds one". So there are two ways
- * to answer this failure — commit the file or ignore it — and both are decisions on
- * the record, which is the only property the guard actually wants.
+ * `EXCLUSIONS` is that it "grows whenever the port adds one". So there are ways to
+ * answer this failure — commit it if it is this repo's own, re-vendor if it is
+ * upstream's, ignore it if it is neither — and every one of them is a decision on the
+ * record, which is the only property the guard actually wants. `untrackedMessage`
+ * spells all three out and says why the middle one is not just "commit it".
+ *
+ * `files` and `dirs` are injectable for the reason everything else here is: the only
+ * honest test of "does this report an untracked file in a vendored tree" would drop a
+ * real file into `pixel-node/src` while the rest of the run is reading that tree, and
+ * a positive assertion is worth having without that. Default to git.
  */
-export function untrackedInVendoredTrees() {
-  const files = splitNul(git(["ls-files", "--others", "--exclude-standard", "-z"]));
-  const dirs = vendoredDirectories();
+export function untrackedInVendoredTrees(files = untrackedFiles(), dirs = vendoredDirectories()) {
   return files.filter((file) => inVendoredTree(file, dirs)).sort();
+}
+
+/** Every file git neither tracks nor ignores, as repo-relative forward-slash paths. */
+export function untrackedFiles() {
+  return splitNul(git(["ls-files", "--others", "--exclude-standard", "-z"]));
 }
 
 /**

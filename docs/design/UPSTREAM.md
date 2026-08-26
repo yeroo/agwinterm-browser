@@ -72,10 +72,17 @@ that owns it, an incidental divergence numbered below, or a declared exclusion. 
 vendored file that is *deleted* fails too, which is the failure a diff cannot see.
 
 **The scope comes from git, not from this file.** `universe.mjs` asks
-`git show --name-only 45b5e43` what was vendored, so a newly vendored file is in scope
-the moment it is committed, with nobody to remind. **This list is therefore not the
-boundary of what is checked** — it is the subset of checked paths whose edits a
-re-vendorer has to re-apply by hand.
+`git show --name-only 45b5e43` what was vendored, so every path that commit carried is
+in scope with nobody to remind. **This list is therefore not the boundary of what is
+checked** — it is the subset of checked paths whose edits a re-vendorer has to re-apply
+by hand.
+
+The edge of that is worth stating, because it is the one thing the derived scope cannot
+do: a file vendored *later* is not in the universe, since the universe is one commit's
+contents. What covers it is `untrackedInVendoredTrees`, which fails while the file sits
+in a vendored tree untracked. Committing it under this baseline clears the finding
+without putting the file in scope, so for genuinely new upstream code the answer is a
+re-vendor that moves `BASELINE` — see the closing note below.
 
 That distinction is the correction this section needed. Until 2026-08-26 the guard was
 scoped to a checked-in inventory of `engine/crates/pixel-core/src`, and the sentence
@@ -365,7 +372,7 @@ completeness check; this list is not.**
    |---|---|
    | *…no longer differs from 45b5e43* | a divergence you did not re-apply. The `expected` roster in the same output is the whole re-apply list, one line per path, with its reason |
    | *…was vendored by 45b5e43 and is not in the working tree* | the copy dropped a file. No diff can show this one, which is why it is checked separately |
-   | *…is inside a vendored tree and git does not track it* | upstream added a module. Commit it — and give it a disposition — or name it in `.gitignore`. Both are decisions on the record; leaving it is not |
+   | *…is inside a vendored tree and git does not track it* | upstream added a module. Committing it under the old baseline only hides it — it is tracked and still outside the universe — so this one means moving `BASELINE`, per the closing note. If the file is this repo's own, commit it; otherwise name it in `.gitignore`. All three are decisions on the record; leaving it is not |
    | *…differs from 45b5e43 and has no disposition* | a path that differs and is neither subject matter nor a numbered divergence. The message names the three choices |
    | the `pixel-core` inventory drifted, or a new unix-bound module appeared | `inventory.test.mjs`; re-run the disposition pass in [`01-baseline-errors.md`](01-baseline-errors.md) |
 

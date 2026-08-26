@@ -239,9 +239,13 @@ user already knows. `cli/src/unsupported.ts` owns the wording and imports nothin
 `scripts/` (`install.sh`, `fetch-electron.sh`, `apparmor.sh`, `bundle.sh` — POSIX shell,
 and the second fetches the forbidden fork), `herdr-plugin/`, `release-worker/`, `skill/`,
 build output, and upstream's own `README.md`/`AGENTS.md`/`CLAUDE.md`. The full list and
-the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also records the six deliberate
-edits to vendored files — each pinned by a test in `tools/vendor-check/`, so a re-vendor
-that drops one fails loudly rather than at the milestone.
+the reasons are in [`UPSTREAM.md`](UPSTREAM.md), which also numbers the twelve deliberate
+edits to vendored files that are not the port's own subject matter. Since **2026-08-26**
+each is checked — by a diff against `45b5e43` for the nine the port applied, by content
+for the three the vendoring commit applied and so cannot show a diff — so a re-vendor
+that drops one fails by name. That sentence used to say "six" and used to claim each was
+pinned by a test; it was true of two of the six. See
+[the guard that covered one tree of three](#the-guard-that-covered-one-tree-of-three).
 
 ---
 

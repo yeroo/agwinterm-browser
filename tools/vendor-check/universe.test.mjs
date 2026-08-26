@@ -103,6 +103,23 @@ describe("the exclusion list", () => {
     }
   });
 
+  it("refuses an exclusion for a path the commit never carried, and names it", () => {
+    // The only branch `assertExclusionsAreReal` has. Asserting `doesNotThrow` above
+    // holds just as well for a function whose condition can never be true, so the
+    // failure path is driven directly rather than left as an untested claim. The
+    // arguments are injected because the alternative is adding a fake row to the real
+    // `EXCLUSIONS` while the rest of the run reads it.
+    assert.throws(
+      () => assertExclusionsAreReal({ "engine/crates/pixel-core/src/ghost.rs": "why" }, ["LICENSE"]),
+      (error) => {
+        assert.match(error.message, /ghost\.rs/);
+        assert.match(error.message, /exempts a future file of that name/);
+        return true;
+      },
+    );
+    assert.doesNotThrow(() => assertExclusionsAreReal({ LICENSE: "why" }, ["LICENSE"]));
+  });
+
   it("covers exactly the four project files the commit carried and the port edits", () => {
     assert.deepEqual(Object.keys(EXCLUSIONS).sort(), [
       ".gitignore",
@@ -190,6 +207,19 @@ describe("vendored trees, as directories rather than paths", () => {
     assert.ok(!DIRS.has(""), "an empty directory name reached the set");
   });
 
+  it("does not make a tree out of a directory only an excluded path put there", () => {
+    // `docs/plans` holds exactly one baseline path — `20260821-windows-port.md`,
+    // declared out because changing is what a plan does — so the directory is this
+    // repo's own and not a vendored tree. Derived from the raw commit it qualified
+    // anyway, and every plan document was an untracked-file failure for as long as it
+    // took to write. A guard whose answer to ordinary work is "stop" gets silenced.
+    assert.ok(!DIRS.has("docs/plans"), "an excluded path still makes its directory a tree");
+    assert.ok(!inVendoredTree("docs/plans/20260826-vendor-check-gap.md", DIRS));
+    // `docs/design` stays, and for the opposite reason: `01-baseline-errors.md` and
+    // the rest of the design set are in the universe, and only `UPSTREAM.md` is out.
+    assert.ok(DIRS.has("docs/design"), "docs/design lost its vendored paths");
+  });
+
   it("places a file by its own directory", () => {
     assert.ok(inVendoredTree("engine/crates/pixel-node/src/shm.rs", DIRS));
     assert.ok(inVendoredTree("engine/packages/pixel-react/src/surface.ts", DIRS));
@@ -210,6 +240,48 @@ describe("vendored trees, as directories rather than paths", () => {
 
   it("agrees with the survey", () => {
     assert.deepEqual(untrackedInVendoredTrees(), surveyVendored().untracked);
+  });
+
+  it("reports an untracked file that is in a vendored tree, and only that one", () => {
+    // The positive case, which nothing else here has. On a clean tree the live call
+    // answers `[]`, and `[]` is also what a body of `return []` answers — so both
+    // assertions above hold for a function that does nothing at all. The file list is
+    // injected rather than written to disk: creating a real file under `pixel-node/src`
+    // would make `unchanged.test.mjs` fail in the process running beside this one.
+    assert.deepEqual(
+      untrackedInVendoredTrees(
+        [
+          "scratch/notes.md",
+          "engine/crates/pixel-node/src/backends/win32.rs",
+          "notes.md",
+          "engine/packages/pixel-react/src/surface.ts",
+          "docs/plans/20260826-vendor-check-gap.md",
+        ],
+        DIRS,
+      ),
+      [
+        "engine/crates/pixel-node/src/backends/win32.rs",
+        "engine/packages/pixel-react/src/surface.ts",
+      ],
+    );
+  });
+
+  it("sorts what it reports, so a failure list reads the same on every platform", () => {
+    assert.deepEqual(
+      untrackedInVendoredTrees(
+        ["engine/crates/pixel-node/src/z.rs", "engine/crates/pixel-node/src/a.rs"],
+        DIRS,
+      ),
+      ["engine/crates/pixel-node/src/a.rs", "engine/crates/pixel-node/src/z.rs"],
+    );
+  });
+
+  it("asks git for files that are neither tracked nor ignored", () => {
+    // The half the injectable list cannot cover. `--others` without
+    // `--exclude-standard` would report every build artifact under `engine/target`,
+    // which is how this check becomes a nag and then gets deleted.
+    const source = fs.readFileSync(path.join(HERE, "universe.mjs"), "utf8");
+    assert.match(source, /"ls-files", "--others", "--exclude-standard", "-z"/);
   });
 });
 
