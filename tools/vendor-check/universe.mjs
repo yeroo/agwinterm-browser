@@ -161,6 +161,63 @@ export function classify(candidate) {
 }
 
 /**
+ * Every directory the vendoring commit put a file in, derived rather than listed.
+ *
+ * The repo root is deliberately not in it. `package.json`, `.gitignore` and
+ * `pnpm-workspace.yaml` are all root-level vendored paths, so `.` qualifies on the
+ * same rule every other directory does — and since every path in the repo descends
+ * from the root, including it would make "is this inside a vendored tree" true of
+ * everything. The root is this workspace's floor, not a tree.
+ */
+export function vendoredDirectories() {
+  const dirs = new Set();
+  for (const file of vendoringCommitPaths()) {
+    const cut = file.lastIndexOf("/");
+    if (cut > 0) dirs.add(file.slice(0, cut));
+  }
+  return dirs;
+}
+
+/**
+ * Whether `file` sits inside a vendored tree, walking up its ancestors.
+ *
+ * Ancestors rather than the immediate directory alone, so that a *new*
+ * subdirectory — `pixel-node/src/backends/foo.rs`, which no vendored path shares a
+ * directory with — is still inside `pixel-node/src` and still in scope. The walk
+ * stops before the root for the reason `vendoredDirectories` gives.
+ */
+export function inVendoredTree(file, dirs = vendoredDirectories()) {
+  let at = file;
+  for (;;) {
+    const cut = at.lastIndexOf("/");
+    if (cut <= 0) return false;
+    at = at.slice(0, cut);
+    if (dirs.has(at)) return true;
+  }
+}
+
+/**
+ * Files sitting in a vendored tree that git does not track, sorted.
+ *
+ * The hole the diff-based half cannot see. `surveyVendored` asks how the paths
+ * `45b5e43` introduced have changed, which by construction says nothing about a path
+ * it never introduced — so a re-vendor that brings in a new upstream module, or a
+ * stray file left in a vendored source tree, is invisible to every other check here.
+ * A file that is neither committed nor ignored has been decided about by nobody.
+ *
+ * `--exclude-standard` is what keeps this from being a nag: build output and scratch
+ * directories are already named in `.gitignore`, whose whole declared purpose in
+ * `EXCLUSIONS` is that it "grows whenever the port adds one". So there are two ways
+ * to answer this failure — commit the file or ignore it — and both are decisions on
+ * the record, which is the only property the guard actually wants.
+ */
+export function untrackedInVendoredTrees() {
+  const files = splitNul(git(["ls-files", "--others", "--exclude-standard", "-z"]));
+  const dirs = vendoredDirectories();
+  return files.filter((file) => inVendoredTree(file, dirs)).sort();
+}
+
+/**
  * The decision half of `surveyVendored`, with no git and no filesystem in it, so
  * that "a vendored file went missing" can be tested without a test that deletes one
  * out from under whatever else is running.
@@ -194,19 +251,26 @@ export function partitionDivergences(scope, statuses, exists) {
 }
 
 /**
- * How the working tree differs from the vendored baseline: `{ changed, deleted }`,
- * both sorted, both restricted to the vendored universe.
+ * How the working tree differs from the vendored baseline:
+ * `{ changed, deleted, untracked }`, all sorted.
  *
  * Diffed against the *working tree* rather than `HEAD`, so an uncommitted edit to a
  * vendored file is caught by the run that would otherwise ship it. `--no-renames` so
  * that moving a vendored file shows up as the deletion it is at the old path rather
  * than dissolving into an `R` that nothing checks.
+ *
+ * `changed` and `deleted` are restricted to the vendored universe, because both are
+ * questions about a path the commit introduced. `untracked` cannot be: it is the one
+ * finding whose whole subject is a path that is *not* in the universe.
  */
 export function surveyVendored() {
   const fields = splitNul(git(["diff", "--name-status", "--no-renames", "-z", BASELINE]));
   const statuses = [];
   for (let i = 0; i + 1 < fields.length; i += 2) statuses.push([fields[i], fields[i + 1]]);
-  return partitionDivergences(vendoredUniverse(), statuses, (file) =>
-    fs.existsSync(path.join(REPO, ...file.split("/"))),
-  );
+  return {
+    ...partitionDivergences(vendoredUniverse(), statuses, (file) =>
+      fs.existsSync(path.join(REPO, ...file.split("/"))),
+    ),
+    untracked: untrackedInVendoredTrees(),
+  };
 }

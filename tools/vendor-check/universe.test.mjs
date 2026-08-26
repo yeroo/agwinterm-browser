@@ -22,8 +22,11 @@ import {
   EXCLUSIONS,
   assertExclusionsAreReal,
   classify,
+  inVendoredTree,
   partitionDivergences,
   surveyVendored,
+  untrackedInVendoredTrees,
+  vendoredDirectories,
   vendoredUniverse,
   vendoringCommitPaths,
 } from "./universe.mjs";
@@ -165,6 +168,49 @@ describe("the survey against the baseline", () => {
     }
   });
 
+  it("carries an untracked list, which is the one finding scope cannot supply", () => {
+    // `changed` and `deleted` are both questions about a path the commit introduced.
+    // This one is only ever about a path it did not, so it is the single field of the
+    // survey that the universe cannot be used to check.
+    const { untracked } = surveyVendored();
+    assert.ok(Array.isArray(untracked));
+    assert.deepEqual(untracked, [], `untracked files sit in a vendored tree: ${untracked}`);
+  });
+});
+
+describe("vendored trees, as directories rather than paths", () => {
+  const DIRS = vendoredDirectories();
+
+  it("derives the directories from the commit and leaves the root out", () => {
+    // Every path in the repo descends from `.`, so a root that qualified would make
+    // `inVendoredTree` true of everything and the untracked check a repo-wide nag.
+    assert.ok(DIRS.has("engine/crates/pixel-node/src"));
+    assert.ok(DIRS.has("engine/packages/pixel-react/src"));
+    assert.ok(!DIRS.has("."), "the repo root is a vendored directory by the same rule");
+    assert.ok(!DIRS.has(""), "an empty directory name reached the set");
+  });
+
+  it("places a file by its own directory", () => {
+    assert.ok(inVendoredTree("engine/crates/pixel-node/src/shm.rs", DIRS));
+    assert.ok(inVendoredTree("engine/packages/pixel-react/src/surface.ts", DIRS));
+  });
+
+  it("places a file in a subdirectory no vendored path lives in", () => {
+    // The reason the walk goes up the ancestors instead of testing the immediate
+    // directory: a re-vendor that adds `backends/` under `pixel-node/src` puts files
+    // in a directory that shares no vendored path, and it is plainly still inside the
+    // tree.
+    assert.ok(inVendoredTree("engine/crates/pixel-node/src/backends/win32.rs", DIRS));
+  });
+
+  it("leaves alone what is not in a vendored tree at all", () => {
+    assert.ok(!inVendoredTree("scratch/notes.md", DIRS));
+    assert.ok(!inVendoredTree("notes.md", DIRS), "a root-level file counted as vendored");
+  });
+
+  it("agrees with the survey", () => {
+    assert.deepEqual(untrackedInVendoredTrees(), surveyVendored().untracked);
+  });
 });
 
 describe("partitioning edits from deletions", () => {

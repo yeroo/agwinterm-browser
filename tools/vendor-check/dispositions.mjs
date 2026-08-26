@@ -505,13 +505,17 @@ export function dispositionedPaths() {
  * honest answer requires the table to be missing that row. Simulating the row's
  * absence beats editing the working tree out from under the rest of the run.
  */
-export function auditDispositions({ changed, deleted = [] }, count = dispositionCount) {
+export function auditDispositions(
+  { changed, deleted = [], untracked = [] },
+  count = dispositionCount,
+) {
   const gone = new Set(deleted);
   const live = new Set(changed);
   return {
     unclassified: changed.filter((file) => count(file) === 0).sort(),
     stale: dispositionedPaths().filter((file) => !live.has(file) && !gone.has(file)),
     deleted: [...deleted].sort(),
+    untracked: [...untracked].sort(),
   };
 }
 
@@ -601,6 +605,31 @@ export function deletedMessage(file) {
 }
 
 /**
+ * What to tell someone whose vendored tree has a file in it that git never heard of.
+ *
+ * The third failure, and the one the derived scope cannot reach on its own: every
+ * other check here asks a question about a path `45b5e43` introduced, and an
+ * untracked file is by definition not one of those. So a re-vendor that brings in a
+ * new upstream module leaves it sitting in the tree, uncommitted, uncompiled by
+ * anything that reads the manifest, and invisible to a guard whose scope is the
+ * commit.
+ *
+ * Two answers, both of them a decision on the record — which is the whole ask.
+ */
+export function untrackedMessage(file) {
+  return (
+    `${file} is inside a vendored tree and git does not track it. Every other check ` +
+    `here asks about a path ${BASELINE} introduced, so an untracked file is the one ` +
+    `divergence the derived scope cannot see: nothing diffs it, nothing misses it, ` +
+    `and a re-vendor that dropped in a new upstream module looks exactly like this. ` +
+    `Either commit it — and if it is inside a vendored tree it probably wants a ` +
+    `disposition too — or name it in .gitignore, which is where this repo's build ` +
+    `output and scratch directories already go. What it may not do is sit there ` +
+    `undecided.`
+  );
+}
+
+/**
  * What to tell someone holding a disposition whose subject reverted or moved.
  *
  * The quieter of the two failures: a row that describes nothing still reads as a
@@ -627,11 +656,15 @@ export function staleMessage(file) {
  * line per diverged path, in the same shape the old check's `EXPECTED_DIFFS` gave for
  * `pixel-core` alone.
  */
-export function guardVerdict({ changed, deleted = [] }, count = dispositionCount) {
-  const audit = auditDispositions({ changed, deleted }, count);
+export function guardVerdict(
+  { changed, deleted = [], untracked = [] },
+  count = dispositionCount,
+) {
+  const audit = auditDispositions({ changed, deleted, untracked }, count);
   const problems = [
     ...audit.deleted.map(deletedMessage),
     ...audit.unclassified.map(unclassifiedMessage),
+    ...audit.untracked.map(untrackedMessage),
     ...audit.stale.map(staleMessage),
   ];
   const gone = new Set(audit.deleted);

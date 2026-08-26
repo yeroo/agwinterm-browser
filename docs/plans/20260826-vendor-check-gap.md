@@ -244,14 +244,53 @@ build"*. Two things worth recording:
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] edit a `pixel-node` source file by hand and confirm `node --test` fails naming it
-- [ ] edit a `pixel-react` file by hand and confirm the same
-- [ ] delete a vendored file by hand and confirm the failure says it was deleted
-- [ ] add an untracked file under a vendored tree and confirm it is reported, not ignored
-- [ ] revert all of the above and confirm the suite is green again
-- [ ] confirm the failure message for each names the path and what to do about it
-- [ ] run the full suite: `node --test "tools/*/*.test.mjs"`, `cargo nextest run --workspace`
-- [ ] run `python tools/vendor-check/fmt-scope.py` and `clippy-scope.py` — 0 on port lines
+- [x] edit a `pixel-node` source file by hand and confirm `node --test` fails naming it
+- [x] edit a `pixel-react` file by hand and confirm the same
+- [x] delete a vendored file by hand and confirm the failure says it was deleted
+- [x] add an untracked file under a vendored tree and confirm it is reported, not ignored
+- [x] revert all of the above and confirm the suite is green again
+- [x] confirm the failure message for each names the path and what to do about it
+- [x] run the full suite: `node --test "tools/*/*.test.mjs"`, `cargo nextest run --workspace`
+- [x] run `python tools/vendor-check/fmt-scope.py` and `clippy-scope.py` — 0 on port lines
+
+**Found while doing it.** Three of the four hand-made failures were already caught, by
+name, with the fix in the message. The fourth was not caught at all, so this task wrote
+code rather than only confirming it.
+
+- **An untracked file in a vendored tree passed silently.** `?? pixel-node/src/intruder.rs`
+  and `?? pixel-react/src/intruder.ts` together left `node --test` at 472/472. The reason
+  is structural, not an oversight: every check in this directory asks a question about a
+  path `45b5e43` introduced, and an untracked file is by construction not one of those —
+  `changed` and `deleted` both scope through `vendoredUniverse()`, and nothing diffs a
+  path git has never heard of. A re-vendor that drops in a new upstream module looks
+  exactly like this. The survey now carries a third field from
+  `untrackedInVendoredTrees()`, and `guardVerdict` reports it as its own finding rather
+  than folding it into stale-or-deleted, which would send the reader to the wrong fix.
+- **The scope for it had to be derived too, and the repo root is the trap.** `.` holds
+  `package.json`, `.gitignore` and `pnpm-workspace.yaml`, so it qualifies as a vendored
+  directory under the same rule every other directory does — and since every path
+  descends from the root, including it would make the check a repo-wide nag on any
+  scratch file. `vendoredDirectories()` therefore drops the root, and `inVendoredTree`
+  walks *ancestors* rather than testing the immediate directory, so a re-vendor that adds
+  `pixel-node/src/backends/` is still inside the tree. Both halves are pinned by test.
+- **`.gitignore` is the escape hatch, and it already works.** `--exclude-standard` means
+  `engine/packages/pixel-react/native/pixel.node` — gitignored at `.gitignore:28` — does
+  not trip the new check. So the failure has two answers, commit it or ignore it, and
+  both are decisions on the record. A guard whose only answer is "stop working" gets
+  silenced, which is the failure mode this whole plan is about.
+- **`pixel-core/src` was already covered and the other two trees were not.** An untracked
+  file there fails `inventory.test.mjs` four ways, because that suite reads the directory
+  instead of the commit. That is the same asymmetry this plan started from, surviving in
+  a second file.
+- **One incidental confirmation of Task 5.** `git checkout -- shm.rs` during the deletion
+  experiment gave the file a fresh mtime, and `requireBuilt` immediately called
+  `pixel.node` stale — against the real tree, not a fixture. Content was identical; the
+  check is mtime-based and said so. Rebuilt with `corepack pnpm --filter pixel-react
+  build:native`.
+
+Final gate: `node --test` 480 passed / 0 failed / 0 skipped, `cargo nextest run
+--workspace` 467 passed / 1 skipped, `fmt-scope.py` 297 complaints and 0 on port lines,
+`clippy-scope.py` 12 warnings and 0 on port lines.
 
 ### Task 7: [Final] Update documentation
 

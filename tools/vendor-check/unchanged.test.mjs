@@ -319,6 +319,36 @@ describe("a simulated re-vendor going wrong", () => {
     assert.match(verdict.message, /pixel-react\/src\/surface\.ts was vendored by/);
   });
 
+  it("fails an untracked file sitting in a vendored tree", () => {
+    // The hole the derived scope could not close by itself, and the last of the four
+    // ways a re-vendor goes wrong. `changed` and `deleted` are both questions about a
+    // path `45b5e43` introduced; a new upstream module is not one, so it was invisible
+    // to every check in this directory until the survey started asking git what it
+    // does not track.
+    const intruder = "engine/crates/pixel-node/src/backends/win32.rs";
+    const verdict = guardVerdict({ changed: dispositionedPaths(), untracked: [intruder] });
+    assert.ok(!verdict.ok, "an untracked file in a vendored tree passed");
+    assert.match(verdict.message, /backends\/win32\.rs/, "the failure does not name the file");
+    assert.match(verdict.message, /git does not track it/);
+    assert.match(verdict.message, /\.gitignore/, "the failure does not offer the other answer");
+    assert.ok(
+      !verdict.expected.some((line) => line.startsWith(intruder)),
+      "an untracked path was listed as expected",
+    );
+  });
+
+  it("does not confuse an untracked file with a stale or deleted one", () => {
+    // Three findings that all mean "a path and the tree disagree", reported under
+    // three names. Collapsing any pair reads as one problem and sends the reader to
+    // the wrong fix.
+    const verdict = guardVerdict({
+      changed: dispositionedPaths(),
+      untracked: ["engine/packages/pixel-react/src/intruder.ts"],
+    });
+    assert.doesNotMatch(verdict.message, /no longer differs/);
+    assert.doesNotMatch(verdict.message, /is not in the working tree/);
+  });
+
   it("fails an entry whose file no longer differs", () => {
     const changed = dispositionedPaths().filter((file) => file !== SURFACE);
     const verdict = guardVerdict({ changed, deleted: [] });
