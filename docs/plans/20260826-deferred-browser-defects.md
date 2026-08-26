@@ -128,17 +128,42 @@ live with a pointer moving over it, so SGR bytes were arriving on stdin *continu
 while the verb ran*. `cookConsoleModes` hands that stdin to `cmd.exe` with
 `stdio: "inherit"` (`cli/src/pane.ts:510-517`).
 
-- [ ] add a test that spawns `pane-clear` as a real process and writes to its stdin
+- [x] add a test that spawns `pane-clear` as a real process and writes to its stdin
       continuously while it runs — SGR-shaped bytes, at a rate a moving pointer produces
-- [ ] assert it still completes, reports both halves, and exits 0 within a bounded time,
-      so a hang fails the test rather than wedging the run
-- [ ] cover the console-restore half specifically, since that is where the inherited
-      stdin goes
-- [ ] **if the test fails, that is the reproduction** — bound the `cookConsoleModes`
-      exchange or drain stdin before the child, and record what was found
-- [ ] if the test passes, say so in the plan and leave the hang open rather than closing
-      it on absence of evidence
-- [ ] run tests — must pass before Task 4
+      — `tools/acceptance/pane-clear.test.mjs`, "stdin that does not stop while the verb
+      runs". `runClear` grew a `stdin` knob; `feedPointer` writes `\e[<35;C;RM` motion
+      reports at 125 Hz — one per ~8ms, the rate `?1003h` sends for a pointer crossing a
+      pane — onto a live pipe on the verb's fd 0, from spawn until after exit
+- [x] assert it still completes, reports both halves, and exits 0 within a bounded time,
+      so a hang fails the test rather than wedging the run — exit 0, `frame: cleared`
+      *and* a `console:` line, one `image.clear` at the host, and `< 15s`. `CHILD_MS`
+      alone would have been satisfied by a hang the harness cut short, so the run is
+      bounded twice. The number of reports actually delivered is asserted too
+      (`>= 5`), so a run that finished before any bytes arrived cannot pass as coverage
+- [x] cover the console-restore half specifically, since that is where the inherited
+      stdin goes — second test, and it needed its own process: with fd 0 a pipe,
+      `restorePaneConsole` sees `isTTY` false and never spawns the cooking child at all.
+      So the child opens the gate on the *real* `process.stdin` (`defineProperty`) and
+      the real `cookConsoleModes` runs — `cmd.exe`, `stdio: "inherit"`, on a fd the
+      parent is still writing to — then `input.pause()` runs against that same stdin
+- [x] **if the test fails, that is the reproduction** — not reached: both tests pass, so
+      no bound on the `cookConsoleModes` exchange and no stdin drain were added. Changing
+      that code on a green test would be a fix for a defect this run did not find
+- [x] if the test passes, say so in the plan and leave the hang open rather than closing
+      it on absence of evidence — **it passes, and the hang stays open.** Measured
+      2026-08-26: the verb finished in 916ms with ~100 motion reports delivered onto its
+      stdin, and the restore half finished in 938ms with `modes: true` — the cooking
+      child ran and returned. What that rules out is a `cmd.exe` inheriting a *pipe*
+      with unread bytes still arriving on it. What it does not touch is the console
+      shape of the same condition: a console input buffer filling with `INPUT_RECORD`s,
+      and libuv's `uv_tty_read_stop` writing a wake-up record into a buffer that is
+      already full. Node cannot reach that from a test — there is no `CREATE_NEW_CONSOLE`
+      on `spawn`, and the only console this suite could hand a child is the runner's own
+      real pane, which is the wreck being avoided. A pseudoconsole is
+      `tools/conpty-probe`'s territory and a standalone cargo package by design. That is
+      the fifth scenario, and it is still unbuilt
+- [x] run tests — must pass before Task 4 — 535 node tests (10 in the acceptance suite,
+      2 of them new), 467 `cargo nextest` tests, all green
 
 ### Task 4: Verify acceptance criteria
 
