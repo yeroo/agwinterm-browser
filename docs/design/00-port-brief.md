@@ -328,7 +328,8 @@ process-local, and its numeric value means nothing in the consumer without a `Du
 the consumer's process, which needs the consumer's PID and rights over it. A `Local\` name needs
 neither. The args also mirror `image.frame`'s `images[]` array rather than being flat, so the two
 verbs read as siblings. **The exact name prefix is pinned in
-`agwinterm/docs/specs/image-frameshm.md`; do not invent one.**
+[agwinterm's versioned `image.frameshm` contract](https://github.com/yeroo/agwinterm/blob/main/docs/specs/image-frameshm.md);
+do not invent one.**
 
 This spans **two repositories**: agwinterm gains the command, winterm-browser produces the frames.
 The existing file-based `image.frame` stays as the fallback and as the bring-up path.
@@ -348,6 +349,11 @@ The existing file-based `image.frame` stays as the fallback and as the bring-up 
 > **38 ms per frame at a 131×37 pane, 26 fps**, of which the fast path would delete about 27.6 ms
 > outright ([`02-frame-budget.md`](02-frame-budget.md)). The diagram above is still the design;
 > it is now a design with a baseline to beat.
+
+> ⚠️ **Host update, 2026-08-28.** agwinterm now implements `image.frameshm`, including the
+> versioned contract linked above, the ctl surface, malformed-producer validation and the BGRA
+> renderer path. This does not rewrite what winterm-browser shipped: its current transport remains
+> the PNG fallback until a separate consumer change adopts the fast path.
 
 ## Working agreement
 
