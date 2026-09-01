@@ -337,7 +337,7 @@ the same build the child ran.
 > **That test was written on 2026-08-26 and it passes**, so the hang is still open rather
 > than explained: `tools/acceptance/pane-clear.test.mjs`, "stdin that does not stop while
 > the verb runs". See [`20260826-deferred-browser-defects.md`](20260826-deferred-browser-defects.md)
-> Task 3 for what that rules out and what it leaves — [`../design/07-as-built.md`](../design/07-as-built.md) §4
+> Task 3 for what that rules out and what it leaves — [`../design/07-as-built.md`](../../design/07-as-built.md) §4
 > carries the standing note.
 
 | criterion | how it is now checked |
@@ -453,7 +453,7 @@ disposition table is in that task's `task.md`.
 
 **Wants its own plan — the vendored-tree guard does not cover the vendored tree.** The
 first two below were done by
-[`completed/20260826-vendor-check-gap.md`](completed/20260826-vendor-check-gap.md); the
+[`20260826-vendor-check-gap.md`](20260826-vendor-check-gap.md); the
 last two are **still open**, and checked rather than assumed on 2026-08-26 —
 `docs.test.mjs:133` still asserts one direction, and `blame()` is still duplicated between
 the two scoping scripts.

@@ -234,7 +234,7 @@ than kept; the lock's absence is the assertion that discriminates.
       `tools/acceptance/profile-lock.test.mjs` as what actually holds them — the
       understated-scope failure divergence 5 had, pre-empted for divergence 13
 - [x] update the Deferred section of
-      `docs/plans/20260822-post-port-corrections.md`: mark the `file://` item as already
+      `docs/plans/completed/20260822-post-port-corrections.md`: mark the `file://` item as already
       fixed, and point the two profile items at this plan — done, and the group heading
       now says the premise held for only one of the two, since `foreground.ts` turned out
       to be port-added and cost no divergence. The fourth group was checked rather than

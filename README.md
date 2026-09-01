@@ -261,12 +261,12 @@ apply to lines this port wrote, and that scope is enforced rather than asserted.
 | [`07-as-built.md`](docs/design/07-as-built.md) | the two frame transports, what was dropped, and the accepted ceilings |
 | [`UPSTREAM.md`](docs/design/UPSTREAM.md) | what was vendored, every deliberate divergence, and the re-vendoring checklist |
 
-The plans are [`20260821-windows-port.md`](docs/plans/20260821-windows-port.md), the port itself,
-[`20260822-post-port-corrections.md`](docs/plans/20260822-post-port-corrections.md), which fixed
+The plans are [`20260821-windows-port.md`](docs/plans/completed/20260821-windows-port.md), the port itself,
+[`20260822-post-port-corrections.md`](docs/plans/completed/20260822-post-port-corrections.md), which fixed
 four defects the port shipped with — and ran the review it shipped without,
-[`completed/20260826-vendor-check-gap.md`](docs/plans/completed/20260826-vendor-check-gap.md), which
+[`20260826-vendor-check-gap.md`](docs/plans/completed/20260826-vendor-check-gap.md), which
 widened the vendored-tree guard from one tree to three, and
-[`20260826-deferred-browser-defects.md`](docs/plans/20260826-deferred-browser-defects.md), which
+[`20260826-deferred-browser-defects.md`](docs/plans/completed/20260826-deferred-browser-defects.md), which
 closed the two Windows profile defects that plan deferred.
 
 ## How this project is built

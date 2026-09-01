@@ -1,6 +1,6 @@
 # As built — transports, drops and ceilings
 
-Task 15 of [the port plan](../plans/20260821-windows-port.md). The other design docs
+Task 15 of [the port plan](../plans/completed/20260821-windows-port.md). The other design docs
 say what was decided ([00](00-port-brief.md), [03](03-process-model.md),
 [04](04-cell-metrics.md), [05](05-cli-and-endpoints.md)) and what was checked
 ([06](06-acceptance.md)). This one says what a person running the thing actually
@@ -387,9 +387,9 @@ float (`Program.cs:1127`) and `TERMINAL_BROWSER_CELL_PX` takes integers. The ver
 The subsections below were not in the port. They are here rather than in the plans that
 produced them because this file is what a person running the thing meets, and every one
 of them changes what they meet. The plans are
-[`20260822-post-port-corrections.md`](../plans/20260822-post-port-corrections.md),
-[`completed/20260826-vendor-check-gap.md`](../plans/completed/20260826-vendor-check-gap.md)
-and [`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md).
+[`20260822-post-port-corrections.md`](../plans/completed/20260822-post-port-corrections.md),
+[`20260826-vendor-check-gap.md`](../plans/completed/20260826-vendor-check-gap.md)
+and [`20260826-deferred-browser-defects.md`](../plans/completed/20260826-deferred-browser-defects.md).
 
 ### `TERMINAL_BROWSER_ALLOW_PIPE` — a dev build refuses an instance it was not named at
 
@@ -711,6 +711,6 @@ package by design. That is the fifth scenario, and it is unbuilt.
 
 No code changed for this. The green test is the whole reason: changing `cookConsoleModes`
 on a passing test would be a fix for a defect that was not found, and the plan that added
-the coverage ([`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md))
+the coverage ([`20260826-deferred-browser-defects.md`](../plans/completed/20260826-deferred-browser-defects.md))
 says so out loud. **If it recurs, capture the pane state before recovering it** — the
 recovery is what destroyed the evidence the first time.

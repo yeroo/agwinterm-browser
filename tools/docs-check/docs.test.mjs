@@ -24,14 +24,25 @@ const ROOT = path.resolve(import.meta.dirname, "..", "..");
 
 const read = (relative) => fs.readFileSync(path.join(ROOT, relative), "utf8");
 
-/** Every markdown file this project maintains. Not `.reference/`, not `node_modules/`. */
+/**
+ * Every markdown file this project maintains. Not `.reference/`, not `node_modules/`.
+ *
+ * Recursive, and that is the whole point: `docs/plans/completed/` is where a finished
+ * plan is filed, and being filed is exactly when a plan's relative links break, because
+ * they were written one directory further up. A flat `readdirSync` skipped that
+ * directory entirely — so the guard got quietly narrower each time a plan was completed,
+ * and on 2026-09-01, when the last three were moved, `docs/plans` began contributing
+ * nothing at all while the suite stayed green.
+ */
 function docFiles() {
   const docs = ["README.md"];
-  for (const dir of ["docs/design", "docs/plans"]) {
-    for (const name of fs.readdirSync(path.join(ROOT, dir))) {
-      if (name.endsWith(".md")) docs.push(`${dir}/${name}`);
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
+      if (entry.isDirectory()) walk(`${dir}/${entry.name}`);
+      else if (entry.name.endsWith(".md")) docs.push(`${dir}/${entry.name}`);
     }
-  }
+  };
+  for (const dir of ["docs/design", "docs/plans"]) walk(dir);
   return docs;
 }
 
@@ -77,6 +88,24 @@ function linksOf(relative) {
   }
   return links;
 }
+
+test("the completed plans are inside the set the link tests walk", () => {
+  // The two tests below are only worth what `docFiles()` reaches, and it reached one
+  // directory less than it looked like it did. Pin the subdirectory rather than the
+  // count: a plan gets filed here whenever one finishes.
+  const covered = docFiles();
+  const completed = fs
+    .readdirSync(path.join(ROOT, "docs/plans/completed"))
+    .filter((n) => n.endsWith(".md"))
+    .map((n) => `docs/plans/completed/${n}`);
+
+  assert.ok(completed.length > 0, "no completed plans found — is the directory still there?");
+  assert.deepEqual(
+    completed.filter((p) => !covered.includes(p)),
+    [],
+    "a completed plan is not being link-checked",
+  );
+});
 
 test("every relative link in the documentation resolves to a file that exists", () => {
   const broken = [];

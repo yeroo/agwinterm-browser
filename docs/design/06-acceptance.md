@@ -1,6 +1,6 @@
 # Acceptance — what was checked, how, and what it found
 
-Task 14 of [the port plan](../plans/20260821-windows-port.md). Every criterion below
+Task 14 of [the port plan](../plans/completed/20260821-windows-port.md). Every criterion below
 was run rather than reasoned about, on this machine, on 2026-08-21. Two of them
 failed the first time and the fixes are recorded with them; a criterion that passed
 only after a change is not a criterion that passed.
@@ -160,7 +160,7 @@ object that terminates with its parent, which is exactly how `openInForeground` 
 down *both* cleanup halves at once: `ModeGuard::drop` never runs in the browser and the
 CLI's clear never runs either. Measured rather than reasoned about, and it is the
 strongest argument for the `pane-clear` verb existing
-([the corrections plan](../plans/20260822-post-port-corrections.md), Tasks 1 and 6).
+([the corrections plan](../plans/completed/20260822-post-port-corrections.md), Tasks 1 and 6).
 Both cases are now processes rather than eyes: `tools/acceptance/pane-clear.test.mjs`
 spawns `node cli/dist/main.js pane-clear` against a real named pipe, with a browser that
 is a real process planting a real frame directory and then ended with `taskkill /F`, and
@@ -202,7 +202,7 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 ## 6. Tests, lints and coverage
 
 Re-run on **2026-08-26**, after
-[the deferred-browser-defects plan](../plans/20260826-deferred-browser-defects.md) and its review
+[the deferred-browser-defects plan](../plans/completed/20260826-deferred-browser-defects.md) and its review
 round; the run before it was [the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md)'s,
 whose node row was 510 / 112 suites. The numbers this table carried on 2026-08-21 were
 421 / 364+57 / 266 and on 2026-08-25 the node row was 389 / 90 suites, and leaving any of
@@ -592,7 +592,7 @@ Four more defects surfaced the next morning, and none of them by re-reading this
 document — they came from looking at what the run had left behind on the machine: a
 wrecked pane of the *real* instance (the preamble above), three `node` processes wedged
 since the evening before, and a review that never started. They became
-[the corrections plan](../plans/20260822-post-port-corrections.md): a `pane-clear` verb,
+[the corrections plan](../plans/completed/20260822-post-port-corrections.md): a `pane-clear` verb,
 a dev-build pipe guard, bounded waits in the test suite, and a deadline on the engine's
 control-pipe exchange. Its Task 6 re-ran the suites and the pane criteria above, which
 is where the 2026-08-24 numbers came from.

@@ -14,7 +14,7 @@ A static page reaches the pane, legibly, at the pane's size and origin, in
 included. It is a milestone, not a finding: the plan's own tripwire was "if a single
 static page takes seconds to appear, that is a finding", and it does not.
 
-Screenshots are in [Post-Completion](../plans/20260821-windows-port.md#post-completion).
+Screenshots are in [Post-Completion](../plans/completed/20260821-windows-port.md#post-completion).
 
 ## The stages, measured
 

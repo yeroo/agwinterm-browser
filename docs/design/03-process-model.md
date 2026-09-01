@@ -114,7 +114,7 @@ platform still does, so nothing changes off Windows.
   > higher-integrity holder. `releaseProfileLock` (`browser/src/foreground.ts`) now runs
   > before every `app.exit` in `browser/src`, and `alive()` treats `ESRCH` as the only
   > "gone" — `docs/design/UPSTREAM.md` divergence 13. Plan:
-  > [`20260826-deferred-browser-defects.md`](../plans/20260826-deferred-browser-defects.md).
+  > [`20260826-deferred-browser-defects.md`](../plans/completed/20260826-deferred-browser-defects.md).
 - **Nothing else in the tree assumes one process.** The instance registry is already
   per-session, not per-daemon: `Registry` (`browser/src/registry.ts:52-56`) listens on
   a socket named by the session key, and the key is `${process.pid}-${seq}`

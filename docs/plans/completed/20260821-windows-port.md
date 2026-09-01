@@ -11,7 +11,7 @@
 Bring terminal-browser to Windows, hosted by agwinterm: a real Chromium browser rendered inside a
 terminal pane, with working keyboard and mouse, on stock Electron, with no WSL.
 
-The authoritative design is [`docs/design/00-port-brief.md`](../design/00-port-brief.md). Read it
+The authoritative design is [`docs/design/00-port-brief.md`](../../design/00-port-brief.md). Read it
 first — it records what was measured rather than assumed, and it has now been corrected twice by
 evidence. In short:
 
@@ -82,7 +82,7 @@ agwinterm source: `C:\Users\boris\source\agwinterm`.
 - **This plan depends on the agwinterm plan** for three things now, not one: `image.frameshm`
   (Task 12, optional, self-guarding), cell metrics (Task 6, ~~blocking~~ **degrades** — Task 6
   found that a wrong-but-consistent cell size costs sharpness, not click accuracy, and shipped an
-  explicit override; see [`docs/design/04-cell-metrics.md`](../design/04-cell-metrics.md)), and
+  explicit override; see [`docs/design/04-cell-metrics.md`](../../design/04-cell-metrics.md)), and
   `?1016` pixel mouse (Task 11, degrades gracefully). Contract lives in `agwinterm/docs/specs/image-frameshm.md`.
   **Tasks 1–10 have zero dependency on the agwinterm plan** [triage: confirmed against
   `HandleImageFrame` — every capability Task 7 needs is in shipped code].
@@ -381,7 +381,7 @@ keep-unchanged modules. [triage: major]
       through `HOME` (Windows spells it `USERPROFILE`), and unescaped every backslash (turning
       `C:\Users\me\a.png` into `C:Usersmea.png`). Fixed with three `cfg!(windows)` branches, unix
       behaviour byte-for-byte unchanged, recorded as divergence 4 in
-      [`UPSTREAM.md`](../design/UPSTREAM.md) and pinned by three new vendor-check assertions.
+      [`UPSTREAM.md`](../../design/UPSTREAM.md) and pinned by three new vendor-check assertions.
       ⚠️ **"No unix API" is not "portable", and the screen that cleared all 43 cannot see this
       class of problem.** Task 14's unchanged-check should expect that list to grow.
 - [x] write tests for the trait contract against a fake backend: event ordering, size reporting,
@@ -414,7 +414,7 @@ keep-unchanged modules. [triage: major]
       `AttachConsole` (named pid first, `ATTACH_PARENT_PROCESS` as fallback, `ERROR_ACCESS_DENIED`
       read as "already attached"), `CONIN$`/`CONOUT$` opened **by name**, the raw-mode pair, the
       reporting-mode setup and teardown, `read_event`/`poll_event`/`waker`/`watch_resize`/`size`.
-      All four numbered items in [`03-process-model.md`](../design/03-process-model.md)'s Task 5
+      All four numbered items in [`03-process-model.md`](../../design/03-process-model.md)'s Task 5
       brief are implemented; the doc now records what was built and what Task 9 owes it.
       ➕ **The env var that carries point 3's process id is named here:
       `TERMINAL_BROWSER_CONSOLE_PID`**, read through `SessionEnv` rather than `std::env` so it
@@ -545,7 +545,7 @@ keep-unchanged modules. [triage: major]
       it". **Do not let `terminal.rs:840-843`'s hardcoded `(16, 32)` fallback stand as the answer** —
       it is a silent wrong guess and produces wrong click targets. [triage: major]
       — **Decision: a new control verb, `session.metrics`**, recorded in
-      [`docs/design/04-cell-metrics.md`](../design/04-cell-metrics.md) with the wire shape both
+      [`docs/design/04-cell-metrics.md`](../../design/04-cell-metrics.md) with the wire shape both
       sides code against. Chosen over XTWINOPS for three reasons specific to this consumer: the
       pipe client exists for the frame path anyway, so one more verb is a method rather than a
       mechanism; Task 5 established that console input arrives on a reader thread through an inbox,
@@ -889,7 +889,7 @@ capability it uses, and a static page is precisely the workload it is in product
 - [x] measure and record the frame budget in `docs/design/02-frame-budget.md`: PNG encode, file
       write, agwinterm's read, its async PNG decode. **This number is the case for Task 12** — and
       if a single static page takes seconds to appear, that is a finding, not a milestone
-      — [`docs/design/02-frame-budget.md`](../design/02-frame-budget.md), all five stages, nothing
+      — [`docs/design/02-frame-budget.md`](../../design/02-frame-budget.md), all five stages, nothing
       estimated. At the largest pane measured (2096×1184, 9.93 MB PNG): encode **24.7 ms**, write
       **2.9 ms**, `image.frame` round trip **10.4 ms**, agwinterm's read **2.7 ms**, its async decode
       **14.4 ms** — a **26 fps** producer ceiling and 52 ms to pixels. The measurement is
@@ -1132,7 +1132,7 @@ capability it uses, and a static page is precisely the workload it is in product
 Larger than revision 1's "port the CLI": upstream has **two** socket protocols, not one, and their
 endpoint strings are persisted and consumed across four CLI modules. [triage: major]
 
-> The decisions are written up in [`docs/design/05-cli-and-endpoints.md`](../design/05-cli-and-endpoints.md).
+> The decisions are written up in [`docs/design/05-cli-and-endpoints.md`](../../design/05-cli-and-endpoints.md).
 > The short version: Node's `net` speaks named pipes through the same API as unix sockets, so the
 > line protocol needed no porting at all — what differs is the **lifetime of the name**, and that is
 > the whole of the new abstraction.
@@ -1265,7 +1265,7 @@ foreground and set the pane title; with `AGWINTERM_ENABLED` unset it refuses wit
 
 ### Task 14: Verify acceptance criteria
 
-The whole run is written up in [`docs/design/06-acceptance.md`](../design/06-acceptance.md):
+The whole run is written up in [`docs/design/06-acceptance.md`](../../design/06-acceptance.md):
 method, evidence and the two defects it found. Every live check ran against a Debug
 agwinterm on its own pipe (`--app-id agwinterm-dev`), built for this and stopped afterwards.
 
@@ -1325,7 +1325,7 @@ agwinterm on its own pipe (`--app-id agwinterm-dev`), built for this and stopped
 
 ### Task 15: [Final] Update documentation
 
-The three "record" items land together in [`docs/design/07-as-built.md`](../design/07-as-built.md):
+The three "record" items land together in [`docs/design/07-as-built.md`](../../design/07-as-built.md):
 they are one question asked three ways — what does a person running this actually meet — and
 splitting them across three files would have put the transports table a click away from the
 ceiling that makes the frame 2.5× more expensive.
@@ -1356,7 +1356,7 @@ ceiling that makes the frame 2.5× more expensive.
       bullet. agwinterm *parses* kitty keyboard escapes but does not speak the protocol, and the two
       consequences — no key releases, no Super to bind — are what Task 11 spent its two ➕ findings on.
 - [x] document the two frame transports, when each is used, how to force either
-      — [`07-as-built.md § 1`](../design/07-as-built.md#1-the-two-frame-transports): the two verbs
+      — [`07-as-built.md § 1`](../../design/07-as-built.md#1-the-two-frame-transports): the two verbs
       side by side, the five stages of the path that exists, `TERMINAL_BROWSER_FRAME_TRANSPORT`'s
       three values with their aliases, and why `shm` degrades loudly instead of failing. Includes
       the two things that are easy to read as tidiness and are not: **a fresh path per frame**
@@ -1365,7 +1365,7 @@ ceiling that makes the frame 2.5× more expensive.
       host holds, which is Task 14's second defect).
 - [x] record what was dropped (`ghostty.rs`, the Swift helper, apparmor sandboxing, `--split`) and
       why, so absences read as decisions
-      — [`§ 2`](../design/07-as-built.md#2-what-was-dropped-and-why), in three tables: dropped in
+      — [`§ 2`](../../design/07-as-built.md#2-what-was-dropped-and-why), in three tables: dropped in
       the engine, refused in the CLI, not copied at all. Wider than the four the plan named, because
       the four were not the whole set: `herdr.rs`, the patched-Electron fast paths, `probeGraphics`,
       `--ssh`, `upgrade`, `shutdown` and "here"-scoping each get a row, and each names what would
@@ -1373,7 +1373,7 @@ ceiling that makes the frame 2.5× more expensive.
       this port did not drop it (it is `cfg!(target_os = "macos")` upstream), so the 26 fps in
       Task 10's budget is not read as a throttled number.
 - [x] record the accepted ceilings (cell-resolution pointer, cell metrics) and what would lift them
-      — [`§ 3`](../design/07-as-built.md#3-the-accepted-ceilings): for each, what a user sees, where
+      — [`§ 3`](../../design/07-as-built.md#3-the-accepted-ceilings): for each, what a user sees, where
       the information is lost, what the port does about it, and the specific host change that lifts
       it. Both fixes are agwinterm's (`?1016` with a DECRQM answer; the `session.metrics` verb whose
       client is already written and tested here). Two lesser ones are named so they are not
@@ -1416,10 +1416,10 @@ drew.
 
 | | |
 |---|---|
-| ![a page on screen](../design/img/10-milestone-page-on-screen.png) | The page and the whole browser chrome — tab strip, reload, title, `+` — filling the pane at its origin. The pane is 131×37 cells. |
-| ![switched away](../design/img/10-milestone-switched-away.png) | Switched to the neighbouring session: an ordinary shell, with nothing of the image left behind. Switching back restores the frame with no repaint, because agwinterm holds the placement. |
-| ![resize, clipped](../design/img/10-milestone-resize-clipped.png) | ⚠️ The defect this milestone found. The window was made smaller and the browser never learned; agwinterm went on placing the old canvas and clipped it. Note the header running off the right edge and the footer gone off the bottom. |
-| ![resize, reflowed](../design/img/10-milestone-resize-reflowed.png) | The same drag after `WATCH_RESIZE`. The canvas follows the pane and the page re-lays out — the body text rewraps to three lines, the footer is back at the bottom. |
+| ![a page on screen](../../design/img/10-milestone-page-on-screen.png) | The page and the whole browser chrome — tab strip, reload, title, `+` — filling the pane at its origin. The pane is 131×37 cells. |
+| ![switched away](../../design/img/10-milestone-switched-away.png) | Switched to the neighbouring session: an ordinary shell, with nothing of the image left behind. Switching back restores the frame with no repaint, because agwinterm holds the placement. |
+| ![resize, clipped](../../design/img/10-milestone-resize-clipped.png) | ⚠️ The defect this milestone found. The window was made smaller and the browser never learned; agwinterm went on placing the old canvas and clipped it. Note the header running off the right edge and the footer gone off the bottom. |
+| ![resize, reflowed](../../design/img/10-milestone-resize-reflowed.png) | The same drag after `WATCH_RESIZE`. The canvas follows the pane and the page re-lays out — the body text rewraps to three lines, the footer is back at the bottom. |
 
 **Manual verification**: real browsing (heavy page, video, text input, devtools); long-running memory
 and handle counts; hidden-pane behaviour; multiple instances at once. Pay attention to whether

@@ -51,7 +51,7 @@ So a derived scope cannot simply demand a reason for all 48. It has to distingui
 - **incidental divergence** — vendored code edited for a reason that is not the port's
   subject, which is what the numbered list in `UPSTREAM.md` is for
 - **not vendored** — `45b5e43` also carried project files (`.gitignore`, `package.json`,
-  `docs/design/UPSTREAM.md`, `docs/plans/20260821-windows-port.md`). Four of the 48 are
+  `docs/design/UPSTREAM.md`, `docs/plans/completed/20260821-windows-port.md`). Four of the 48 are
   these. They must be excluded by a declared list, never silently
 
 ### A documented divergence that understates itself
@@ -98,7 +98,7 @@ following the checklist restores one line and loses the trait.
       read from git rather than from a checked-in list
 - [x] give it a declared exclusion list for the project files that commit also carried —
       currently `.gitignore`, `package.json`, `docs/design/UPSTREAM.md`,
-      `docs/plans/20260821-windows-port.md` — with a one-line reason each, so an exclusion
+      `docs/plans/completed/20260821-windows-port.md` — with a one-line reason each, so an exclusion
       is a decision on the record rather than an absence
 - [x] make an unknown path fail rather than default into any category
 - [x] have it report deletions as well as edits: a re-vendor that drops a file entirely is

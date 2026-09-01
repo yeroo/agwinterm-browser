@@ -91,7 +91,7 @@ That distinction is the correction this section needed. Until 2026-08-26 the gua
 scoped to a checked-in inventory of `engine/crates/pixel-core/src`, and the sentence
 that stood here — that each divergence "is asserted by a test in
 `tools/vendor-check/`" — was true of divergences 4 and 6 and false of every other
-one. `docs/plans/20260826-vendor-check-gap.md` is the repair.
+one. `docs/plans/completed/20260826-vendor-check-gap.md` is the repair.
 
 Two limits worth naming. Divergences 1-3 were applied by the vendoring commit itself
 — the port needed `pnpm install` to work before it could write a line — so they *are*
