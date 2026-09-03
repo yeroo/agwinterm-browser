@@ -196,27 +196,27 @@ platform and reads like the spec's tables.
 
 The Win32 half: a named mapping the host can open, created and torn down correctly.
 
-- [ ] enable the `Win32_System_Memory` and `Win32_Foundation` `windows-sys` features in the
+- [x] enable the `Win32_System_Memory` and `Win32_Foundation` `windows-sys` features in the
       workspace `Cargo.toml` if not already present
-- [ ] `Mapping::create(layout: &Layout, name: &str) -> io::Result<Mapping>` under
+- [x] `Mapping::create(layout: &Layout, name: &str) -> io::Result<Mapping>` under
       `cfg(windows)`: `CreateFileMappingW(INVALID_HANDLE_VALUE, null, PAGE_READWRITE, size, name)`,
       `MapViewOfFile(FILE_MAP_ALL_ACCESS)`, then `layout.write_header` into the view; refuse a
       name `is_valid_name` rejects before touching Win32; `ERROR_ALREADY_EXISTS` from
       `CreateFileMappingW` is an error here, not a reuse — a producer that finds its own name
       taken has a stale incarnation and must pick a fresh suffix
-- [ ] `Mapping::view(&mut self) -> &mut [u8]` over exactly `mapping_len` bytes, and
+- [x] `Mapping::view(&mut self) -> &mut [u8]` over exactly `mapping_len` bytes, and
       `Mapping::name(&self)`; `Drop` calls `UnmapViewOfFile` then `CloseHandle`
-- [ ] document every `unsafe` block: the view is `mapping_len` bytes because that is the size
+- [x] document every `unsafe` block: the view is `mapping_len` bytes because that is the size
       passed to `CreateFileMappingW` and the length is never read from the header; the handle
       and view are owned by the struct and freed once
-- [ ] write the in-process round-trip test: create a mapping, open it by name with
+- [x] write the in-process round-trip test: create a mapping, open it by name with
       `OpenFileMappingW` + `MapViewOfFile` from the same test, assert the header bytes match
       what Task 1's test expects and that a byte written through the producer's view is read
       through the second view
-- [ ] write tests for the error paths: an invalid name is refused without a Win32 call (assert
+- [x] write tests for the error paths: an invalid name is refused without a Win32 call (assert
       by name pattern, no mapping exists afterwards); creating the same name twice in one process
       fails with a message naming the name; after `Drop`, `OpenFileMappingW` by that name fails
-- [ ] run tests — must pass before Task 3
+- [x] run tests — must pass before Task 3
 
 ### Task 3: Publishing a frame into a slot — `Mapping::publish`
 

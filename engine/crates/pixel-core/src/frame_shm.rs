@@ -535,6 +535,427 @@ pub(crate) mod layout {
     }
 }
 
+/// The named shared-memory mapping a [`layout::Layout`] lives in, Windows only.
+///
+/// This is the Win32 half of the fast path and nothing else: create the section
+/// under the contract's name, map one view of exactly the layout's length, write the
+/// header, and tear both down once. What goes *into* a slot, and when, is the
+/// producer's business (Task 3 and Task 4); this module never reads the header it
+/// wrote and never learns a length from the mapping — the length it maps is the one
+/// it asked for.
+///
+/// Reachable only from its tests until the producer lands; the `dead_code` allowance
+/// goes with the one on [`layout`].
+#[cfg(windows)]
+#[allow(
+    dead_code,
+    reason = "the producer that owns a mapping lands in a later task"
+)]
+pub(crate) mod mapping {
+    use std::io;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+        PAGE_READWRITE, UnmapViewOfFile,
+    };
+
+    use super::layout::{Layout, MAX_NAME_SUFFIX, NAME_PREFIX, is_valid_name};
+
+    /// A page-file-backed section named `name`, with one read-write view over it.
+    ///
+    /// The view is exactly [`Layout::mapping_len`] bytes long: that is the size the
+    /// section was created with and the length the view was mapped with, and it is
+    /// held here rather than re-read from the header, so a reader that scribbles on
+    /// the header cannot change how far this side believes it may write. The handle
+    /// and the view are owned by this struct alone and released once, in [`Drop`],
+    /// view first.
+    pub(crate) struct Mapping {
+        layout: Layout,
+        name: String,
+        handle: HANDLE,
+        view: MEMORY_MAPPED_VIEW_ADDRESS,
+    }
+
+    impl Mapping {
+        /// Creates the section and maps it, then writes the layout's header into it.
+        ///
+        /// A name [`is_valid_name`] rejects is refused before any Win32 call, so a
+        /// bad name never becomes a kernel object. `ERROR_ALREADY_EXISTS` is an error
+        /// too, not a reuse: `CreateFileMappingW` hands back the *existing* section
+        /// in that case, and a producer that finds its own name taken has a stale
+        /// incarnation still alive somewhere and must pick a fresh suffix rather than
+        /// publish into whatever is there.
+        #[allow(unsafe_code)]
+        pub(crate) fn create(layout: &Layout, name: &str) -> io::Result<Self> {
+            if !is_valid_name(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm mapping name `{name}` is not `{NAME_PREFIX}` followed by \
+                         1..={MAX_NAME_SUFFIX} characters of [A-Za-z0-9._-]"
+                    ),
+                ));
+            }
+            let len = layout.mapping_len();
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            // `INVALID_HANDLE_VALUE` for the file means "backed by the page file";
+            // the size is split into the two halves the call takes.
+            let (size_high, size_low) = ((len as u64 >> 32) as u32, len as u32);
+            // SAFETY: `wide` is a NUL-terminated wide string that outlives the call,
+            // the attributes pointer is the documented "default security" null, and
+            // the file handle is the documented page-file sentinel rather than a
+            // handle we would have to own.
+            let handle = unsafe {
+                CreateFileMappingW(
+                    windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                    std::ptr::null(),
+                    PAGE_READWRITE,
+                    size_high,
+                    size_low,
+                    wide.as_ptr(),
+                )
+            };
+            // `CreateFileMappingW` fails with a null handle, not `INVALID_HANDLE_VALUE`;
+            // and `last_os_error` is read before anything else can overwrite it.
+            let last = io::Error::last_os_error();
+            if handle.is_null() {
+                return Err(io::Error::new(
+                    last.kind(),
+                    format!("CreateFileMappingW({name}): {last}"),
+                ));
+            }
+            if last.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+                // The handle is real and refers to someone else's section; close it
+                // without touching the section's contents.
+                // SAFETY: `handle` was just returned by `CreateFileMappingW` and is
+                // closed exactly once, here, before it can be stored anywhere.
+                unsafe { CloseHandle(handle) };
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "image.frameshm mapping {name} already exists: a stale incarnation \
+                         is still alive, so this one needs a fresh suffix"
+                    ),
+                ));
+            }
+            // SAFETY: `handle` is a live section handle we own, and `len` is the size
+            // it was created with, so a view of `len` bytes lies inside the section.
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, len) };
+            if view.Value.is_null() {
+                let err = io::Error::last_os_error();
+                // SAFETY: as above — a handle we own, closed once on this path.
+                unsafe { CloseHandle(handle) };
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("MapViewOfFile({name}, {len} bytes): {err}"),
+                ));
+            }
+            let mut mapping = Self {
+                layout: *layout,
+                name: name.to_owned(),
+                handle,
+                view,
+            };
+            layout.write_header(mapping.view());
+            Ok(mapping)
+        }
+
+        /// The whole mapping, [`Layout::mapping_len`] bytes, header first.
+        #[allow(unsafe_code)]
+        pub(crate) fn view(&mut self) -> &mut [u8] {
+            // SAFETY: `view` is the base of a live view mapped with exactly
+            // `mapping_len` bytes from a section created with that size; the length
+            // comes from `self.layout`, never from the header, so no reader can
+            // lengthen it. The view stays mapped until `Drop`, which needs `&mut
+            // self` too, so the slice cannot outlive it; and `&mut self` is the only
+            // way in, so no two slices alias.
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.view.Value.cast::<u8>(),
+                    self.layout.mapping_len(),
+                )
+            }
+        }
+
+        /// The name the section was created under: what the request carries.
+        pub(crate) fn name(&self) -> &str {
+            &self.name
+        }
+
+        /// The layout this mapping was sized for.
+        pub(crate) fn layout(&self) -> &Layout {
+            &self.layout
+        }
+    }
+
+    impl std::fmt::Debug for Mapping {
+        /// The name and the layout; the handle and the view address are not
+        /// interesting and would only differ between runs.
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Mapping")
+                .field("name", &self.name)
+                .field("layout", &self.layout)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Drop for Mapping {
+        /// Unmaps the view, then closes the handle. Once both are gone and no reader
+        /// holds the section, the name is free and the host's next open of it fails
+        /// with an ordinary error — the contract's expected end of a producer.
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: `view` is the base address `MapViewOfFile` returned and it is
+            // unmapped exactly once, here; no slice from `view()` can be alive,
+            // because `drop` holds the `&mut self` such a slice would borrow from.
+            unsafe { UnmapViewOfFile(self.view) };
+            // SAFETY: `handle` is the section handle `CreateFileMappingW` returned
+            // and is closed exactly once, here, after the view that depended on it.
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        //! The reader is not here, so these tests *are* the reader: they open the
+        //! section by name with `OpenFileMappingW`, the call `ShmFrameLayout.cs`
+        //! makes, and look at the bytes through that second view.
+
+        use std::io;
+
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, HANDLE,
+        };
+        use windows_sys::Win32::System::Memory::{
+            FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW,
+            UnmapViewOfFile,
+        };
+
+        use super::super::layout::{HEADER_LEN, NAME_PREFIX, PAGE};
+        use super::*;
+
+        /// A name no other test, and no other test process, will create: the test's
+        /// own tag plus this process's id.
+        fn test_name(tag: &str) -> String {
+            format!("{NAME_PREFIX}test-{}-{tag}", std::process::id())
+        }
+
+        fn hd() -> Layout {
+            Layout::for_frame(1920, 1080).unwrap()
+        }
+
+        /// The reader's side: a read-only view opened by name.
+        struct Reader {
+            handle: HANDLE,
+            view: MEMORY_MAPPED_VIEW_ADDRESS,
+            len: usize,
+        }
+
+        impl Reader {
+            #[allow(unsafe_code)]
+            fn open(name: &str, len: usize) -> io::Result<Self> {
+                let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                // SAFETY: `wide` is NUL-terminated and outlives the call.
+                let handle = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
+                if handle.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: a handle we own; `len` is what the producer created it with.
+                let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, len) };
+                if view.Value.is_null() {
+                    let err = io::Error::last_os_error();
+                    // SAFETY: closed once, on the failure path only.
+                    unsafe { CloseHandle(handle) };
+                    return Err(err);
+                }
+                Ok(Self { handle, view, len })
+            }
+
+            #[allow(unsafe_code)]
+            fn bytes(&self) -> &[u8] {
+                // SAFETY: a live read-only view of `len` bytes, unmapped only in
+                // `Drop`, which cannot run while this borrow is alive.
+                unsafe { std::slice::from_raw_parts(self.view.Value.cast::<u8>(), self.len) }
+            }
+        }
+
+        impl std::fmt::Debug for Reader {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Reader({} bytes)", self.len)
+            }
+        }
+
+        impl Drop for Reader {
+            #[allow(unsafe_code)]
+            fn drop(&mut self) {
+                // SAFETY: each released once, view before handle, as the producer does.
+                unsafe {
+                    UnmapViewOfFile(self.view);
+                    CloseHandle(self.handle);
+                }
+            }
+        }
+
+        fn u32_at(view: &[u8], offset: usize) -> u32 {
+            u32::from_le_bytes(view[offset..offset + 4].try_into().unwrap())
+        }
+
+        fn u64_at(view: &[u8], offset: usize) -> u64 {
+            u64::from_le_bytes(view[offset..offset + 8].try_into().unwrap())
+        }
+
+        // -- the round trip ----------------------------------------------------
+
+        #[test]
+        fn a_reader_opening_the_name_sees_the_header_and_the_producers_writes() {
+            let layout = hd();
+            let name = test_name("roundtrip");
+            let mut mapping = Mapping::create(&layout, &name).expect("create");
+            assert_eq!(mapping.name(), name);
+            assert_eq!(mapping.layout(), &layout);
+            assert_eq!(mapping.view().len(), layout.mapping_len());
+
+            let reader = Reader::open(&name, layout.mapping_len()).expect("open by name");
+            let seen = reader.bytes();
+
+            // The header, at the spec's offsets — the same assertions Task 1 makes
+            // against a Vec, now against the bytes another handle to the section sees.
+            assert_eq!(u32_at(seen, 0), 0x46534741, "magic");
+            assert_eq!(u32_at(seen, 4), 1, "version");
+            assert_eq!(u32_at(seen, 8), 2, "slotCount");
+            assert_eq!(u32_at(seen, 12), 0, "flags");
+            assert_eq!(u64_at(seen, 16), layout.slot_stride() as u64, "slotStride");
+            assert_eq!(u64_at(seen, 24), 256, "pixelOffset");
+            assert_eq!(u64_at(seen, 32), 0, "ready");
+            assert!(
+                seen[40..HEADER_LEN].iter().all(|&b| b == 0),
+                "reserved and descriptors"
+            );
+            let mut expected = vec![0; HEADER_LEN];
+            layout.write_header(&mut expected);
+            assert_eq!(
+                &seen[..HEADER_LEN],
+                &expected[..],
+                "byte for byte, Task 1's header"
+            );
+            assert!(
+                seen[HEADER_LEN..].iter().all(|&b| b == 0),
+                "a fresh section is zero-filled past the header",
+            );
+
+            // A byte written through the producer's view is the reader's byte.
+            let probe = layout.pixels(1).start + 7;
+            mapping.view()[probe] = 0xC3;
+            assert_eq!(reader.bytes()[probe], 0xC3, "same pages, seen at once");
+            let last = layout.mapping_len() - 1;
+            mapping.view()[last] = 0x5A;
+            assert_eq!(reader.bytes()[last], 0x5A, "the view reaches its last byte");
+        }
+
+        #[test]
+        fn the_view_is_the_layouts_length_not_the_sections_page_rounding() {
+            // 1x1 needs 256 + 2 * 4096 bytes; the section is 3 pages, and so is the
+            // view — the length is the layout's, whatever the kernel rounds to.
+            let layout = Layout::for_frame(1, 1).unwrap();
+            let mut mapping = Mapping::create(&layout, &test_name("len")).unwrap();
+            assert_eq!(mapping.view().len(), 256 + 2 * PAGE);
+            assert_eq!(mapping.view().len(), layout.mapping_len());
+        }
+
+        // -- error paths ---------------------------------------------------------
+
+        #[test]
+        fn an_invalid_name_is_refused_before_it_can_become_an_object() {
+            let layout = hd();
+            for bad in [
+                NAME_PREFIX.to_owned(),                  // empty suffix
+                r"Local\winterm-browser-1-0".to_owned(), // the pre-contract spelling
+                format!("{NAME_PREFIX}with space"),
+                format!("{NAME_PREFIX}a\\b"),
+                format!("{NAME_PREFIX}{}", "x".repeat(129)),
+            ] {
+                let err = Mapping::create(&layout, &bad).expect_err(&bad);
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+                assert!(err.to_string().contains(&bad), "{err}");
+                assert!(err.to_string().contains(NAME_PREFIX), "{err}");
+                // Nothing was created: the name does not open. (The names with a
+                // space or a second backslash are legal kernel names, so this is a
+                // real check that no call was made, not a check that it would fail.)
+                let open = Reader::open(&bad, layout.mapping_len()).expect_err("no object");
+                // A second backslash makes the object manager look for a directory
+                // that is not there, which reports as "path" rather than "file".
+                assert!(
+                    matches!(
+                        open.raw_os_error(),
+                        Some(code) if code == ERROR_FILE_NOT_FOUND as i32 || code == ERROR_PATH_NOT_FOUND as i32
+                    ),
+                    "{bad:?}: {open}"
+                );
+            }
+        }
+
+        #[test]
+        fn creating_the_same_name_twice_is_a_stale_incarnation_not_a_reuse() {
+            let layout = hd();
+            let name = test_name("twice");
+            let mut first = Mapping::create(&layout, &name).expect("first");
+            first.view()[HEADER_LEN] = 0x77;
+
+            let err = Mapping::create(&layout, &name).expect_err("the name is taken");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert!(err.to_string().contains(&name), "{err}");
+            assert!(err.to_string().contains("fresh suffix"), "{err}");
+
+            // The refusal touched nothing: the first mapping is intact and still open.
+            let reader = Reader::open(&name, layout.mapping_len()).expect("still there");
+            assert_eq!(u32_at(reader.bytes(), 0), 0x46534741);
+            assert_eq!(
+                reader.bytes()[HEADER_LEN],
+                0x77,
+                "the header was not rewritten"
+            );
+        }
+
+        #[test]
+        fn after_drop_the_name_no_longer_opens() {
+            let layout = hd();
+            let name = test_name("drop");
+            let mapping = Mapping::create(&layout, &name).expect("create");
+            // Prove it was there, then let go of *both* handles: a section lives as
+            // long as any handle to it, so the reader's has to go too.
+            drop(Reader::open(&name, layout.mapping_len()).expect("open while alive"));
+            drop(mapping);
+
+            let err = Reader::open(&name, layout.mapping_len()).expect_err("gone");
+            assert_eq!(
+                err.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{err}"
+            );
+        }
+
+        #[test]
+        fn a_reader_keeps_the_section_alive_but_the_producer_does_not_care() {
+            // The contract: a vanished mapping between calls reports as an ordinary
+            // failure. A reader that is mid-copy keeps the pages alive on its own
+            // handle, so the producer dropping is safe for it too.
+            let layout = Layout::for_frame(4, 4).unwrap();
+            let name = test_name("outlive");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let probe = layout.pixels(0).start;
+            mapping.view()[probe] = 0x11;
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            drop(mapping);
+            assert_eq!(
+                reader.bytes()[probe],
+                0x11,
+                "the reader's view survives the producer"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The refusal strings here are not invented: they are what `Reply::parse`
