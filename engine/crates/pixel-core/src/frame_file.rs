@@ -8,17 +8,25 @@
 //! pane's origin and spanning the whole pane.
 //!
 //! It is deliberately the plain path: PNG on disk, one round trip, no shared
-//! memory. Task 12 was to add `image.frameshm` on top, and **this path stays** — as
-//! the fallback for a host that lacks the verb, and as the baseline the fast path is
-//! diffed against. So the two must produce the same picture from the same canvas;
-//! everything picture-shaped lives in [`cell_span`] and [`encode_png`], which the
-//! shm path reuses rather than reimplements.
+//! memory. The fast path, `image.frameshm`, is layered over it in
+//! [`crate::frame_shm`], and **this path stays** — as the fallback, and as the
+//! baseline the fast path is diffed against. So the two must produce the same
+//! picture from the same canvas; everything picture-shaped lives in [`cell_span`],
+//! which both routes use, and [`encode_png`], which only this one pays for.
 //!
-//! ⚠️ As of Task 12 that fast path does not exist: its mapping layout is still
-//! unpublished, so there is nothing to write BGRA into. See [`crate::frame_shm`],
-//! which holds the transport selection and the capability probe that survive the
-//! blocker. This module is therefore not the fallback but the only path, and
-//! [`FramePublisher::explain_transport`] is what stops that being a silent fact.
+//! A frame comes down this path in three cases, all decided in
+//! [`FramePublisher::publish`]:
+//!
+//! - the host lacks the verb: it answered `unknown command 'image.frameshm'` —
+//!   which every agwinterm release as of 2026-09 does, and agliteterm always will
+//!   — and the file path is latched for the session on that first frame;
+//! - `TERMINAL_BROWSER_FRAME_TRANSPORT=file`, which never tries the verb and is
+//!   what makes `docs/design/02-frame-budget.md`'s baseline re-measurable on a
+//!   host that has it;
+//! - the fast path did not carry *this* frame — the host refused it, placed none
+//!   of it, or the mapping could not be made — so the same frame is re-sent as an
+//!   `image.frame` rather than dropped, and [`MAX_REFUSALS`] such frames in a row
+//!   latch the file path for the session too.
 //!
 //! ## Why every frame gets its own path
 //!
@@ -182,9 +190,8 @@ const PANE_FILE: &str = "pane";
 ///
 /// Off unless set, and it names a path rather than being a boolean because the
 /// consumer is a person reading a file afterwards, not the running browser. This
-/// is what [`docs/design/02-frame-budget.md`] was measured with, and what Task 12
-/// diffs `image.frameshm` against — a fast path with no baseline to beat is a
-/// claim, not a measurement.
+/// is what `docs/design/02-frame-budget.md` was measured with, on both transports —
+/// a fast path with no baseline to beat is a claim, not a measurement.
 pub(crate) const BUDGET_ENV: &str = "TERMINAL_BROWSER_FRAME_BUDGET";
 
 // ---------------------------------------------------------------------------

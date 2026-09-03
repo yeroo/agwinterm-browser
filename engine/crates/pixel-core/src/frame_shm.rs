@@ -1,40 +1,66 @@
-//! Which frame transport carries a frame, and the shape of a host that lacks one.
+//! The fast frame path: a canvas into a shared-memory slot, and the host told which.
 //!
-//! ## Status: the fast path is blocked, and this module says so in code
+//! On a host that implements `image.frameshm` — agwinterm `main` from `8230d0e`,
+//! contract `docs/specs/image-frameshm.md` layout version 1 — a frame is not
+//! encoded, not written and not decoded. The composed canvas is copied, row by row,
+//! into the inactive slot of a named file mapping, the mapping's `ready` field is
+//! release-stored with the frame's sequence, and one small JSON request names the
+//! mapping, the slot, the sequence and the same placement `image.frame` would carry
+//! (`frameshm_args` in [`crate::frame_file`]). The host copies the pixels out of the
+//! slot before it replies. `docs/design/02-frame-budget.md` has what that deleted:
+//! at the largest pane measured, 40.4 ms of producer time per frame became 8.7 ms.
 //!
-//! Task 12 opens with a precondition — `agwinterm/docs/specs/image-frameshm.md`
-//! must exist *and* state the literal `Local\` mapping-name prefix and the producer
-//! slot-reuse invariant. At the time of writing it does not exist at all. agwinterm
-//! has a plan for the verb (`docs/plans/20260821-image-frameshm-command.md`) with
-//! its Task 1 — the one that defines the header layout and publishes the spec —
-//! still entirely unchecked, and `ControlServer.cs:249` still dispatches
-//! `image.frame` and nothing else.
+//! Three pieces, from the bottom:
 //!
-//! So there is no mapping layout to write into. A producer built now would be
-//! inventing a wire format and calling it a contract, and the first real consumer
-//! would disagree with it in a way that shows up as a torn or rejected frame rather
-//! than as a compile error. The producer is therefore **not** in this module, and
-//! its absence is a recorded decision rather than an oversight.
+//! - [`layout`] — the contract's numbers as arithmetic, on every platform: the
+//!   magic, the version, the 256-byte header, `ready` at 32, descriptors at
+//!   `64 + 16*slot`, two slots, the `Local\agwinterm-frame-` name prefix. Copied
+//!   from the spec's tables, not designed; where the two disagree the spec wins.
+//! - `mapping` (Windows) — one `CreateFileMappingW` section under a name the layout
+//!   validates, one read-write view sized once, the header written on creation, and
+//!   `publish` for a frame into the slot its sequence selects.
+//! - `producer` (Windows) — the lifetime: a sequence that never restarts while the
+//!   process lives, a fresh mapping-name suffix for every mapping created (a resize
+//!   creates one; so does a name found taken), and `close` for the end.
 //!
-//! What *is* here is the half that does not depend on the layout, and is true
-//! whatever the layout turns out to be:
+//! ## What selects it, and what latches it off
 //!
-//! - [`Transport`] — the file path stays explicitly selectable, by
-//!   [`TRANSPORT_VAR`], rather than becoming whatever the newest code prefers.
-//! - [`is_unknown_command`] — the literal refusal a host gives for a verb it does
-//!   not have (`{"ok":false,"error":"unknown command '…'"}`, `ControlServer.cs:250`).
-//!   This is the fallback trigger, and it is shared with `pane_metrics`, which had
-//!   the same test open-coded. One reading of that reply, used by every capability
-//!   probe.
+//! [`Transport`] is what was asked for, read from [`TRANSPORT_VAR`]; `FramePublisher`
+//! in [`crate::frame_file`] is what does the asking. `Auto` and `Shm` try the verb on
+//! the first frame. `unknown command` — the answer of every agwinterm release as of
+//! 2026-09, and of agliteterm always — latches the file path for the session on the
+//! spot, closes the mapping, and re-sends that same frame as an `image.frame`, so
+//! the probe costs no frame; under `Shm` the latch is explained once
+//! ([`Transport::unavailable_reason`]), under `Auto` it is information. Any other
+//! refusal, an `ok` that placed nothing, or a mapping this side could not make also
+//! costs no frame — it goes over the file path, and its reason is logged — and three
+//! in a row latch the fast path off naming all three; an accepted frame resets the
+//! count. `File` never tries the verb and never builds a mapping, which is what
+//! keeps the baseline in `02-frame-budget.md` re-measurable on a host that has it.
 //!
-//! When the spec lands, what this module gains is the producer and a support latch
-//! on top of [`is_unknown_command`]; nothing here changes shape.
+//! ## The one producer rule, and how the code keeps it
+//!
+//! The contract has one normative rule for a producer: a slot is not refilled until
+//! the reply for the frame that last used it has returned. Nothing here enforces it
+//! with a lock; the construction does. The pipe is one request per connection and
+//! `FramePublisher::publish` returns only after the host has answered, so there is
+//! never more than one frame in flight, and with two slots frame N+2 — the next
+//! user of frame N's slot — cannot begin before N+1 was published, which cannot
+//! begin before N's reply came back. The same fact is what lets a resize drop the
+//! old mapping at once, and `close` unmap on `image.clear`'s reply: no request is
+//! outstanding by the time either runs. `each_publish_returns_only_after_its_own_reply`
+//! in `frame_file.rs` pins the construction. Pipelining across the slots would need
+//! per-slot reply tracking and is deliberately not here.
+//!
+//! [`is_unknown_command`] is the one reading of a host's refusal for a verb it lacks,
+//! shared with every capability probe in the crate: this latch, and `pane_metrics`'s
+//! `session.metrics`.
 
 use crate::terminal::SessionEnv;
 
-/// The verb the fast path will send. Named here — rather than only in the spec that
-/// does not exist yet — because [`is_unknown_command`]'s whole job is recognising a
-/// host that has never heard of it.
+/// The verb the fast path sends. Named here, beside the layout it carries, because
+/// [`is_unknown_command`]'s whole job is recognising a host that has never heard of
+/// it.
 pub(crate) const FRAMESHM_CMD: &str = "image.frameshm";
 
 /// Forces a transport, overriding what the host supports.
@@ -48,8 +74,9 @@ pub(crate) const TRANSPORT_VAR: &str = "TERMINAL_BROWSER_FRAME_TRANSPORT";
 /// Which way a frame reaches the pane.
 ///
 /// `Auto` is not a third transport: it is "whichever works", and it exists so that
-/// the default is not spelled as a preference. `File` is the one that ships today
-/// ([`crate::frame_file`]); `Shm` is the one whose contract is still unpublished.
+/// the default is not spelled as a preference. `File` is the one every host has
+/// ([`crate::frame_file`]); `Shm` is the one in this module, which a host has to
+/// implement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Transport {
     /// The fast path when the host has it, the file path otherwise.
@@ -638,7 +665,7 @@ pub(crate) mod layout {
 ///
 /// This is the Win32 half of the fast path: create the section under the
 /// contract's name, map one view of exactly the layout's length, write the header,
-/// publish frames into its slots ([`Mapping::publish`]), and tear both down once.
+/// publish frames into its slots ([`mapping::Mapping::publish`]), and tear both down once.
 /// It never learns a length from the mapping — the length it maps is the one it
 /// asked for — and the only header field it reads back is `ready`, its own atomic.
 /// *When* a slot may be refilled, and which sequence a frame gets, is the
@@ -1454,13 +1481,13 @@ pub(crate) mod mapping {
 ///   when `(id, name, seq)` repeats, so a restarted counter would be a dropped or
 ///   refused frame.
 /// - **A resize is a fresh mapping under a fresh name.** A mapping is sized for one
-///   frame size ([`Mapping::publish`] refuses any other), and the contract only
+///   frame size ([`mapping::Mapping::publish`] refuses any other), and the contract only
 ///   admits a recreated mapping under an old name if its sequence continues, so
 ///   the safe answer is never to reuse a name: every mapping this producer
 ///   creates takes the next `incarnation`. A name found already taken is a stale
 ///   incarnation still alive somewhere and gets the next suffix too.
 /// - **The old mapping is dropped only after the new one exists and only while no
-///   request is outstanding.** The drop happens inside [`Producer::publish`], and
+///   request is outstanding.** The drop happens inside [`producer::Producer::publish`], and
 ///   `publish` is only called after the reply for the previous frame has returned
 ///   (one frame in flight; `frame_file.rs` awaits every reply and pins that), so
 ///   the host is never mid-copy from a mapping this side unmaps.

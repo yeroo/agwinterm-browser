@@ -19,15 +19,15 @@ find one has to re-derive whether it was.
 
 The seam is `Surface.present({ bgra, width, height, damage })` — upstream's, unchanged.
 Below it, on Windows, a transport carries the composited canvas to agwinterm. There are
-two, and **only one of them exists today**.
+two, both in this build, and **the host decides which one carries a frame**.
 
 | | file path | shared-memory path |
 |---|---|---|
 | verb | `image.frame` | `image.frameshm` |
-| carries | a PNG on disk, named per frame | BGRA in a named file mapping |
-| host requirement | none — shipped agwinterm (`ControlServer.cs:426`) | a verb agwinterm has not implemented |
-| in this build | **yes**, `pixel-core/src/frame_file.rs` | **no** — see below |
-| cost | 38 ms/frame at 131×37 cells, 26 fps ([02](02-frame-budget.md)) | projected under 10 ms, floor ~150 fps |
+| carries | a PNG on disk, named per frame | raw RGBA in a named file mapping, two slots |
+| host requirement | none — shipped agwinterm (`ControlServer.cs:426`) | agwinterm built from `main` at `8230d0e` (2026-09-03) or later; in no release as of 2026-09-04, and never agliteterm |
+| in this build | **yes**, `pixel-core/src/frame_file.rs` — the fallback, and the baseline | **yes**, `pixel-core/src/frame_shm.rs` — the default wherever the host has it |
+| cost | 40 ms/frame at 131×37 cells, 25 fps ([02](02-frame-budget.md)) | 8.7 ms/frame at the same pane, 114 fps ([02](02-frame-budget.md)) |
 
 ### What happens on the file path, per frame
 
@@ -62,20 +62,43 @@ picture back* gives. The `pane` marker (see there) is written beside the first f
 host *does* place, is exempt from that reaping, and is rewritten if something removes the
 directory out from under a live publisher.
 
-### Why the fast path is not here
+### How the fast path is selected
 
-`image.frameshm`'s precondition is a published contract: `agwinterm/docs/specs/image-frameshm.md`
-must exist and state the literal `Local\` mapping-name prefix and the producer slot-reuse
-invariant. **It does not exist.** agwinterm has a plan for the verb whose spec task is
-unchecked, and `ControlServer.cs:249` still dispatches `image.frame` and nothing else.
+By asking. On the first frame under `auto` or `shm` the publisher copies the composed
+canvas into a slot of a mapping it has just created — `Local\agwinterm-frame-browser-<pid>-<n>`,
+the contract's prefix, a fresh `<n>` for every mapping — release-stores the frame's
+sequence into the mapping's `ready` field, and sends `image.frameshm` naming the mapping,
+the slot, the sequence, the pixel format (`32`, RGBA, which is what the tiny-skia canvas
+holds) and the same placement `image.frame` would carry. What the host answers settles
+the session:
 
-A producer written against that gap would be inventing a header layout and calling it a
-contract, and the first real consumer would disagree in the shape of a torn or silently
-rejected frame. So the producer is absent and its absence is recorded — in
-[`02-frame-budget.md`](02-frame-budget.md), in this file, and in `frame_shm.rs`'s own
-module docs. What *did* ship is the half that does not depend on the layout: the
-transport selection below, and `is_unknown_command` — the literal refusal a host gives
-for a verb it lacks, read the same way by every capability probe in the crate.
+- **`ok` with a placement**: the fast path is the path. Every later frame goes the same
+  way, alternating slots; a resize gets a new mapping under the next `<n>` with the
+  sequence carrying on, because the host rejects a `seq` that goes backwards.
+- **`unknown command 'image.frameshm'`**: the host has never heard of the verb. The file
+  path is latched for the rest of the session, the mapping is closed, and *this* frame is
+  re-sent as an `image.frame`, so the probe costs no frame. Under `auto` that is logged as
+  information — it is the answer of every agwinterm release as of 2026-09, and of
+  agliteterm always — and under `shm` as a warning that names the verb, where it is, and
+  what the frames are doing instead.
+- **any other refusal**, an `ok` that placed nothing (`frame:0/0`), or a mapping this side
+  could not make: this frame goes over the file path and the reason is logged. Three in a
+  row latch the file path for the session and name all three; an accepted frame resets
+  the count.
+
+The contract's one rule for a producer — a slot is not refilled until the reply for the
+frame that last used it has returned — is kept by construction rather than by a lock:
+the pipe is one request per connection and `publish` waits for the reply, so there is one
+frame in flight and two slots is one more than that needs. The test
+`each_publish_returns_only_after_its_own_reply` pins it. Pipelining across the slots is
+deliberately not here: what is left of the round trip is the host's copy out of the slot,
+not a fixed cost ([02](02-frame-budget.md)).
+
+The gate that kept this path out of the port — a published contract stating the literal
+`Local\` prefix and the slot-reuse rule — was met by agwinterm's
+[`docs/specs/image-frameshm.md`](https://github.com/yeroo/agwinterm/blob/main/docs/specs/image-frameshm.md),
+layout version 1, on 2026-09-03. Every number in `frame_shm::layout` is copied from its
+tables and its tests quote the offsets back; where the two disagree the spec wins.
 
 ### How to force either
 
@@ -85,9 +108,9 @@ process that happened to start.
 
 | value | aliases | what it does |
 |---|---|---|
-| unset / `auto` | `default` | the fast path where the host has it, the file path otherwise. Today: always the file path. |
+| unset / `auto` | `default` | the fast path where the host has it, the file path otherwise. On every agwinterm release as of 2026-09 that is the file path; on a host built from `main ≥ 8230d0e` it is the fast one. |
 | `file` | `png`, `image.frame` | the file path **even on a host that offers the fast one**. This is what makes the [02](02-frame-budget.md) baseline re-measurable after the fast path lands. |
-| `shm` | `frameshm`, `image.frameshm` | ask for the fast path, and **say once** why it is not carrying the frame. Publishes over `image.frame` regardless — the picture is the same, the cost is the file path's. |
+| `shm` | `frameshm`, `image.frameshm` | ask for the fast path, and — on a host without it — **say once** why it is not carrying the frame. Publishes over `image.frame` in that case regardless: the picture is the same, the cost is the file path's. |
 
 Matching is case- and whitespace-insensitive because a person types it into a shell. A
 value that parses as nothing is a typo rather than a request: it warns, names the three
@@ -96,7 +119,8 @@ it accepts, and uses `auto`.
 `shm` deliberately does not fail. A frame refused for a debug knob would be a worse
 answer than a slower frame — but silence would be worse still, because a working browser
 under `=shm` reads as "the fast path is on" and would make every number measured
-afterwards wrong. So it explains itself once per run and names the missing spec.
+afterwards wrong. So it explains itself once per run, and names the verb and the agwinterm
+commit that carries it.
 
 ### Taking the picture back
 

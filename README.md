@@ -46,9 +46,12 @@ pass on Windows, including the 203 inherited tests in the files this port did no
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
 the pointer resolves to one character cell, and cell pixel metrics have to be set by hand for a
 sharp picture. Both are [documented ceilings](docs/design/07-as-built.md#3-the-accepted-ceilings)
-with a named fix on the agwinterm side. One planned feature did not ship — the `image.frameshm`
-fast path, blocked on an unpublished contract — so frames go out as PNG at about **26 fps** at a
-131×37 pane. Enough for a page; not enough for smooth scrolling.
+with a named fix on the agwinterm side. One planned feature shipped later than the port: the
+`image.frameshm` fast path, adopted in 2026-09 once agwinterm published its contract. On a host
+that has the verb — agwinterm built from `main` at `8230d0e` or later; no release as of
+2026-09-04 — frames go over shared memory at about **114 fps** at a 131×37 pane. On any other
+host, and on agliteterm always, they go out as PNG at about **25 fps**: enough for a page, not
+enough for smooth scrolling.
 
 ## Requirements
 
@@ -159,7 +162,7 @@ $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
 | variable | what it does |
 |---|---|
 | `TERMINAL_BROWSER_CELL_PX` | `<width>x<height>` in device pixels. Consulted before the host, so it also corrects a host that answers wrongly. |
-| `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
+| `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. `auto` takes the shared-memory path on a host that answers `image.frameshm` and the file path otherwise; `file` forces the file path, which is what keeps the baseline measurable; `shm` asks for the fast path and says once, as a warning, if the host cannot carry it. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
 | `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms, transport, copy_ms`, where `transport` is `file` or `shm` and the stages a transport does not pay are `0.00`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
 | `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances this build may address: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard — and unset is what you want unless you are developing the browser. Set, it stops the **CLI** launching into an instance it does not name, in every build, and stops a **debug** engine drawing into one. See [Working on the browser](#working-on-the-browser). |
 
@@ -221,9 +224,17 @@ platform check standing in for a reason — the reasons are in
 Not through the terminal's output stream, which is the whole reason this is a port:
 
 ```
-Electron OSR paint(BGRA)  ->  pixel-core composites  ->  PNG to a fresh path under %TEMP%
+Electron OSR paint(BGRA)  ->  pixel-core composites  ->  RGBA into a slot of Local\agwinterm-frame-browser-<pid>-<n>
+    ->  {"cmd":"image.frameshm", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
+
+                                                   ->  PNG to a fresh path under %TEMP%       (host without the verb)
     ->  {"cmd":"image.frame", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
 ```
+
+The upper route needs an agwinterm that implements `image.frameshm` (`main` from `8230d0e`;
+no release as of 2026-09-04). The first frame asks; a host that answers `unknown command` gets
+the lower route for the rest of the session, and that first frame is re-sent down it rather
+than dropped.
 
 Input goes the other way and needs no side channel: it arrives *through* the pty as ordinary VT
 sequences, decoded by the 659-line decoder inherited from upstream's `terminal.rs`. Hold onto that

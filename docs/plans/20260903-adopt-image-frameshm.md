@@ -469,21 +469,48 @@ talks to.
 
 ### Task 10: [Final] Update documentation
 
-- [ ] `frame_shm.rs` module doc: the fast path is here; what it does, what latches it off, and
-      the one producer rule and how the code keeps it
-- [ ] `frame_file.rs` module doc: this path is the fallback and the baseline, entered on a
-      host without the verb or on `TERMINAL_BROWSER_FRAME_TRANSPORT=file`
-- [ ] `07-as-built.md` § 1: rewrite "Why the fast path is not here" as "How the fast path is
+- [x] `frame_shm.rs` module doc: the fast path is here; what it does, what latches it off, and
+      the one producer rule and how the code keeps it — rewritten: the three pieces
+      (`layout`, `mapping`, `producer`), the latch rules in one paragraph, and "The one
+      producer rule, and how the code keeps it" naming the test that pins the construction.
+      `FRAMESHM_CMD` and `Transport`'s docs no longer speak of an unpublished spec. Also
+      the three pre-existing broken intra-doc links in the `mapping`/`producer` module docs
+      (`cargo doc` now reports none in the port-written files)
+- [x] `frame_file.rs` module doc: this path is the fallback and the baseline, entered on a
+      host without the verb or on `TERMINAL_BROWSER_FRAME_TRANSPORT=file` — the ⚠️ "does
+      not exist" paragraph is replaced by the three ways a frame comes down this path;
+      `BUDGET_ENV`'s doc no longer says Task 12 is still to diff. `lib.rs`'s module
+      comments and `agwinterm.rs`'s module doc said the producer was absent too and are
+      corrected in the same change, as is the `PORT_ADDED_FILES` comment in
+      `tools/vendor-check/inventory.test.mjs`
+- [x] `07-as-built.md` § 1: rewrite "Why the fast path is not here" as "How the fast path is
       selected", keep "How to force either", and keep the transports table exactly the set
-      `frame_shm.rs` parses (the docs-check test at `:190` reads it)
-- [ ] `00-port-brief.md`: a dated "As built, 2026-09" callout after the 2026-08-28 host update
+      `frame_shm.rs` parses (the docs-check test at `:190` reads it) — done; the § 1 table
+      now has both transports in the build with the measured cost of each and the host
+      requirement for the fast one, and the `auto`/`shm` rows say what happens on a host
+      with and without the verb. The `file` row and the three accepted values are unchanged
+- [x] `00-port-brief.md`: a dated "As built, 2026-09" callout after the 2026-08-28 host update
       saying the consumer shipped; correct the diagram's mapping name at `:316` to the
-      contract's prefix
-- [ ] `02-frame-budget.md`: already rewritten in Task 8; check its links
-- [ ] `README.md`: the transport paragraph, and the host requirement for the fast path
-- [ ] `UPSTREAM.md`: if any port-written file's divergence list changes (it should not — no
-      vendored file is edited), say so; otherwise leave it
-- [ ] run the docs-check suite — links and pinned claims — must pass
+      contract's prefix — done, and the callout records the two corrections the contract
+      made to the diagram (the name; the composed RGBA canvas rather than Electron's BGRA
+      paint buffer) and the 5.5 ms "floor" that turned out to be `image.frame`'s. The
+      brief's own summary table gets "Adopted 2026-09" appended to its first row rather
+      than a rewrite, per the brief's rule about not being edited into prescience
+- [x] `02-frame-budget.md`: already rewritten in Task 8; check its links — its two links
+      (`#how-to-re-measure`, the port plan's `#post-completion`) resolve; pinned by the
+      docs-check link and anchor tests
+- [x] `README.md`: the transport paragraph, and the host requirement for the fast path — the
+      intro paragraph, the `TERMINAL_BROWSER_FRAME_TRANSPORT` knob row and the "How a frame
+      reaches the pane" diagram now show both routes and name `main` from `8230d0e`
+- [x] `UPSTREAM.md`: if any port-written file's divergence list changes (it should not — no
+      vendored file is edited), say so; otherwise leave it — left alone: the branch edits
+      no vendored file (`tools/vendor-check` 176 pass), so no divergence is added or renumbered
+- [x] run the docs-check suite — links and pinned claims — must pass — `node.exe --test
+      "tools/*/*.test.mjs"`: 572 tests, 570 pass, 2 skipped (the capable-host acceptance
+      cases on the release pane), 0 fail; `cargo nextest run --workspace` 517 passed;
+      fmt-scope and clippy-scope 0 port-line complaints. The native module was rebuilt
+      (`pnpm --filter pixel-react build:native`) because the artifact-age guard fails on
+      any crate edit, doc comments included
 
 ## Technical Details
 
