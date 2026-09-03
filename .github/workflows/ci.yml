@@ -26,6 +26,11 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: '22'
+          # v5 turns this on by default, reads `packageManager: pnpm@...` out of
+          # package.json and shells out to pnpm to find its store - before corepack
+          # has put pnpm on PATH, one step below. v4 did not, which is why the bump
+          # to v5 broke a build that had just passed.
+          package-manager-cache: false
 
       - name: Setup pnpm
         run: corepack enable
