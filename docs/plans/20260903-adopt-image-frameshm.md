@@ -245,23 +245,33 @@ The Win32 half: a named mapping the host can open, created and torn down correct
 Owns the mapping, the sequence counter and the incarnation; the only thing `frame_file.rs`
 talks to.
 
-- [ ] `Producer::new(env: &SessionEnv) -> Producer` with no mapping yet, `seq = 0`,
+- [x] `Producer::new(env: &SessionEnv) -> Producer` with no mapping yet, `seq = 0`,
       `incarnation = 0`, `pid` from the process
-- [ ] `Producer::publish(&mut self, canvas: &Canvas) -> io::Result<Published>` — bumps `seq`
+      — built as `Producer::new()`: nothing in the session environment shapes the
+      producer (`Transport` is `frame_file.rs`'s to read), so the argument was dropped
+      rather than accepted and ignored
+- [x] `Producer::publish(&mut self, canvas: &Canvas) -> io::Result<Published>` — bumps `seq`
       first (sequences start at 1); if there is no mapping or the canvas dimensions differ from
       the current layout, creates a new mapping under `mapping_name(pid, incarnation)` with
       `incarnation += 1` **and keeps `seq` monotonic across the switch**; then delegates to
       `Mapping::publish`
-- [ ] the previous mapping is dropped only after the new one exists and only when no request
+      — a name found already taken (`ERROR_ALREADY_EXISTS`, Task 2's stale-incarnation case)
+      gets the next suffix, up to 16 tries; every name tried spends an incarnation
+- [x] the previous mapping is dropped only after the new one exists and only when no request
       is outstanding — with one frame in flight (Task 5) that is the moment `publish` is
       called, which is after the last reply returned; document this dependency where the drop
       happens
-- [ ] `Producer::current_name(&self) -> Option<&str>` for the request and the logs
-- [ ] write tests: three publishes at one size use one mapping and seqs 1, 2, 3 in slots
+- [x] `Producer::current_name(&self) -> Option<&str>` for the request and the logs
+- [x] write tests: three publishes at one size use one mapping and seqs 1, 2, 3 in slots
       1, 0, 1; a fourth at a new size creates a second mapping with a different suffix and
       seq 4 (not 1); the first mapping's name no longer opens after the switch; a publish
       that fails to create the mapping leaves `seq` un-bumped so the next attempt reuses it
-- [ ] run tests — must pass before Task 5
+      — plus: a taken name gets the next suffix and the stale mapping is untouched; a
+      failure inside `Mapping::publish` leaves `seq` alone too; dropping the producer frees
+      its name. Red-before-green by mutation: committing `seq` before the mapping accepts
+      the frame, restarting `seq` on a resize, and leaking the old mapping each turned
+      exactly one test red
+- [x] run tests — must pass before Task 5
 
 ### Task 5: The request and the fallback — in `frame_file.rs`
 
