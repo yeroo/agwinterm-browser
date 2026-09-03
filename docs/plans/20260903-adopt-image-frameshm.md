@@ -220,25 +220,25 @@ The Win32 half: a named mapping the host can open, created and torn down correct
 
 ### Task 3: Publishing a frame into a slot — `Mapping::publish`
 
-- [ ] `Mapping::publish(&mut self, seq: u64, canvas: &Canvas) -> Published` — picks
+- [x] `Mapping::publish(&mut self, seq: u64, canvas: &Canvas) -> Published` — picks
       `slot_for(seq)`, writes the slot's descriptor (`width`, `height`, `stride`, `FORMAT_RGBA`),
       copies the canvas rows into the slot's pixel range (row by row, `width * 4` bytes each;
       the canvas stride and the slot stride are both `width * 4` here), then stores `seq` into
       `ready` with `Ordering::Release` through an `AtomicU64` at `READY_OFFSET` (aligned: 32 is
       8-byte aligned and the view is page-aligned); returns the slot, seq and descriptor for
       the request
-- [ ] refuse (return `Err`, publish nothing) a canvas whose dimensions do not match the
+- [x] refuse (return `Err`, publish nothing) a canvas whose dimensions do not match the
       `Layout` — that is the caller's cue to recreate (Task 4), never a partial write
-- [ ] assert the canvas byte order: a test canvas painted one known RGBA colour lands in the
+- [x] assert the canvas byte order: a test canvas painted one known RGBA colour lands in the
       slot as those four bytes in that order. tiny-skia's premultiplied storage is identical
       for opaque pixels; the test paints an opaque colour and one with alpha 128 and documents
       what the second produces, so the plan's claim is checked rather than believed
-- [ ] write the ordering test: after `publish(seq)`, `ready` read with `Ordering::Acquire`
+- [x] write the ordering test: after `publish(seq)`, `ready` read with `Ordering::Acquire`
       equals `seq`, and the slot's descriptor is fully written before `ready` changes — assert
       by publishing into a mapping whose `ready` is read through the second view of Task 2's
       round-trip test
-- [ ] write the test for a mismatched canvas: nothing in the view changes, `ready` stays put
-- [ ] run tests — must pass before Task 4
+- [x] write the test for a mismatched canvas: nothing in the view changes, `ready` stays put
+- [x] run tests — must pass before Task 4
 
 ### Task 4: The producer's lifecycle — `frame_shm::Producer`
 

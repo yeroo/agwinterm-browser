@@ -345,6 +345,59 @@ pub(crate) mod layout {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
     }
 
+    /// One slot's descriptor: the 16 bytes at [`Layout::descriptor`], and the four
+    /// numbers the request repeats so the host can hold them against the mapping
+    /// before it copies (spec § JSON args: a non-zero field "must agree with the
+    /// slot descriptor").
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Descriptor {
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        /// Bytes per row: `width * 4` for this producer, since the canvas has no
+        /// padding.
+        pub(crate) stride: u32,
+        /// [`FORMAT_RGBA`], the canvas's own byte order.
+        pub(crate) format: u32,
+    }
+
+    impl Descriptor {
+        /// The descriptor every frame published at `layout`'s size carries.
+        pub(crate) fn for_layout(layout: &Layout) -> Self {
+            Self {
+                width: layout.width(),
+                height: layout.height(),
+                stride: layout.stride(),
+                format: FORMAT_RGBA,
+            }
+        }
+
+        /// Writes the four fields, little-endian, into a slot's 16 descriptor bytes
+        /// (spec § Slot descriptor: `width` at +0, `height` at +4, `stride` at +8,
+        /// `format` at +12).
+        pub(crate) fn write(&self, descriptor: &mut [u8]) {
+            assert_eq!(
+                descriptor.len(),
+                DESCRIPTOR_LEN,
+                "a slot descriptor is exactly {DESCRIPTOR_LEN} bytes"
+            );
+            put_u32(descriptor, 0, self.width);
+            put_u32(descriptor, 4, self.height);
+            put_u32(descriptor, 8, self.stride);
+            put_u32(descriptor, 12, self.format);
+        }
+    }
+
+    /// What one publish put in the mapping: the slot the frame landed in, the
+    /// sequence that names it, and the descriptor written for it. That is
+    /// everything the `image.frameshm` request has to repeat, so the request is
+    /// built from this value and cannot disagree with the bytes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Published {
+        pub(crate) slot: u32,
+        pub(crate) seq: u64,
+        pub(crate) descriptor: Descriptor,
+    }
+
     #[cfg(test)]
     mod tests {
         //! Each header assertion quotes the spec's offset table
@@ -524,6 +577,52 @@ pub(crate) mod layout {
             }
         }
 
+        // -- descriptors -------------------------------------------------------
+
+        #[test]
+        fn a_descriptor_is_written_in_the_specs_field_order() {
+            // Spec § Slot descriptor: width at +0, height at +4, stride at +8,
+            // format at +12, each four bytes.
+            let layout = hd();
+            let descriptor = Descriptor::for_layout(&layout);
+            assert_eq!(
+                descriptor,
+                Descriptor {
+                    width: 1920,
+                    height: 1080,
+                    stride: 7680,
+                    format: 32,
+                }
+            );
+            let mut view = vec![0xAA; layout.mapping_len()];
+            layout.write_header(&mut view);
+            descriptor.write(&mut view[layout.descriptor(1)]);
+            let base = 64 + 16;
+            assert_eq!(u32_at(&view, base), 1920, "width");
+            assert_eq!(u32_at(&view, base + 4), 1080, "height");
+            assert_eq!(u32_at(&view, base + 8), 7680, "stride");
+            assert_eq!(u32_at(&view, base + 12), 32, "format: KittyFormat.Rgba");
+            assert!(
+                view[64..80].iter().all(|&b| b == 0),
+                "slot 0's descriptor is untouched"
+            );
+            assert!(
+                view[96..256].iter().all(|&b| b == 0),
+                "and so is the rest of the header"
+            );
+        }
+
+        #[test]
+        fn a_descriptor_refuses_any_length_but_sixteen() {
+            for len in [DESCRIPTOR_LEN - 1, DESCRIPTOR_LEN + 1] {
+                let result = std::panic::catch_unwind(move || {
+                    let mut bytes = vec![0; len];
+                    Descriptor::for_layout(&hd()).write(&mut bytes);
+                });
+                assert!(result.is_err(), "{len} bytes");
+            }
+        }
+
         // -- slots -------------------------------------------------------------
 
         #[test]
@@ -537,12 +636,13 @@ pub(crate) mod layout {
 
 /// The named shared-memory mapping a [`layout::Layout`] lives in, Windows only.
 ///
-/// This is the Win32 half of the fast path and nothing else: create the section
-/// under the contract's name, map one view of exactly the layout's length, write the
-/// header, and tear both down once. What goes *into* a slot, and when, is the
-/// producer's business (Task 3 and Task 4); this module never reads the header it
-/// wrote and never learns a length from the mapping — the length it maps is the one
-/// it asked for.
+/// This is the Win32 half of the fast path: create the section under the
+/// contract's name, map one view of exactly the layout's length, write the header,
+/// publish frames into its slots ([`Mapping::publish`]), and tear both down once.
+/// It never learns a length from the mapping — the length it maps is the one it
+/// asked for — and the only header field it reads back is `ready`, its own atomic.
+/// *When* a slot may be refilled, and which sequence a frame gets, is the
+/// producer's business (Task 4).
 ///
 /// Reachable only from its tests until the producer lands; the `dead_code` allowance
 /// goes with the one on [`layout`].
@@ -553,6 +653,7 @@ pub(crate) mod layout {
 )]
 pub(crate) mod mapping {
     use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
     use windows_sys::Win32::System::Memory::{
@@ -560,7 +661,11 @@ pub(crate) mod mapping {
         PAGE_READWRITE, UnmapViewOfFile,
     };
 
-    use super::layout::{Layout, MAX_NAME_SUFFIX, NAME_PREFIX, is_valid_name};
+    use super::layout::{
+        Descriptor, Layout, MAX_NAME_SUFFIX, NAME_PREFIX, Published, READY_OFFSET, is_valid_name,
+        slot_for,
+    };
+    use crate::canvas::Canvas;
 
     /// A page-file-backed section named `name`, with one read-write view over it.
     ///
@@ -678,6 +783,103 @@ pub(crate) mod mapping {
             }
         }
 
+        /// Publishes `canvas` as frame `seq`: the spec's recipe (§ Publishing a
+        /// frame) minus the request. Picks `slot_for(seq)`, writes the slot's
+        /// descriptor, copies the rows, then release-stores `seq` into `ready`, and
+        /// returns what the request must repeat.
+        ///
+        /// Nothing is written unless everything will be. A canvas whose size is not
+        /// this mapping's is refused whole: a mapping is sized for one frame size,
+        /// and the caller's answer to a resize is a new mapping (Task 4), never a
+        /// partial slot. A `seq` of `0` — the "nothing published" value — or one at
+        /// or below the current `ready` is refused for the same reason: the reader
+        /// rejects a sequence that goes backwards, and this side would rather say so
+        /// than publish a frame the host will refuse.
+        ///
+        /// The slot-reuse rule (do not refill a slot before the reply for the frame
+        /// that last used it has returned) is not enforced here. With one frame in
+        /// flight it holds by construction, because the caller awaits every reply
+        /// before calling this again; `frame_file.rs` pins that (Task 5).
+        pub(crate) fn publish(&mut self, seq: u64, canvas: &Canvas) -> io::Result<Published> {
+            let layout = self.layout;
+            if (canvas.width, canvas.height) != (layout.width(), layout.height()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm mapping {} is sized for {}x{}, not the {}x{} canvas: \
+                         a resize needs a new mapping",
+                        self.name,
+                        layout.width(),
+                        layout.height(),
+                        canvas.width,
+                        canvas.height,
+                    ),
+                ));
+            }
+            let row = layout.stride() as usize;
+            let frame = row * layout.height() as usize;
+            if canvas.pixels.len() < frame {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm: a {}x{} canvas needs {frame} bytes, has {}",
+                        canvas.width,
+                        canvas.height,
+                        canvas.pixels.len(),
+                    ),
+                ));
+            }
+            let ready = self.ready().load(Ordering::Acquire);
+            if seq == 0 || seq <= ready {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm seq {seq} does not follow {ready}: sequences start at 1 \
+                         and never go backwards"
+                    ),
+                ));
+            }
+
+            let slot = slot_for(seq);
+            let descriptor = Descriptor::for_layout(&layout);
+            let view = self.view();
+            descriptor.write(&mut view[layout.descriptor(slot)]);
+            // Row by row rather than one copy: the two strides agree today because
+            // the canvas has no padding, but the spec lets the slot's be wider.
+            let rows = canvas.pixels[..frame].chunks_exact(row);
+            for (dst, src) in view[layout.pixels(slot)].chunks_exact_mut(row).zip(rows) {
+                dst.copy_from_slice(src);
+            }
+            // The release is what makes the descriptor and the rows above visible
+            // to a reader whose acquire load of `ready` sees `seq`.
+            self.ready().store(seq, Ordering::Release);
+            Ok(Published {
+                slot,
+                seq,
+                descriptor,
+            })
+        }
+
+        /// The header's `ready` field as the atomic the contract says it is.
+        ///
+        /// Addressed through the *mapped* field, as the reader addresses it, rather
+        /// than through a copy: the store has to be the one the reader's acquire
+        /// load pairs with.
+        #[allow(unsafe_code)]
+        pub(crate) fn ready(&self) -> &AtomicU64 {
+            // SAFETY: the view base is allocation-granularity aligned (that is what
+            // `MapViewOfFile` returns) and `READY_OFFSET` is 32, so the pointer is
+            // 8-byte aligned; `READY_OFFSET + 8` is inside the 256-byte header, which
+            // is inside the `mapping_len` bytes the view covers; the view stays
+            // mapped for as long as `self` does, which bounds the returned borrow;
+            // and no non-atomic access to these eight bytes can overlap the
+            // returned reference, because the only other way at them is `view()`,
+            // which needs `&mut self`.
+            unsafe {
+                AtomicU64::from_ptr(self.view.Value.cast::<u8>().add(READY_OFFSET).cast::<u64>())
+            }
+        }
+
         /// The name the section was created under: what the request carries.
         pub(crate) fn name(&self) -> &str {
             &self.name
@@ -734,6 +936,7 @@ pub(crate) mod mapping {
 
         use super::super::layout::{HEADER_LEN, NAME_PREFIX, PAGE};
         use super::*;
+        use crate::canvas::Canvas;
 
         /// A name no other test, and no other test process, will create: the test's
         /// own tag plus this process's id.
@@ -932,6 +1135,282 @@ pub(crate) mod mapping {
                 err.raw_os_error(),
                 Some(ERROR_FILE_NOT_FOUND as i32),
                 "{err}"
+            );
+        }
+
+        // -- publishing ------------------------------------------------------------
+
+        /// A canvas painted one colour through the canvas's byte-copying fill.
+        fn flat(width: u32, height: u32, rgba: [u8; 4]) -> Canvas {
+            let mut canvas = Canvas::new(width, height);
+            canvas.fill(rgba);
+            canvas
+        }
+
+        /// A canvas in which no two nearby pixels agree, so a row landing in the
+        /// wrong place, or the wrong slot, is visible.
+        fn gradient(width: u32, height: u32) -> Canvas {
+            let mut canvas = Canvas::new(width, height);
+            for (i, px) in canvas.pixels.chunks_exact_mut(4).enumerate() {
+                px.copy_from_slice(&[(i % 251) as u8, (i / 251) as u8, (i % 7) as u8, 255]);
+            }
+            canvas
+        }
+
+        /// The reader's `ready`: the eight bytes at offset 32 through its own view.
+        /// A read-only view cannot be handed to `AtomicU64::from_ptr`, which wants
+        /// write access, and the producer and this reader are one thread, so a
+        /// plain read races with nothing; the acquire side is exercised through
+        /// the producer's own atomic.
+        fn ready_seen_by(reader: &Reader) -> u64 {
+            u64_at(reader.bytes(), 32)
+        }
+
+        #[test]
+        fn a_publish_writes_the_descriptor_then_the_rows_then_ready() {
+            let layout = Layout::for_frame(8, 4).unwrap();
+            let name = test_name("publish");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            assert_eq!(ready_seen_by(&reader), 0, "nothing published yet");
+
+            let first = gradient(8, 4);
+            let published = mapping.publish(1, &first).expect("first frame");
+            assert_eq!(
+                published,
+                Published {
+                    slot: 1,
+                    seq: 1,
+                    descriptor: Descriptor {
+                        width: 8,
+                        height: 4,
+                        stride: 32,
+                        format: 32,
+                    },
+                },
+                "sequences start at 1, which is slot 1"
+            );
+
+            let seen = reader.bytes();
+            // Slot 1's descriptor at 64 + 16 * 1, in the spec's field order.
+            assert_eq!(u32_at(seen, 80), 8, "width");
+            assert_eq!(u32_at(seen, 84), 4, "height");
+            assert_eq!(u32_at(seen, 88), 32, "stride");
+            assert_eq!(u32_at(seen, 92), 32, "format");
+            assert!(
+                seen[64..80].iter().all(|&b| b == 0),
+                "slot 0's descriptor is untouched"
+            );
+            assert_eq!(
+                &seen[layout.pixels(1)],
+                &first.pixels[..],
+                "the rows, in order"
+            );
+            assert!(
+                seen[layout.pixels(0)].iter().all(|&b| b == 0),
+                "slot 0's pixels are untouched"
+            );
+            assert_eq!(ready_seen_by(&reader), 1, "ready names the frame");
+            assert_eq!(
+                mapping.ready().load(Ordering::Acquire),
+                1,
+                "and an acquire load of the atomic agrees"
+            );
+
+            // The next frame takes the other slot and leaves this one alone: the
+            // host may still be copying it, and it is the reply, not this call,
+            // that frees it.
+            let second = flat(8, 4, [1, 2, 3, 255]);
+            let published = mapping.publish(2, &second).expect("second frame");
+            assert_eq!((published.slot, published.seq), (0, 2));
+            let seen = reader.bytes();
+            assert_eq!(u32_at(seen, 64), 8, "slot 0's descriptor now");
+            assert_eq!(&seen[layout.pixels(0)], &second.pixels[..]);
+            assert_eq!(
+                &seen[layout.pixels(1)],
+                &first.pixels[..],
+                "slot 1 still holds frame 1"
+            );
+            assert_eq!(ready_seen_by(&reader), 2);
+            assert_eq!(mapping.ready().load(Ordering::Acquire), 2);
+        }
+
+        #[test]
+        fn the_slot_holds_the_canvass_bytes_in_the_canvass_order() {
+            let layout = Layout::for_frame(3, 2).unwrap();
+            let name = test_name("order");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+
+            // Opaque: an RGBA colour lands as those four bytes, R first. The canvas
+            // is tiny-skia RGBA and `format: 32` tells the host exactly that.
+            mapping
+                .publish(1, &flat(3, 2, [0x11, 0x22, 0x33, 0xFF]))
+                .unwrap();
+            let pixels = &reader.bytes()[layout.pixels(1)];
+            assert_eq!(pixels.len(), 3 * 2 * 4);
+            for px in pixels.chunks_exact(4) {
+                assert_eq!(px, [0x11, 0x22, 0x33, 0xFF], "R, G, B, A in that order");
+            }
+
+            // Translucent: the plan says premultiplied storage is identical for
+            // opaque pixels, and this is the case where it is *not*. Painted
+            // through tiny-skia over a transparent canvas, (0, 200, 0, 128) is
+            // stored premultiplied — green scaled by alpha, about 100 — and the
+            // slot carries exactly those stored bytes. So a translucent pixel
+            // reaches the host premultiplied; browser frames are opaque, so none
+            // does.
+            let mut translucent = Canvas::new(3, 2);
+            let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, 3.0, 2.0).unwrap();
+            translucent.fill_path(&tiny_skia::PathBuilder::from_rect(rect), [0, 200, 0, 128]);
+            let stored = tiny_skia::ColorU8::from_rgba(0, 200, 0, 128).premultiply();
+            assert_eq!((stored.red(), stored.blue(), stored.alpha()), (0, 0, 128));
+            assert!(
+                (99..=101).contains(&stored.green()),
+                "premultiplied green is 200 * 128 / 255, got {}",
+                stored.green()
+            );
+            mapping.publish(2, &translucent).unwrap();
+            let pixels = &reader.bytes()[layout.pixels(0)];
+            assert_eq!(
+                pixels,
+                &translucent.pixels[..],
+                "the slot is the canvas, byte for byte"
+            );
+            for px in pixels.chunks_exact(4) {
+                assert_eq!((px[0], px[2], px[3]), (0, 0, 128), "{px:?}");
+                assert!(
+                    (i32::from(px[1]) - i32::from(stored.green())).abs() <= 1,
+                    "green is premultiplied, not 200: {px:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_full_hd_frame_fills_its_slot_and_nothing_past_it() {
+            // The size the budget was measured at: the copy lands whole and the page
+            // padding after the last row stays zero.
+            let layout = hd();
+            let name = test_name("hd");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            let canvas = gradient(1920, 1080);
+            let published = mapping.publish(1, &canvas).unwrap();
+            assert_eq!(published.descriptor.stride, 7680);
+            let seen = reader.bytes();
+            assert_eq!(&seen[layout.pixels(1)], &canvas.pixels[..]);
+            let padding = layout.pixels(1).end..layout.mapping_len();
+            assert!(
+                seen[padding].iter().all(|&b| b == 0),
+                "the copy stops at the last row"
+            );
+        }
+
+        #[test]
+        fn a_canvas_of_another_size_is_refused_and_nothing_moves() {
+            let layout = Layout::for_frame(8, 4).unwrap();
+            let name = test_name("mismatch");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            mapping.publish(1, &gradient(8, 4)).unwrap();
+            let before = reader.bytes().to_vec();
+
+            for (w, h) in [(9, 4), (8, 5), (4, 8), (1, 1), (16, 8)] {
+                let err = mapping
+                    .publish(2, &gradient(w, h))
+                    .expect_err(&format!("{w}x{h}"));
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(err.to_string().contains(&name), "{err}");
+                assert!(err.to_string().contains("8x4"), "{err}");
+                assert!(err.to_string().contains(&format!("{w}x{h}")), "{err}");
+                assert!(err.to_string().contains("new mapping"), "{err}");
+            }
+            // A right-sized canvas that does not carry its own pixels: the check
+            // `encode_png` makes, made here too.
+            let mut short = gradient(8, 4);
+            short.pixels.truncate(8);
+            let err = mapping.publish(2, &short).expect_err("short");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("128 bytes, has 8"), "{err}");
+
+            assert_eq!(reader.bytes(), &before[..], "not a byte changed");
+            assert_eq!(ready_seen_by(&reader), 1, "ready stays put");
+            // The sequence was not consumed either: 2 still publishes.
+            assert_eq!(mapping.publish(2, &gradient(8, 4)).unwrap().seq, 2);
+        }
+
+        #[test]
+        fn a_sequence_that_does_not_advance_is_refused_before_the_host_can() {
+            let layout = Layout::for_frame(2, 2).unwrap();
+            let name = test_name("seq");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            let canvas = flat(2, 2, [9, 9, 9, 255]);
+
+            let err = mapping
+                .publish(0, &canvas)
+                .expect_err("0 means nothing published");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("start at 1"), "{err}");
+            assert_eq!(ready_seen_by(&reader), 0);
+            assert!(
+                reader.bytes()[HEADER_LEN..].iter().all(|&b| b == 0),
+                "no slot was touched"
+            );
+
+            mapping.publish(5, &canvas).unwrap();
+            let before = reader.bytes().to_vec();
+            for stale in [5, 4, 1] {
+                let err = mapping.publish(stale, &canvas).expect_err("backwards");
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("does not follow 5"), "{err}");
+            }
+            assert_eq!(reader.bytes(), &before[..]);
+            // Gaps are fine: the reader asks only that `seq` never go backwards.
+            assert_eq!(mapping.publish(7, &canvas).unwrap().slot, 1);
+            assert_eq!(ready_seen_by(&reader), 7);
+        }
+
+        #[test]
+        fn ready_is_released_last_and_nothing_else_writes_it() {
+            // One thread cannot observe the ordering, so this pins the construction
+            // that gives it: `publish` writes the descriptor, then the rows, then
+            // `ready` — once, with `Release` — and no other store to the atomic
+            // exists in this file. A reader's acquire load that sees `seq` therefore
+            // sees the descriptor and the rows written before it.
+            let source = include_str!("frame_shm.rs");
+            let publish = source
+                .split("pub(crate) fn publish(")
+                .nth(1)
+                .expect("publish exists");
+            let body = publish.split("pub(crate) fn ready(").next().unwrap();
+            let descriptor = body
+                .find("descriptor.write(")
+                .expect("the descriptor is written");
+            let rows = body
+                .find("dst.copy_from_slice(src)")
+                .expect("the rows are copied");
+            let release = body
+                .find(".store(seq, Ordering::Release)")
+                .expect("ready is release-stored");
+            assert!(
+                descriptor < rows && rows < release,
+                "descriptor, rows, then ready"
+            );
+            assert_eq!(
+                body.matches("Ordering::Release").count(),
+                1,
+                "exactly one release store in publish"
+            );
+            // And everything in this file up to this test — every production
+            // line, and the tests that come before it — stores to an atomic once.
+            let before_this_test = &source[..source
+                .find("fn ready_is_released_last_and_nothing_else_writes_it")
+                .unwrap()];
+            assert_eq!(
+                before_this_test.matches(".store(").count(),
+                1,
+                "publish's is the only store to ready"
             );
         }
 
