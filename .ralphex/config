@@ -1,4 +1,4 @@
-# Project-local ralphex config for winterm-browser.
+# Project-local ralphex config for agwinterm-browser.
 #
 # Deliberately minimal. Precedence is CLI flags > this file > ~/.config/ralphex/
 # > embedded defaults, so every key set here SHADOWS the global config — including

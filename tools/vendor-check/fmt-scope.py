@@ -26,6 +26,10 @@ BASELINE = "45b5e43"
 HEADER = re.compile(r"^Diff in (.*):(\d+):$")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 UNC = chr(92) + chr(92) + "?" + chr(92)
+# rustfmt reports absolute paths; git blame needs them repo-relative. Derived from REPO
+# rather than matched against the directory's name, which only worked while every clone
+# happened to sit in a directory called after the project.
+REPO_SLASH = REPO.replace(chr(92), "/").rstrip("/") + "/"
 
 
 def complaints():
@@ -62,8 +66,8 @@ def complaints():
         header = HEADER.match(clean.strip())
         if header:
             path = header.group(1).replace(UNC, "").replace(chr(92), "/")
-            if "winterm-browser/" in path:
-                path = path.split("winterm-browser/", 1)[1]
+            if path.startswith(REPO_SLASH):
+                path = path[len(REPO_SLASH):]
             line = int(header.group(2))
             continue
         if path is None:

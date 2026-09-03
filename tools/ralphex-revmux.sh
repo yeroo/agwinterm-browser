@@ -141,7 +141,7 @@ if [ -n "$PROFILE_MD" ]; then
     echo "ralphex-revmux: could not write profile (continuing)" >&2
 # Project conventions
 
-winterm-browser is a Windows-native port, and its conventions are inherited
+agwinterm-browser is a Windows-native port, and its conventions are inherited
 from upstream terminal-browser, which is vendored here. Where they disagree
 with general taste, they win.
 

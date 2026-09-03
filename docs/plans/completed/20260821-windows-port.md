@@ -1,4 +1,4 @@
-# winterm-browser — Windows-native port
+# agwinterm-browser — Windows-native port
 
 > **Revision 2**, after a revmux triage panel (`.revmux/tasks/plan-windows-port/01-initial`) raised
 > 4 critical and 19 major findings against revision 1. Four things changed structurally: an

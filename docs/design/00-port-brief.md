@@ -1,4 +1,4 @@
-# winterm-browser — port brief
+# agwinterm-browser — port brief
 
 A Windows-native port of [zenbu-labs/terminal-browser](https://github.com/zenbu-labs/terminal-browser):
 a real Chromium browser rendered inside a terminal pane. The host terminal is
@@ -248,7 +248,7 @@ Optimising past the bitmap copy is deliberately deferred. Stock Electron on Wind
 D3D11 shared-texture handle, and agwinterm renders with Direct2D, so a genuine zero-copy path
 exists later — it is not v1.
 
-| layer | upstream (macOS/Linux) | winterm-browser |
+| layer | upstream (macOS/Linux) | agwinterm-browser |
 |---|---|---|
 | Browser + chrome UI | Electron OSR + React via `pixel-react` | **unchanged** |
 | Compositor / layout / text | `pixel-core` (taffy / tiny-skia / fontdue) | **unchanged** — already portable |
@@ -331,7 +331,7 @@ verbs read as siblings. **The exact name prefix is pinned in
 [agwinterm's versioned `image.frameshm` contract](https://github.com/yeroo/agwinterm/blob/main/docs/specs/image-frameshm.md);
 do not invent one.**
 
-This spans **two repositories**: agwinterm gains the command, winterm-browser produces the frames.
+This spans **two repositories**: agwinterm gains the command, agwinterm-browser produces the frames.
 The existing file-based `image.frame` stays as the fallback and as the bring-up path.
 
 > ⚠️ **As built: this did not ship, and the bring-up path is the only path.** agwinterm never
@@ -352,7 +352,7 @@ The existing file-based `image.frame` stays as the fallback and as the bring-up 
 
 > ⚠️ **Host update, 2026-08-28.** agwinterm now implements `image.frameshm`, including the
 > versioned contract linked above, the ctl surface, malformed-producer validation and the BGRA
-> renderer path. This does not rewrite what winterm-browser shipped: its current transport remains
+> renderer path. This does not rewrite what agwinterm-browser shipped: its current transport remains
 > the PNG fallback until a separate consumer change adopts the fast path.
 
 ## Working agreement

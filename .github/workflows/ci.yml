@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: build + test (windows)
+    runs-on: windows-latest
+    steps:
+      # The scoped lint gates below attribute every complaint to a vendored or a
+      # port-written line with `git blame` against the vendoring commit, so the full
+      # history has to be here. A shallow clone makes them silently attribute nothing.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup pnpm
+        run: corepack enable
+
+      - name: Setup Rust
+        # engine/rust-toolchain.toml pins 1.93.1 with rustfmt and clippy; rustup honours
+        # it on first use inside engine/, so nothing is pinned twice here.
+        run: rustup show
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      # The Node suites refuse to run against a stale build - several assert that
+      # store/dist and the pixel-react native addon are newer than their sources, since
+      # a suite that passes against the previous build proves nothing. Build first.
+      - name: Build
+        run: corepack pnpm -r build
+
+      - name: Node tests
+        run: corepack pnpm test
+
+      - name: Rust tests
+        working-directory: engine
+        run: cargo nextest run --workspace
+
+      # `cargo fmt --all --check` cannot be green on this tree and is not the gate:
+      # the vendored code is not rustfmt-clean, and reformatting it is the silent edit
+      # the port forbids. These two scripts are the real check - no complaint may land
+      # on a line this port wrote.
+      - name: rustfmt (port lines only)
+        run: python tools/vendor-check/fmt-scope.py
+
+      - name: clippy (port lines only)
+        run: python tools/vendor-check/clippy-scope.py

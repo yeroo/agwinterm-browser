@@ -252,7 +252,7 @@ pinned by a test; it was true of two of the six. See
 ## 3. The accepted ceilings
 
 Two, both named in the Overview before implementation started, both still true, and both
-**host-side**: they are agwinterm changes, not winterm-browser ones. Neither is a bug and
+**host-side**: they are agwinterm changes, not agwinterm-browser ones. Neither is a bug and
 neither is fatal, which is why the port shipped over them.
 
 ### Ceiling 1 — the pointer quantises to one character cell

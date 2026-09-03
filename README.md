@@ -1,10 +1,22 @@
-# winterm-browser
+<div align="center">
 
-A real Chromium browser rendered inside a Windows terminal pane — a Windows-native port of
-[zenbu-labs/terminal-browser](https://github.com/zenbu-labs/terminal-browser), hosted by
-[agwinterm](https://github.com/) rather than a Kitty-graphics-over-stdout terminal.
+# agwinterm-browser
 
-![a page on screen](docs/design/img/10-milestone-page-on-screen.png)
+**A real Chromium browser rendered inside a Windows terminal pane.**
+
+A Windows-native port of [zenbu-labs/terminal-browser](https://github.com/zenbu-labs/terminal-browser),
+hosted by [agwinterm](https://github.com/yeroo/agwinterm) rather than a
+Kitty-graphics-over-stdout terminal. No WSL, no patched Electron.
+
+[![CI](https://github.com/yeroo/agwinterm-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/yeroo/agwinterm-browser/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/yeroo/agwinterm-browser/badge)](https://scorecard.dev/viewer/?uri=github.com/yeroo/agwinterm-browser)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+<img src="docs/design/img/10-milestone-page-on-screen.png" width="820" alt="a page on screen" />
+
+</div>
+
+---
 
 Upstream is macOS/Linux only, for two independent reasons: its Rust engine does not compile on
 Windows (41 errors, unconditional `termios`/`shm`/`UnixStream` use), and its transport — Kitty
@@ -42,7 +54,7 @@ fast path, blocked on an unpublished contract — so frames go out as PNG at abo
 
 | | |
 |---|---|
-| Windows | 10/11, with [agwinterm](https://github.com/) running — there is no other host |
+| Windows | 10/11, with [agwinterm](https://github.com/yeroo/agwinterm) running — there is no other host |
 | Node | 22.x |
 | pnpm | 10.13.1, via `corepack` (bundled with Node) |
 | Rust | 1.93.1 — pinned by `engine/rust-toolchain.toml`, with the MSVC toolchain |
@@ -273,7 +285,7 @@ closed the two Windows profile defects that plan deferred.
 
 | role | tool |
 |---|---|
-| planning + implementation | [ralphex](https://github.com/) — plans in `docs/plans/`, executed autonomously |
+| planning + implementation | [ralphex](https://github.com/umputun/ralphex) — plans in `docs/plans/`, executed autonomously |
 | review | [revmux](https://github.com/umputun/revmux) — every plan and every diff, before acceptance |
 
 `.revmux/` is committed: the lenses, profiles and severity bar are this project's versioned review
