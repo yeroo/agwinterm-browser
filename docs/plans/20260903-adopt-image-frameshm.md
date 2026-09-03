@@ -438,14 +438,34 @@ talks to.
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] every Overview bullet holds: fast path on a capable host, file path latched on an
+- [x] every Overview bullet holds: fast path on a capable host, file path latched on an
       incapable one with the same frame delivered, the three `TERMINAL_BROWSER_FRAME_TRANSPORT`
-      values mean what they meant
-- [ ] `cargo nextest run --workspace`, `node.exe --test "tools/*/*.test.mjs"`, `fmt-scope.py`
-      and `clippy-scope.py` all green with 0 port-line complaints
-- [ ] the unix build compiles (`cargo check` with the producer under `cfg(windows)`)
-- [ ] `tools/vendor-check` reports no vendored-line change
-- [ ] every `unsafe` block added has a `// SAFETY:` comment naming its invariant
+      values mean what they meant — `frameshm.test.mjs` run on 2026-09-04 against both hosts:
+      the installed release (pipe `agwinterm`) ran the fallback case, rows `file` and the
+      explanation once, and skipped the capable cases with the plan's reason; a dev instance
+      from the Release build at `3c8a56f` (`--app-id agwinterm-dev`) ran both capable cases,
+      every row `shm` and `file` still forcing PNGs, in 3.7 s. `unset`/`file`/`shm` are pinned
+      in-process by `frame_shm.rs` (`nothing_set_means_auto`, `the_file_path_stays_selectable`,
+      `the_fast_path_can_be_asked_for_by_name`) and the latch by `frame_file.rs`
+      (`a_host_without_the_verb_latches_the_file_path_and_drops_no_frame`,
+      `three_refusals_in_a_row_latch_the_fast_path_off_and_say_which`,
+      `the_file_transport_sends_only_image_frame_and_builds_no_mapping`)
+- [x] `cargo nextest run --workspace`, `node.exe --test "tools/*/*.test.mjs"`, `fmt-scope.py`
+      and `clippy-scope.py` all green with 0 port-line complaints — 517 passed / 1 skipped;
+      572 tests, 570 pass, 2 skipped (the two capable-host cases on the release pane); rustfmt
+      297 complaints all vendored, clippy 12 all vendored, 0 port-line for both
+- [x] the unix build compiles (`cargo check` with the producer under `cfg(windows)`) —
+      `cargo check -p pixel-core --target x86_64-unknown-linux-gnu` is clean (two pre-existing
+      dead-code warnings in `throttle.rs`, unix-only, not this plan's). The workspace-wide
+      check for that target stops at `tree-sitter-{python,rust,typescript}`'s C build scripts,
+      which want `x86_64-linux-gnu-gcc`; that is a cross-toolchain gap unrelated to the
+      producer, and pixel-core is the crate that carries it
+- [x] `tools/vendor-check` reports no vendored-line change — 176 tests, 176 pass; the branch
+      touches no vendored file (`git diff 10a8edf..HEAD --stat`: `canvas.rs` absent)
+- [x] every `unsafe` block added has a `// SAFETY:` comment naming its invariant — 13 blocks
+      in `frame_shm.rs` (`Mapping::create`, the view slice, `publish`'s copy, `Drop`, and the
+      test-only reader), each preceded by its `// SAFETY:` line; `undocumented_unsafe_blocks`
+      is on and clippy-scope reports 0 port-line complaints
 
 ### Task 10: [Final] Update documentation
 
