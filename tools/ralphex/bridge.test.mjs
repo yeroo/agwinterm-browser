@@ -27,11 +27,27 @@ import { fileURLToPath } from "node:url";
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const BRIDGE = path.join(REPO, "tools", "ralphex-revmux.sh");
 
-// The same two locations tools/ralphex-revmux.cmd looks in, in the same order.
+// The same two locations tools/ralphex-revmux.cmd looks in - but in the opposite order,
+// and that order is load-bearing. Git/bin/bash.exe is a 47 KB launcher that starts the
+// real usr/bin/bash.exe as a fresh Windows process, outside the MSYS process group the
+// `timeout` below kills. Wrapped in the launcher, a timed-out bridge dies and its retry
+// loop lives on in subshells nothing can reach - which is the exact shape of the
+// 51-hour orphan described at the spawn. Verified with a bash → subshell → grandchild
+// tree: through the launcher the grandchild kept running after the kill; through the
+// real bash the tree died. The .cmd's order is fine for production, where nothing
+// needs to kill anything; here the real bash must come first.
+const GIT = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git");
 const BASH = [
-  path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe"),
-  path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "usr", "bin", "bash.exe"),
+  path.join(GIT, "usr", "bin", "bash.exe"),
+  path.join(GIT, "bin", "bash.exe"),
 ].find((p) => existsSync(p));
+// Git's coreutils `timeout`, which lives in usr/bin whichever bash was found: bin/bash.exe
+// is a launcher one level up from the real one.
+const TIMEOUT = BASH && [
+  path.join(path.dirname(BASH), "timeout.exe"),
+  path.join(path.dirname(BASH), "..", "usr", "bin", "timeout.exe"),
+].find((p) => existsSync(p));
+const BRIDGE_TIMEOUT_S = 30;
 
 // A bash-side path, for the one place inside the stub's own shell body that needs one.
 const slash = (p) => p.replaceAll("\\", "/");
@@ -128,10 +144,20 @@ function runBridge(mode) {
   // with it (tools/lib/deadline.test.mjs:3-11 records the eighteen-hour version of
   // that). This bound is what lets subtest 4 report an unbounded retry loop as a red
   // assertion instead of wedging on it. 30s matches tools/cli/unsupported.test.mjs:104.
-  const res = spawnSync(BASH, [BRIDGE, prompt], {
+  //
+  // The bound is applied by Git's `timeout`, not by spawnSync's own `timeout` option,
+  // and the difference is not cosmetic. Node kills the one process it spawned; on
+  // Windows that leaves every child of it running, and the bridge's retry loop lives
+  // in subshells. On 2026-09-01 the unbounded-loop mutation was run against this test
+  // exactly once, spawnSync duly killed bash after 30s, and two orphaned copies of the
+  // loop then fork-stormed for 51 hours — 6.6 CPU-hours each, an 830,000-line stub log
+  // — until they were found by accident. GNU timeout signals the whole MSYS process
+  // group; verified against a bash → subshell → grandchild tree, which survived the
+  // node kill and died under this one. Node's own timeout stays as the backstop.
+  const res = spawnSync(TIMEOUT, ["-s", "KILL", String(BRIDGE_TIMEOUT_S), BASH, BRIDGE, prompt], {
     cwd: REPO,
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: (BRIDGE_TIMEOUT_S + 15) * 1000,
     killSignal: "SIGKILL",
     env: {
       ...process.env,
@@ -141,9 +167,12 @@ function runBridge(mode) {
     },
   });
   // Name the timeout rather than letting it surface as a puzzling assertion failure
-  // three lines later: on timeout status is null and signal is set.
+  // three lines later. A wrapper kill comes back as an exit status, not a signal:
+  // 124 is timeout's own code, and 137 or 2304 (9 << 8) is how MSYS reports a
+  // process that died of SIGKILL, depending on which layer reports it.
   assert.equal(res.error ?? null, null, `the bridge did not return: ${res.error?.message}`);
-  assert.equal(res.signal, null, `the bridge was killed after ${30_000}ms — it did not terminate`);
+  const killed = res.signal !== null || [124, 137, 2304].includes(res.status);
+  assert.ok(!killed, `the bridge was killed after ${BRIDGE_TIMEOUT_S}s — it did not terminate`);
 
   const calls = existsSync(path.join(dir, "calls.log"))
     ? readFileSync(path.join(dir, "calls.log"), "utf8").split("\n").filter(Boolean)
@@ -159,7 +188,7 @@ function runBridge(mode) {
   };
 }
 
-test("the ralphex -> revmux bridge", { skip: BASH ? false : "git bash not installed" }, async (t) => {
+test("the ralphex -> revmux bridge", { skip: BASH && TIMEOUT ? false : "git bash (with coreutils timeout) not installed" }, async (t) => {
   await t.test("opens a round and writes the scope ralphex's prompt becomes", () => {
     const r = runBridge("accept");
     t.after(r.cleanup);
