@@ -352,22 +352,48 @@ talks to.
 
 ### Task 7: Acceptance against a live host — `tools/acceptance/frameshm.test.mjs`
 
-- [ ] probe the host from the pane's `AGWINTERM_PIPE` with an `image.frameshm` request that
+- [x] probe the host from the pane's `AGWINTERM_PIPE` with an `image.frameshm` request that
       names an obviously invalid mapping; `unknown command` → `t.skip` with the reason "host
       lacks image.frameshm (agwinterm main ≥ 8230d0e required)"; a validation refusal → the
       verb exists, proceed
-- [ ] with a capable host: launch the built browser on a fresh session as `pane-clear.test.mjs`
+- [x] with a capable host: launch the built browser on a fresh session as `pane-clear.test.mjs`
       does, load `tools/milestone/static-page.html`, wait (bounded) for the budget file to
       show at least three rows, assert they say `transport=shm`, and assert
       `session.text` / a screenshot-free check that the pane has a placement (whatever
       `06-acceptance.md`'s criteria used)
-- [ ] the same with `TERMINAL_BROWSER_FRAME_TRANSPORT=file`: rows say `transport=file`, and
+- [x] the same with `TERMINAL_BROWSER_FRAME_TRANSPORT=file`: rows say `transport=file`, and
       the frame directory holds PNGs — the baseline path still works on a capable host
-- [ ] the same with `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` against the skip case: the browser
+- [x] the same with `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` against the skip case: the browser
       still shows the page and the log carries `unavailable_reason` exactly once
-- [ ] every wait through `tools/lib/deadline.mjs`; the test file passes on a host without the
+- [x] every wait through `tools/lib/deadline.mjs`; the test file passes on a host without the
       verb by skipping, and CI (which has no host) skips
-- [ ] run the node suite — must pass before Task 8
+- [x] run the node suite — must pass before Task 8
+- ➕ as built: the engine's warnings had nowhere to go outside the devtools panel — `pixel-react`
+  pushes `log` events into `engineLogs`, a store only the log panel reads, and the foreground shape
+  runs with devtools off — so "the log carries `unavailable_reason` exactly once" was unobservable
+  from outside the process. `browser/src/engine-log.ts` (port-written, import-free) forwards the
+  store's `warn`/`error` rows to a writer, once per occurrence; `foreground.ts` gives it fd 2,
+  which under the CLI is `stderr.log` in `LOGS_DIR`, and only when fd 2 is not a console (a browser
+  started by `run-milestone.cmd` must not paint a line over its own placement). Unit-tested in
+  `tools/browser/engine-log.test.mjs` against a store built to `createLogStore`'s contract.
+- ➕ as built: the suite addresses the real host but never the pane it runs in — every browser goes
+  into a session it asks for over `session.new` (with `no-select`) and closes after, with `TEMP`
+  and `LOCALAPPDATA` moved into the test's root so the frame directory, budget file and log are
+  its own. The placement check is the publisher's marker (`FrameDir::mark_pane`, written on the
+  first accepted frame and naming the pipe and session), which is the screenshot-free evidence
+  `06-acceptance.md` § 4 established a placement leaves. The probe classifies `no session` as
+  "the verb exists" and re-asks about `active` when the pane's session id belongs to another
+  instance, because agwinterm on `main` resolves the target before it dispatches.
+- ➕ run on 2026-09-04 against both hosts: the installed release (pipe `agwinterm`, answers
+  `unknown command`) ran the fallback case — rows `file`, the explanation once — and skipped the
+  two capable-host cases with the plan's reason; a second instance built from agwinterm `main`
+  at v0.17.10 (`Agwinterm.Win32.exe --app-id agwinterm-dev`, from the local checkout's Release
+  output) ran both capable-host cases — every row `shm`, the marker naming `agwinterm-dev` and
+  the fresh session, `file` still reachable with PNGs on disk — in 5.5 s. Run it that way with
+  `AGWINTERM_PIPE=agwinterm-dev` from any pane. One run of the fallback case on the release host
+  timed out with Electron up and no budget row; it coincided with the dev instance starting on
+  the same desktop, did not recur in three further runs, and the failure message now carries
+  the pane text, the root's listing and the log, and keeps the root on disk.
 
 ### Task 8: Measure it
 
