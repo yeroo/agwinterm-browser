@@ -165,32 +165,32 @@ Half of this already exists, and it is the half that did not depend on the layou
 The contract's header and slot arithmetic, with no Win32 in it, so it is testable on any
 platform and reads like the spec's tables.
 
-- [ ] add a `layout` submodule to `engine/crates/pixel-core/src/frame_shm.rs` with named
+- [x] add a `layout` submodule to `engine/crates/pixel-core/src/frame_shm.rs` with named
       constants for every offset and value the spec fixes: `MAGIC = 0x46534741`, `VERSION = 1`,
       `HEADER_LEN = 256`, `READY_OFFSET = 32`, `DESCRIPTOR_OFFSET = 64`, `DESCRIPTOR_LEN = 16`,
       `SLOT_COUNT = 2`, `FORMAT_RGBA = 32`, `NAME_PREFIX = r"Local\agwinterm-frame-"`,
       `MAX_DIMENSION = 16384`, `MAX_NAME_SUFFIX = 128`
-- [ ] `Layout::for_frame(width, height) -> Layout` — `stride = width * 4`, `slot_stride` rounded
+- [x] `Layout::for_frame(width, height) -> Layout` — `stride = width * 4`, `slot_stride` rounded
       up to a page (4096), `pixel_offset = HEADER_LEN`, `mapping_len = pixel_offset +
       slot_stride * SLOT_COUNT`; rejects `width`/`height` outside `1..=16384`
-- [ ] `Layout::write_header(&self, view: &mut [u8])` — magic, version, slotCount, flags 0,
+- [x] `Layout::write_header(&self, view: &mut [u8])` — magic, version, slotCount, flags 0,
       slotStride, pixelOffset, `ready = 0`, reserved zeroed, all little-endian
-- [ ] `Layout::descriptor(slot) -> Range<usize>` and `Layout::pixels(slot) -> Range<usize>`
+- [x] `Layout::descriptor(slot) -> Range<usize>` and `Layout::pixels(slot) -> Range<usize>`
       — where a slot's descriptor and its `height * stride` bytes live in the view
-- [ ] `slot_for(seq: u64) -> u32` = `seq % SLOT_COUNT`, and `mapping_name(pid, incarnation)
+- [x] `slot_for(seq: u64) -> u32` = `seq % SLOT_COUNT`, and `mapping_name(pid, incarnation)
       -> String` producing `Local\agwinterm-frame-browser-<pid>-<incarnation>`, plus
       `is_valid_name(&str) -> bool` implementing the prefix and charset rule
-- [ ] write tests quoting the spec's offset table: a header written by `write_header` has
+- [x] write tests quoting the spec's offset table: a header written by `write_header` has
       `0x46534741` at 0, `1` at 4, `2` at 8, `0` at 12, `slot_stride` at 16, `256` at 24, `0` at
       32, and zeros through 63; descriptor `i` starts at `64 + 16*i`
-- [ ] write tests for `for_frame`: 1920×1080 gives stride 7680, both slots inside
+- [x] write tests for `for_frame`: 1920×1080 gives stride 7680, both slots inside
       `mapping_len`, `pixels(1)` does not overlap `pixels(0)` or the header; `0` and `16385`
       are rejected on both axes
-- [ ] write tests for `is_valid_name`: the exact prefix is required and case-sensitive
+- [x] write tests for `is_valid_name`: the exact prefix is required and case-sensitive
       (`local\…` rejected), the suffix may not be empty, may not exceed 128, and rejects a
       backslash, a space and a unicode letter; `mapping_name(1234, 0)` passes
-- [ ] write the test for `slot_for`: `seq` 1..=8 map to 1,0,1,0,… (sequences start at 1)
-- [ ] run `cargo nextest run --workspace` — must pass before Task 2
+- [x] write the test for `slot_for`: `seq` 1..=8 map to 1,0,1,0,… (sequences start at 1)
+- [x] run `cargo nextest run --workspace` — must pass before Task 2
 
 ### Task 2: The mapping — `frame_shm::Mapping` (Windows)
 
