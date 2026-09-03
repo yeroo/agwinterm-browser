@@ -144,7 +144,9 @@ host's half of the contract, not a reason.
 Two knobs, both off by default.
 
 - `TERMINAL_BROWSER_FRAME_BUDGET=<path>` — the browser appends one tab-separated line
-  per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms`. Implemented
+  per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms, transport,
+  copy_ms` — `transport` is `file` or `shm`, and the stages a transport does not pay
+  are `0.00`, so both paths can be read off one file. Implemented
   in `pixel-core/src/frame_file.rs` (`BudgetLog`), read through `SessionEnv` like every
   other `TERMINAL_BROWSER_*` variable so it works in the daemon shape too.
 - `AGWINTERM_PERF=<path>` — agwinterm's own, already shipped

@@ -1566,6 +1566,24 @@ pub(crate) mod producer {
             ))
         }
 
+        /// Lets the mapping go, keeping the counters.
+        ///
+        /// This is the producer's end as the contract expects it: the view is
+        /// unmapped and the handle closed, so once no reader holds the section the
+        /// name is free and the host's next open of it fails with an ordinary
+        /// error. The caller's obligation is the contract's — no request may be
+        /// outstanding — and `frame_file.rs` meets it by closing only after the
+        /// reply to `image.clear`, or when nothing was ever sent.
+        ///
+        /// `seq` and the incarnation are kept, not the mapping alone, so a frame
+        /// published after this gets a fresh name with the sequence continuing.
+        /// The host allows a name to be reused only if its sequence continues and
+        /// rejects a `seq` that goes backwards, so a producer that started over
+        /// would be refused on every frame.
+        pub(crate) fn close(&mut self) {
+            self.mapping = None;
+        }
+
         /// The name of the mapping the last frame went into, for the request and
         /// the logs; `None` before the first publish.
         pub(crate) fn current_name(&self) -> Option<&str> {
@@ -1788,6 +1806,34 @@ pub(crate) mod producer {
                 Some(ERROR_FILE_NOT_FOUND as i32),
                 "{gone}"
             );
+        }
+
+        #[test]
+        fn closing_frees_the_name_and_keeps_the_counters() {
+            // `close` is the clear's end of the producer: the mapping goes, the
+            // name is free, and a frame published afterwards gets a fresh
+            // incarnation with the sequence continuing — never the old name with
+            // a restarted `seq`, which the host would reject.
+            let mut producer = Producer::new();
+            producer.publish(&flat(4, 4, [1, 1, 1, 255])).unwrap();
+            let before = producer.current_name().unwrap().to_owned();
+
+            producer.close();
+            assert_eq!(producer.current_name(), None, "no mapping to name");
+            let gone = opens(&before).expect_err("gone with the close");
+            assert_eq!(
+                gone.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{gone}"
+            );
+
+            let published = producer.publish(&flat(4, 4, [2, 2, 2, 255])).unwrap();
+            let after = producer.current_name().unwrap().to_owned();
+            assert_eq!(published.seq, 2, "the sequence continued");
+            assert_eq!(producer.seq(), 2);
+            assert_ne!(after, before, "a closed name is not offered again");
+            assert_eq!(incarnation_of(&after), incarnation_of(&before) + 1);
+            assert_eq!(opens(&after).unwrap().ready(), 2);
         }
     }
 }

@@ -160,7 +160,7 @@ $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
 |---|---|
 | `TERMINAL_BROWSER_CELL_PX` | `<width>x<height>` in device pixels. Consulted before the host, so it also corrects a host that answers wrongly. |
 | `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
-| `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
+| `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms, transport, copy_ms`, where `transport` is `file` or `shm` and the stages a transport does not pay are `0.00`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
 | `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances this build may address: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard — and unset is what you want unless you are developing the browser. Set, it stops the **CLI** launching into an instance it does not name, in every build, and stops a **debug** engine drawing into one. See [Working on the browser](#working-on-the-browser). |
 
 ### Working on the browser

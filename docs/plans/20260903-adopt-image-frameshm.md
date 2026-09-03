@@ -322,20 +322,33 @@ talks to.
 
 ### Task 6: Budget accounting and teardown
 
-- [ ] extend `FrameCost` and the budget file with a `transport` column (`file`/`shm`) and,
+- [x] extend `FrameCost` and the budget file with a `transport` column (`file`/`shm`) and,
       for shm frames, `copy_ms` where `encode_ms`/`write_ms` are zero; keep the file's header
       comment accurate — `02-frame-budget.md`'s numbers are read off this file and Task 8
       needs both transports distinguishable in one log
-- [ ] on `FramePublisher::clear` and on drop: `image.clear` as today, then drop the
+- [x] on `FramePublisher::clear` and on drop: `image.clear` as today, then drop the
       `Producer` (which unmaps); the host's next open of that name fails and it reports an
       ordinary failure, which is the contract's expected end of a producer
-- [ ] `TERMINAL_BROWSER_FRAME_TRANSPORT=file` on a session that had latched nothing still
+- [x] `TERMINAL_BROWSER_FRAME_TRANSPORT=file` on a session that had latched nothing still
       records `transport=file` rows identical in shape to today's, so the baseline procedure
       is unchanged
-- [ ] write tests: a shm frame's budget row names `shm` and carries `copy_ms`; a file frame's
+- [x] write tests: a shm frame's budget row names `shm` and carries `copy_ms`; a file frame's
       row is byte-for-byte the previous shape plus the column; after `clear`, the mapping name
       no longer opens
-- [ ] run tests — must pass before Task 7
+- [x] run tests — must pass before Task 7
+- ➕ as built: the two new columns are *appended* — `transport`, then `copy_ms` — so the
+  seven the baseline was measured with keep their places, and every row is rectangular:
+  the stages a route did not pay are `0.00`, not absent. A shm row's `seq` is the
+  mapping's `seq` (what the request carried); a file row's is the path's, as before.
+  `copy_ms` includes the mapping's creation on a frame that needed a new one. The
+  column lists in `README.md` and `02-frame-budget.md` name the nine columns now; the
+  rest of those docs is Task 8's and Task 10's.
+- ➕ as built: `clear` closes the mapping through a new `Producer::close`, which keeps
+  `seq` and the incarnation, rather than dropping the `Producer` — so a frame after a
+  clear (nothing draws after one today) gets a fresh name with the sequence continuing,
+  never the old name with a restarted `seq`, which the host rejects. The mapping goes on
+  a refused clear too, and when nothing was placed; dropping the publisher drops it by
+  construction (field order), pinned by a test and a leak mutation.
 
 ### Task 7: Acceptance against a live host — `tools/acceptance/frameshm.test.mjs`
 
