@@ -1,0 +1,42 @@
+# seq	canvas	span	bytes	encode_ms	write_ms	publish_ms	transport	copy_ms
+# transport is what carried the frame: file (image.frame) or shm (image.frameshm).
+# On file: bytes is the PNG, encode_ms and write_ms are the browser's, copy_ms is 0,
+# and publish_ms is the image.frame round trip: agwinterm's read + its brief
+# placement lock + the pipe. Its PNG decode is async and is not in here.
+# On shm: bytes is the pixels, and encode_ms and write_ms are 0.
+# copy_ms is the copy into the mapping (plus its creation, on a frame that needed a
+# new one); publish_ms is the image.frameshm round trip: agwinterm's copy out of the
+# slot + the placement lock + the pipe. There is no decode after it.
+# seq is the frame's number on its transport: the path's on file, the mapping's
+# seq on shm.
+0	2096x1184	131x37	2792285	19.53	0.89	7.14	file	0.00
+1	2096x1184	131x37	9928663	32.35	3.86	10.01	file	0.00
+2	2096x1184	131x37	9928663	27.52	2.75	11.34	file	0.00
+3	2096x1184	131x37	9928663	31.31	2.83	9.87	file	0.00
+4	2096x1184	131x37	9928663	25.55	2.86	9.62	file	0.00
+5	2096x1184	131x37	9928663	25.24	2.80	7.02	file	0.00
+6	2096x1184	131x37	9928663	26.14	2.95	11.34	file	0.00
+7	2096x1184	131x37	9928663	25.69	3.35	7.62	file	0.00
+8	2096x1184	131x37	9928663	23.65	3.45	10.72	file	0.00
+9	2096x1184	131x37	9928663	24.34	3.30	9.57	file	0.00
+10	2096x1184	131x37	9928663	29.70	3.06	10.95	file	0.00
+11	2096x1184	131x37	9928663	27.12	3.32	7.87	file	0.00
+12	2096x1184	131x37	9928663	27.93	2.93	9.78	file	0.00
+13	2096x1184	131x37	9928663	25.37	2.88	8.71	file	0.00
+14	2096x1184	131x37	9928663	26.86	3.63	10.16	file	0.00
+15	2096x1184	131x37	9928663	26.35	3.76	9.68	file	0.00
+16	2096x1184	131x37	9928663	26.56	3.83	9.18	file	0.00
+17	2096x1184	131x37	9928663	25.94	2.90	8.24	file	0.00
+18	2096x1184	131x37	9928663	26.59	3.17	9.79	file	0.00
+19	2096x1184	131x37	9928663	26.15	3.37	9.07	file	0.00
+20	2096x1184	131x37	9928663	26.89	3.45	13.14	file	0.00
+21	2096x1184	131x37	9928663	25.11	3.82	10.62	file	0.00
+22	2096x1184	131x37	9928663	27.55	4.11	12.29	file	0.00
+23	2096x1184	131x37	9928663	27.99	3.57	9.31	file	0.00
+24	2096x1184	131x37	9928663	28.72	3.08	11.94	file	0.00
+25	2096x1184	131x37	9928663	29.05	2.95	10.14	file	0.00
+26	2096x1184	131x37	9928663	29.15	3.18	9.87	file	0.00
+27	2096x1184	131x37	9928663	28.34	3.03	9.30	file	0.00
+28	2096x1184	131x37	9928663	27.53	2.78	10.63	file	0.00
+29	2096x1184	131x37	9928663	27.68	3.60	8.99	file	0.00
+30	2096x1184	131x37	9928663	26.43	3.15	11.20	file	0.00

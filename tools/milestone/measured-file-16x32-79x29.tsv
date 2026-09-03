@@ -1,0 +1,46 @@
+# seq	canvas	span	bytes	encode_ms	write_ms	publish_ms	transport	copy_ms
+# transport is what carried the frame: file (image.frame) or shm (image.frameshm).
+# On file: bytes is the PNG, encode_ms and write_ms are the browser's, copy_ms is 0,
+# and publish_ms is the image.frame round trip: agwinterm's read + its brief
+# placement lock + the pipe. Its PNG decode is async and is not in here.
+# On shm: bytes is the pixels, and encode_ms and write_ms are 0.
+# copy_ms is the copy into the mapping (plus its creation, on a frame that needed a
+# new one); publish_ms is the image.frameshm round trip: agwinterm's copy out of the
+# slot + the placement lock + the pipe. There is no decode after it.
+# seq is the frame's number on its transport: the path's on file, the mapping's
+# seq on shm.
+0	1264x928	79x29	1319965	10.74	0.81	6.30	file	0.00
+1	1264x928	79x29	4693319	14.64	1.66	9.43	file	0.00
+2	1264x928	79x29	4693319	14.13	2.37	9.43	file	0.00
+3	1264x928	79x29	4693319	13.81	1.98	7.75	file	0.00
+4	1264x928	79x29	4693319	14.87	1.87	8.21	file	0.00
+5	1264x928	79x29	4693319	13.70	1.73	7.01	file	0.00
+6	1264x928	79x29	4693319	10.73	1.34	9.46	file	0.00
+7	1264x928	79x29	4693319	10.53	1.31	7.15	file	0.00
+8	1264x928	79x29	4693319	11.37	1.90	6.58	file	0.00
+9	1264x928	79x29	4693319	11.72	1.92	6.22	file	0.00
+10	1264x928	79x29	4693319	12.17	1.52	6.70	file	0.00
+11	1264x928	79x29	4693319	11.35	1.74	8.76	file	0.00
+12	1264x928	79x29	4693319	11.82	1.62	6.38	file	0.00
+13	1264x928	79x29	4693319	11.93	1.83	7.37	file	0.00
+14	1264x928	79x29	4693319	11.34	1.81	7.04	file	0.00
+15	1264x928	79x29	4693319	10.52	1.98	14.00	file	0.00
+16	1264x928	79x29	4693319	11.94	2.15	8.79	file	0.00
+17	1264x928	79x29	4693319	10.78	1.35	6.90	file	0.00
+18	1264x928	79x29	4693319	11.03	1.79	8.31	file	0.00
+19	1264x928	79x29	4693319	10.40	1.96	6.03	file	0.00
+20	1264x928	79x29	4693319	11.95	1.80	6.71	file	0.00
+21	1264x928	79x29	4693319	11.74	1.64	6.26	file	0.00
+22	1264x928	79x29	4693319	11.15	1.54	8.77	file	0.00
+23	1264x928	79x29	4693319	12.57	2.56	6.37	file	0.00
+24	1264x928	79x29	4693319	12.82	1.21	7.05	file	0.00
+25	1264x928	79x29	4693319	10.73	1.84	6.76	file	0.00
+26	1264x928	79x29	4693319	11.60	1.24	6.16	file	0.00
+27	1264x928	79x29	4693319	10.66	1.96	7.26	file	0.00
+28	1264x928	79x29	4693319	11.21	1.59	25.35	file	0.00
+29	1264x928	79x29	4693319	11.08	1.33	7.45	file	0.00
+30	1264x928	79x29	4693319	11.27	1.48	5.79	file	0.00
+31	1264x928	79x29	4693319	10.96	1.45	6.41	file	0.00
+32	1264x928	79x29	4693319	11.51	1.50	6.37	file	0.00
+33	1264x928	79x29	4693319	10.66	1.79	8.09	file	0.00
+34	1264x928	79x29	4693319	11.21	1.60	6.70	file	0.00

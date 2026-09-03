@@ -1,0 +1,48 @@
+# seq	canvas	span	bytes	encode_ms	write_ms	publish_ms	transport	copy_ms
+# transport is what carried the frame: file (image.frame) or shm (image.frameshm).
+# On file: bytes is the PNG, encode_ms and write_ms are the browser's, copy_ms is 0,
+# and publish_ms is the image.frame round trip: agwinterm's read + its brief
+# placement lock + the pipe. Its PNG decode is async and is not in here.
+# On shm: bytes is the pixels, and encode_ms and write_ms are 0.
+# copy_ms is the copy into the mapping (plus its creation, on a frame that needed a
+# new one); publish_ms is the image.frameshm round trip: agwinterm's copy out of the
+# slot + the placement lock + the pipe. There is no decode after it.
+# seq is the frame's number on its transport: the path's on file, the mapping's
+# seq on shm.
+1	790x580	79x29	1832800	0.00	0.00	2.36	shm	0.97
+2	790x580	79x29	1832800	0.00	0.00	2.31	shm	1.08
+3	790x580	79x29	1832800	0.00	0.00	1.78	shm	0.09
+4	790x580	79x29	1832800	0.00	0.00	1.57	shm	0.09
+5	790x580	79x29	1832800	0.00	0.00	2.49	shm	0.11
+6	790x580	79x29	1832800	0.00	0.00	1.62	shm	0.17
+7	790x580	79x29	1832800	0.00	0.00	1.64	shm	0.09
+8	790x580	79x29	1832800	0.00	0.00	2.38	shm	0.12
+9	790x580	79x29	1832800	0.00	0.00	1.69	shm	0.10
+10	790x580	79x29	1832800	0.00	0.00	1.74	shm	0.09
+11	790x580	79x29	1832800	0.00	0.00	2.31	shm	0.09
+12	790x580	79x29	1832800	0.00	0.00	1.64	shm	0.18
+13	790x580	79x29	1832800	0.00	0.00	1.83	shm	0.12
+14	790x580	79x29	1832800	0.00	0.00	2.47	shm	0.16
+15	790x580	79x29	1832800	0.00	0.00	1.84	shm	0.09
+16	790x580	79x29	1832800	0.00	0.00	1.77	shm	0.11
+17	790x580	79x29	1832800	0.00	0.00	2.29	shm	0.08
+18	790x580	79x29	1832800	0.00	0.00	3.92	shm	0.21
+19	790x580	79x29	1832800	0.00	0.00	1.94	shm	0.12
+20	790x580	79x29	1832800	0.00	0.00	2.20	shm	0.13
+21	790x580	79x29	1832800	0.00	0.00	1.77	shm	0.08
+22	790x580	79x29	1832800	0.00	0.00	1.53	shm	0.09
+23	790x580	79x29	1832800	0.00	0.00	2.39	shm	0.08
+24	790x580	79x29	1832800	0.00	0.00	1.63	shm	0.09
+25	790x580	79x29	1832800	0.00	0.00	1.38	shm	0.10
+26	790x580	79x29	1832800	0.00	0.00	2.00	shm	0.11
+27	790x580	79x29	1832800	0.00	0.00	1.64	shm	0.09
+28	790x580	79x29	1832800	0.00	0.00	1.39	shm	0.08
+29	790x580	79x29	1832800	0.00	0.00	2.18	shm	0.13
+30	790x580	79x29	1832800	0.00	0.00	1.35	shm	0.12
+31	790x580	79x29	1832800	0.00	0.00	1.45	shm	0.09
+32	790x580	79x29	1832800	0.00	0.00	2.08	shm	0.07
+33	790x580	79x29	1832800	0.00	0.00	1.42	shm	0.09
+34	790x580	79x29	1832800	0.00	0.00	1.42	shm	0.09
+35	790x580	79x29	1832800	0.00	0.00	2.12	shm	0.08
+36	790x580	79x29	1832800	0.00	0.00	1.40	shm	0.09
+37	790x580	79x29	1832800	0.00	0.00	1.81	shm	0.09

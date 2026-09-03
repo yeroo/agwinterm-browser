@@ -397,18 +397,44 @@ talks to.
 
 ### Task 8: Measure it
 
-- [ ] re-run the procedure in `02-frame-budget.md` for both transports at the three pane sizes
+- [x] re-run the procedure in `02-frame-budget.md` for both transports at the three pane sizes
       the table lists, on a host built from agwinterm `main ≥ 8230d0e`, and record the rows
-      the budget file produced
-- [ ] rewrite the table and the "what the fast path would delete" paragraph with what it did
+      the budget file produced — six runs on 2026-09-04 against a Release build of agwinterm
+      `main` at `3c8a56f` (`--app-id agwinterm-dev`), the pane resized over the pipe to
+      79×29 and 131×37; rows in `tools/milestone/measured-<transport>-<cell>-<span>.tsv`
+- [x] rewrite the table and the "what the fast path would delete" paragraph with what it did
       delete; keep the file-path rows as the baseline and say which agwinterm build the shm
-      rows were taken on
-- [ ] if the fast path does not beat the baseline at some size, say so with the numbers and
+      rows were taken on — the comparison table has both transports per canvas, the `file`
+      rows re-taken on the same host land within 7% of the 2026-08 Debug-host baseline, which
+      stays in the doc as its own table
+- [x] if the fast path does not beat the baseline at some size, say so with the numbers and
       do not adjust the plan to hide it; the design promised "a baseline to beat", not a win
-- [ ] add a docs-check test that the budget table names both transports and that the
+      — it beat it at every size: producer 11.5 → 1.9 ms, 20.4 → 4.2 ms, 40.4 → 8.7 ms
+      (6.1×, 4.8×, 4.6×); the largest pane went from 25 fps to 114
+- [x] add a docs-check test that the budget table names both transports and that the
       agwinterm build it cites is a real commit (`git ls-remote` is not available in the
-      test; a 7-hex-digit pattern is enough)
-- [ ] run tests — must pass before Task 9
+      test; a 7-hex-digit pattern is enough) — `docs.test.mjs` "the frame budget's comparison
+      names both transports and a real agwinterm commit"; shown red by replacing the hash
+      with `main`
+- [x] run tests — must pass before Task 9
+- ➕ as built: a static page paints while it loads and then never again — ten to twenty
+  frames, fewer the larger the canvas (11 at 2096×1184) — and keystrokes injected over
+  `session.write` moved nothing, so "wait for twenty rows" hung at the largest pane. The
+  baseline's operator had poked the pane by hand. `tools/milestone/measure-transports.mjs`
+  (new, port-written) drives the matrix instead and gets its rows from the browser's own
+  control endpoint (`browser/src/registry.ts`): after the load's burst it opens a second
+  tab on the same page and switches between the two, each switch a full-canvas repaint,
+  until it has the rows asked for. Every case here has 31–40 rows.
+- ➕ measured, not in the design: the baseline's "5.5 ms fixed cost the fast path still
+  pays" was `image.frame`'s, not the pipe's. `image.frameshm` at 0.46 Mpx round-trips in
+  1.78 ms with a 0.24 ms `ping`, and the round trip scales with pixels (about 3 ms/Mpx),
+  which is the host's copy out of the slot before it replies. So the floor is the copy,
+  not a constant — 532 fps at the smallest pane — and the copy out is now 86% of a frame
+  at the largest, which is where the next millisecond is (agwinterm's side).
+- ➕ observed, unchanged: at 2096×1184 the engine warns `resampling surface 1920x1032 into
+  2080x1128` — Electron's offscreen surface is capped below the canvas at the largest
+  pane and the page is upscaled. The baseline's bytes match (9,928,663), so it was so
+  then too; noted here, not this plan's to fix.
 
 ### Task 9: Verify acceptance criteria
 

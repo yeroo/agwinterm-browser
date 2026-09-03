@@ -205,6 +205,42 @@ test("the documented frame transports are exactly the ones the parser accepts", 
   }
 });
 
+/**
+ * The frame budget's comparison table names both transports, and the agwinterm
+ * build its `shm` rows were taken on is a commit rather than a description.
+ *
+ * The table is the one place the fast path's number lives beside the baseline's,
+ * and it is read by people deciding whether the verb is worth a host upgrade. A
+ * table with one transport in it has quietly become the baseline again; a build
+ * cited as "main" or "a dev build" cannot be checked out and re-run. `git ls-remote`
+ * is not available here, so the check is the shape of a short hash, not its
+ * existence — enough to catch the citation going missing or going vague.
+ */
+test("the frame budget's comparison names both transports and a real agwinterm commit", () => {
+  const doc = read("docs/design/02-frame-budget.md");
+  const comparison = doc.split("### The comparison")[1]?.split("\n## ")[0];
+  assert.ok(comparison, "02-frame-budget.md no longer has a '### The comparison' section");
+
+  const rows = comparison.split("\n").filter((line) => line.startsWith("|"));
+  for (const transport of ["file", "shm"]) {
+    assert.ok(
+      rows.some((row) => row.includes(`\`${transport}\``)),
+      `the comparison table has no ${transport} row`,
+    );
+  }
+
+  // The heading cites the build; the raw rows cite it too, so the same regex on
+  // the section as a whole finds it wherever it moved to.
+  assert.match(
+    comparison,
+    /Release host at `[0-9a-f]{7,40}`/,
+    "the comparison does not say which agwinterm commit the shm rows were taken on",
+  );
+  // And the build is not older than the verb, which is the one commit the whole
+  // plan hangs on.
+  assert.ok(doc.includes("`8230d0e`"), "the doc no longer names the commit the verb landed in");
+});
+
 // ---------------------------------------------------------------------------
 // The absences
 // ---------------------------------------------------------------------------

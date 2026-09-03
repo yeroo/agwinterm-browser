@@ -1,0 +1,51 @@
+# seq	canvas	span	bytes	encode_ms	write_ms	publish_ms	transport	copy_ms
+# transport is what carried the frame: file (image.frame) or shm (image.frameshm).
+# On file: bytes is the PNG, encode_ms and write_ms are the browser's, copy_ms is 0,
+# and publish_ms is the image.frame round trip: agwinterm's read + its brief
+# placement lock + the pipe. Its PNG decode is async and is not in here.
+# On shm: bytes is the pixels, and encode_ms and write_ms are 0.
+# copy_ms is the copy into the mapping (plus its creation, on a frame that needed a
+# new one); publish_ms is the image.frameshm round trip: agwinterm's copy out of the
+# slot + the placement lock + the pipe. There is no decode after it.
+# seq is the frame's number on its transport: the path's on file, the mapping's
+# seq on shm.
+1	1264x928	79x29	4691968	0.00	0.00	3.69	shm	1.96
+2	1264x928	79x29	4691968	0.00	0.00	3.73	shm	1.73
+3	1264x928	79x29	4691968	0.00	0.00	4.19	shm	0.40
+4	1264x928	79x29	4691968	0.00	0.00	3.77	shm	0.33
+5	1264x928	79x29	4691968	0.00	0.00	4.61	shm	0.40
+6	1264x928	79x29	4691968	0.00	0.00	5.17	shm	0.37
+7	1264x928	79x29	4691968	0.00	0.00	3.83	shm	0.34
+8	1264x928	79x29	4691968	0.00	0.00	3.91	shm	0.48
+9	1264x928	79x29	4691968	0.00	0.00	3.88	shm	0.30
+10	1264x928	79x29	4691968	0.00	0.00	4.00	shm	0.30
+11	1264x928	79x29	4691968	0.00	0.00	4.41	shm	0.36
+12	1264x928	79x29	4691968	0.00	0.00	4.36	shm	0.31
+13	1264x928	79x29	4691968	0.00	0.00	3.08	shm	0.32
+14	1264x928	79x29	4691968	0.00	0.00	2.98	shm	0.26
+15	1264x928	79x29	4691968	0.00	0.00	3.93	shm	0.34
+16	1264x928	79x29	4691968	0.00	0.00	3.79	shm	0.32
+17	1264x928	79x29	4691968	0.00	0.00	3.36	shm	0.27
+18	1264x928	79x29	4691968	0.00	0.00	6.07	shm	0.27
+19	1264x928	79x29	4691968	0.00	0.00	3.76	shm	0.31
+20	1264x928	79x29	4691968	0.00	0.00	3.68	shm	0.29
+21	1264x928	79x29	4691968	0.00	0.00	4.53	shm	0.29
+22	1264x928	79x29	4691968	0.00	0.00	4.42	shm	0.32
+23	1264x928	79x29	4691968	0.00	0.00	4.67	shm	0.34
+24	1264x928	79x29	4691968	0.00	0.00	5.17	shm	0.32
+25	1264x928	79x29	4691968	0.00	0.00	3.87	shm	0.32
+26	1264x928	79x29	4691968	0.00	0.00	3.93	shm	0.44
+27	1264x928	79x29	4691968	0.00	0.00	4.04	shm	0.35
+28	1264x928	79x29	4691968	0.00	0.00	3.70	shm	0.37
+29	1264x928	79x29	4691968	0.00	0.00	3.58	shm	0.27
+30	1264x928	79x29	4691968	0.00	0.00	4.77	shm	0.26
+31	1264x928	79x29	4691968	0.00	0.00	3.23	shm	0.29
+32	1264x928	79x29	4691968	0.00	0.00	4.21	shm	0.27
+33	1264x928	79x29	4691968	0.00	0.00	3.70	shm	0.28
+34	1264x928	79x29	4691968	0.00	0.00	3.48	shm	0.20
+35	1264x928	79x29	4691968	0.00	0.00	3.82	shm	0.25
+36	1264x928	79x29	4691968	0.00	0.00	5.02	shm	0.31
+37	1264x928	79x29	4691968	0.00	0.00	2.86	shm	0.24
+38	1264x928	79x29	4691968	0.00	0.00	2.76	shm	0.24
+39	1264x928	79x29	4691968	0.00	0.00	3.96	shm	0.22
+40	1264x928	79x29	4691968	0.00	0.00	2.73	shm	0.22
