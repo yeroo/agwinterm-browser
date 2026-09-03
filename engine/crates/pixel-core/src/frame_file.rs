@@ -63,7 +63,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::agwinterm::{ControlClient, Reply, push_quoted};
 use crate::canvas::Canvas;
-use crate::frame_shm::Transport;
+use crate::frame_shm::layout::Published;
+use crate::frame_shm::producer::Producer;
+use crate::frame_shm::{FRAMESHM_CMD, Transport, is_unknown_command};
 
 /// The verb. Shipped agwinterm, no host change required — which is what makes this
 /// the bring-up path rather than something that waits on the agwinterm plan.
@@ -87,6 +89,13 @@ pub(crate) const CLEAR_CMD: &str = "image.clear";
 /// (`em.ClearPlacements()`), so nothing is gained by a second id, and a rotating
 /// one would leave the emulator holding a texture per frame.
 const FRAME_IMAGE_ID: u32 = 1;
+
+/// How many `image.frameshm` refusals in a row take the fast path down for the
+/// session — for any reason other than `unknown command`, which takes it down on
+/// the first. A host that rejects the mapping is telling this producer something is
+/// wrong with it, and a producer that keeps re-sending a rejected frame at 26 fps
+/// is the failure mode this bound exists to avoid; an accepted frame resets it.
+const MAX_REFUSALS: usize = 3;
 
 /// How many recent frame files survive. One is the frame in flight; the rest cover
 /// [`ControlClient::request`]'s single replay, which re-sends the same path on a
@@ -538,11 +547,24 @@ impl BudgetLog {
 // The publisher
 // ---------------------------------------------------------------------------
 
-/// Writes frames to disk and points agwinterm at them.
+/// The fast path's standing for this session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Latched {
+    /// Nothing has ruled it out: the next frame under [`Transport::Auto`] or
+    /// [`Transport::Shm`] goes out as an `image.frameshm`.
+    Open,
+    /// Ruled out for the rest of the session — by `unknown command`, or by
+    /// [`MAX_REFUSALS`] refusals in a row — and not asked about again.
+    Unavailable,
+}
+
+/// Gets frames to agwinterm: over shared memory when the host has the verb, and as
+/// files it is pointed at otherwise.
 ///
 /// Owns nothing about *when* to draw — the engine decides that — and nothing about
-/// the pipe, which it borrows per frame. What it owns is the directory, the
-/// sequence that makes paths unique, and the retention that stops them piling up.
+/// the pipe, which it borrows per frame. What it owns is the fast path's producer
+/// and its standing, the directory, the sequence that makes paths unique, and the
+/// retention that stops them piling up.
 pub(crate) struct FramePublisher {
     dir: FrameDir,
     /// Monotonic, and never rewound by a failed frame: a path that has been handed
@@ -556,12 +578,22 @@ pub(crate) struct FramePublisher {
     /// Latched after the first frame the host declined to read, so a host that
     /// keeps declining is complained about once.
     warned_untransmitted: bool,
-    /// Which transport was asked for. This publisher only implements one of them;
-    /// the field is here so that asking for the other is answered out loud instead
-    /// of being silently ignored. See [`crate::frame_shm`].
+    /// Which transport was asked for. `File` never constructs a [`Producer`];
+    /// `Auto` and `Shm` try the fast path until [`Self::fast_path`] latches. See
+    /// [`crate::frame_shm`].
     transport: Transport,
-    /// Latched after the first frame that could not honour [`Self::transport`].
-    warned_transport: bool,
+    /// The fast path's standing for this session. See [`Latched`].
+    fast_path: Latched,
+    /// The fast path's producer: `None` until the first frame tries it, and `None`
+    /// again once the fast path is latched off, so a mapping no host will read is
+    /// not kept alive for the session.
+    producer: Option<Producer>,
+    /// The reason for every `image.frameshm` refusal since the last frame the host
+    /// accepted over it; [`MAX_REFUSALS`] of them latch the fast path off.
+    refusals: Vec<String>,
+    /// Whether the host has placed at least one frame from this publisher, by
+    /// either route. What [`Self::clear`] consults.
+    placed: bool,
     /// Where the per-frame cost breakdown goes, when [`BUDGET_ENV`] asked for one.
     budget: BudgetLog,
 }
@@ -575,7 +607,10 @@ impl FramePublisher {
             written: Vec::new(),
             warned_untransmitted: false,
             transport: Transport::from_env(env),
-            warned_transport: false,
+            fast_path: Latched::Open,
+            producer: None,
+            refusals: Vec::new(),
+            placed: false,
             budget: BudgetLog::open(env),
         })
     }
@@ -614,14 +649,17 @@ impl FramePublisher {
     /// A publisher that never published has nothing to take back, and asking anyway
     /// would clear a placement some *other* process owns.
     ///
-    /// The test is `written`, not `seq`: [`next_path`](Self::next_path) bumps `seq`
+    /// The test is `placed`, not `seq`: [`next_path`](Self::next_path) bumps `seq`
     /// for every frame *attempted*, so a first frame the host refused — `no session`,
     /// an unreadable frame directory, a write that failed — would leave `seq` at 1
     /// with nothing ever placed, and the clear that follows it out of
     /// [`Terminal::drop`](crate::terminal::Terminal) would take down whatever the
-    /// pane was already showing. `written` is pushed only in the `Ok` arm of
-    /// [`publish_encoded`](Self::publish_encoded), and [`reap`](Self::reap) keeps at
-    /// least [`RETAINED`] entries, so it is empty exactly when nothing was placed.
+    /// pane was already showing. `placed` is set only in the accepted arm of each
+    /// route — [`publish_encoded`](Self::publish_encoded) for the file,
+    /// [`publish_shm`](Self::publish_shm) for the mapping — and only past the
+    /// `frame:0/0` guard, so it is false exactly when nothing was placed. It is not
+    /// `written`, because a frame that went over shared memory wrote nothing and is
+    /// a placement all the same.
     ///
     /// A clear that did not land keeps the directory alive past [`FrameDir`]'s
     /// `Drop`. `Terminal::clear_frame` swallows this error on purpose — nothing on an
@@ -630,7 +668,7 @@ impl FramePublisher {
     /// here would answer "nothing was ever placed" to a pane that is still holding a
     /// page.
     pub(crate) fn clear(&mut self, client: &mut ControlClient) -> io::Result<()> {
-        if self.written.is_empty() {
+        if !self.placed {
             return Ok(());
         }
         match client.send(CLEAR_CMD, None).and_then(Reply::result) {
@@ -642,8 +680,11 @@ impl FramePublisher {
         }
     }
 
-    /// Encodes, writes and publishes one frame. Returns the bytes written, which is
-    /// what the frame budget is measured in.
+    /// Gets one frame to the host: over `image.frameshm` while the fast path is
+    /// open, and otherwise — or for a frame the fast path did not carry — encoded,
+    /// written and published as an `image.frame`. Returns the bytes that carried
+    /// the frame, the PNG's on the file path and the pixels' on the fast one, which
+    /// is what the frame budget is measured in.
     ///
     /// `span` is [`cell_span`]'s answer, passed in rather than computed here
     /// because the caller is the one holding the cell size and the pane size.
@@ -653,7 +694,11 @@ impl FramePublisher {
         canvas: &Canvas,
         span: (u32, u32),
     ) -> io::Result<usize> {
-        self.explain_transport();
+        if self.fast_path_open()
+            && let Some(bytes) = self.publish_shm(client, canvas, span)?
+        {
+            return Ok(bytes);
+        }
         let mut scratch = std::mem::take(&mut self.scratch);
         let started = Instant::now();
         let encoded = crate::profiler::span("frame.png", || encode_png(canvas, &mut scratch));
@@ -670,21 +715,138 @@ impl FramePublisher {
         result
     }
 
-    /// Says once, and only to a caller that asked for a transport this build does
-    /// not have, why its frames are going out the other way.
+    /// Whether the next frame is tried over `image.frameshm`.
+    fn fast_path_open(&self) -> bool {
+        self.transport != Transport::File && self.fast_path == Latched::Open
+    }
+
+    /// The fast path: the canvas into a slot of the mapping, then one
+    /// `image.frameshm` telling the host which slot.
     ///
-    /// Silence would be the worse answer: `TERMINAL_BROWSER_FRAME_TRANSPORT=shm`
-    /// followed by a working browser reads as "the fast path is on", which would
-    /// make every subsequent measurement wrong. Once per publisher, not per frame —
-    /// a frame loop that logs is a frame loop that is measuring itself.
-    fn explain_transport(&mut self) {
-        if self.warned_transport {
+    /// `Ok(Some(bytes))` is a placed frame. `Ok(None)` means this same frame must
+    /// go out over the file path instead — the host refused it, placed none of it,
+    /// or this side could not publish it — so that nothing is dropped; what the
+    /// refusal does to the fast path's standing is [`refused`](Self::refused)'s and
+    /// [`latch_unavailable`](Self::latch_unavailable)'s business. `Err` is the pipe
+    /// failing, which is a failed frame whichever path it took.
+    fn publish_shm(
+        &mut self,
+        client: &mut ControlClient,
+        canvas: &Canvas,
+        span: (u32, u32),
+    ) -> io::Result<Option<usize>> {
+        let producer = self.producer.get_or_insert_with(Producer::new);
+        let published = match crate::profiler::span("frame.shm", || producer.publish(canvas)) {
+            Ok(published) => published,
+            Err(err) => {
+                // Not the host's refusal but counted as one: a mapping this side
+                // cannot make — a size the contract does not admit, every name
+                // suffix taken — will not be made on the next frame either, and
+                // three of those in a row are the same "stop asking".
+                self.refused(format!("this side could not publish it ({err})"));
+                return Ok(None);
+            }
+        };
+        let name = producer
+            .current_name()
+            .expect("a publish that succeeded left its mapping in place")
+            .to_owned();
+        let bytes = canvas.pixels.len();
+        let args = frameshm_args(&name, published, span);
+        // This send returns only once the host has answered, and `publish` — this
+        // function's only caller — returns only after it. That await *is* the
+        // contract's one producer rule (spec § Producer obligations: a slot is not
+        // refilled until the reply for the frame that last used it has returned).
+        // With two slots, frame N+2 refills frame N's slot, and it cannot begin
+        // before frame N+1 was published, which cannot begin before this returned
+        // for frame N. There is no separate mechanism, and
+        // `each_publish_returns_only_after_its_own_reply` pins that this one holds.
+        // It is also what lets `Producer::publish` drop a resized-away mapping at
+        // once: nothing is outstanding by the time it runs.
+        match client.send(FRAMESHM_CMD, Some(&args))? {
+            Reply::Ok(result) => {
+                // `frame:0/0` is "nothing was placed" in an `ok:true` envelope,
+                // exactly as on the file path — and, on this path, the answer of a
+                // host that cannot open the mapping at all, on every frame. So it
+                // is not a placement, this frame goes out over the file so the
+                // pane is not left blank, and it counts with the refusals.
+                if !self.check_transmitted(&result, Source::Mapping(&name)) {
+                    self.refused(format!("the host placed none of it ({result})"));
+                    return Ok(None);
+                }
+                self.refusals.clear();
+                if !self.placed {
+                    self.dir.mark_pane(client.target());
+                    self.placed = true;
+                }
+                Ok(Some(bytes))
+            }
+            Reply::Err(message) if is_unknown_command(&message, FRAMESHM_CMD) => {
+                self.latch_unavailable(&message);
+                Ok(None)
+            }
+            Reply::Err(message) => {
+                self.refused(format!("the host refused it ({message})"));
+                Ok(None)
+            }
+        }
+    }
+
+    /// The host has never heard of the verb: the fast path is off for the session,
+    /// and the host is not asked again.
+    ///
+    /// Said once, at the level the transport earns. Under `Auto` the file path is
+    /// simply the path — every agwinterm release as of 2026-09 answers this, and
+    /// agliteterm always will — so it is information. Under `Shm` the caller asked
+    /// for something they are not getting, and silence would be the worse answer:
+    /// `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` followed by a working browser reads as
+    /// "the fast path is on", which would make every measurement after it wrong.
+    /// That is [`Transport::unavailable_reason`], and it is a warning.
+    fn latch_unavailable(&mut self, message: &str) {
+        self.fast_path = Latched::Unavailable;
+        // The host has answered, so no request is outstanding and the mapping can
+        // go: nothing will ever read it.
+        self.producer = None;
+        match self.transport.unavailable_reason() {
+            Some(reason) => crate::logging::warn("agwinterm", reason),
+            None => crate::logging::info(
+                "agwinterm",
+                format!(
+                    "this agwinterm does not implement `{FRAMESHM_CMD}` ({message}); \
+                     frames are going out over `{FRAME_CMD}` for the rest of the session"
+                ),
+            ),
+        }
+    }
+
+    /// The fast path did not carry this frame, for a reason that may not repeat.
+    ///
+    /// Each one is said, since the host's message is the only evidence of what is
+    /// wrong with the mapping. [`MAX_REFUSALS`] in a row latch the fast path off
+    /// and say which three; an accepted frame resets the count
+    /// ([`publish_shm`](Self::publish_shm)).
+    fn refused(&mut self, why: String) {
+        crate::logging::warn(
+            "agwinterm",
+            format!(
+                "`{FRAMESHM_CMD}` did not carry this frame: {why}; it is going out over \
+                 `{FRAME_CMD}` instead"
+            ),
+        );
+        self.refusals.push(why);
+        if self.refusals.len() < MAX_REFUSALS {
             return;
         }
-        self.warned_transport = true;
-        if let Some(reason) = self.transport.unavailable_reason() {
-            crate::logging::warn("agwinterm", reason);
-        }
+        crate::logging::warn(
+            "agwinterm",
+            format!(
+                "`{FRAMESHM_CMD}` was refused {MAX_REFUSALS} frames in a row ({}); frames \
+                 are going out over `{FRAME_CMD}` for the rest of the session",
+                self.refusals.join("; ")
+            ),
+        );
+        self.fast_path = Latched::Unavailable;
+        self.producer = None;
     }
 
     fn publish_encoded(
@@ -722,7 +884,7 @@ impl FramePublisher {
                 // publisher declines to do when `written` is empty. So it is treated
                 // exactly as a refusal is; `a_frame_the_host_refused_names_no_pane`
                 // already pins that for the `ok:false` spelling of the same state.
-                if !self.check_transmitted(result, &path) {
+                if !self.check_transmitted(&result, Source::File(&path)) {
                     let _ = fs::remove_file(&path);
                     return Ok(png.len());
                 }
@@ -733,11 +895,12 @@ impl FramePublisher {
                 // `0/0` for every frame — produced a full-rate budget file, and
                 // `docs/design/02-frame-budget.md`'s numbers are read off that file.
                 self.budget.record(cost);
-                // The first frame the host took is what makes this directory a
-                // placement on a named pane rather than a pid on disk. See
-                // [`PANE_FILE`].
-                if self.written.is_empty() {
+                // The first frame the host took, over either path, is what makes
+                // this directory a placement on a named pane rather than a pid on
+                // disk. See [`PANE_FILE`].
+                if !self.placed {
                     self.dir.mark_pane(client.target());
+                    self.placed = true;
                 }
                 self.written.push(path);
                 self.reap();
@@ -785,7 +948,8 @@ impl FramePublisher {
         }
     }
 
-    /// `image.frame` answers `frame:<placed>/<transmitted>`.
+    /// `image.frame` answers `frame:<placed>/<transmitted>`, and `image.frameshm`
+    /// mirrors it (spec § JSON args), so one reading serves both.
     ///
     /// Transmitted below placed means the host decided our bytes were the ones it
     /// already had, or could not read them — the two silent failures unique paths
@@ -804,8 +968,8 @@ impl FramePublisher {
     /// turns into ownership. A reply this build cannot parse counts as a placement:
     /// the alternative is a publisher that silently stops owning its frames the day
     /// the host's reply format grows a field.
-    fn check_transmitted(&mut self, result: String, path: &Path) -> bool {
-        let Some((placed, transmitted)) = frame_counts(&result) else {
+    fn check_transmitted(&mut self, result: &str, source: Source<'_>) -> bool {
+        let Some((placed, transmitted)) = frame_counts(result) else {
             return true;
         };
         if placed > 0 && transmitted >= placed {
@@ -820,10 +984,8 @@ impl FramePublisher {
         self.warned_untransmitted = true;
         let why = if placed == 0 {
             format!(
-                "agwinterm placed none of the frame ({result:?}): it could not open \
-                 {}, so the pane has been left blank. Check that the process hosting \
-                 the pane can read the frame directory",
-                path.display(),
+                "agwinterm placed none of the frame ({result:?}): {}",
+                source.unopenable()
             )
         } else {
             format!(
@@ -835,6 +997,32 @@ impl FramePublisher {
         };
         crate::logging::warn("agwinterm", why);
         placed > 0
+    }
+}
+
+/// What a frame's request pointed the host at, for the complaint that it could not
+/// open it. The two routes differ in nothing else about that reply.
+enum Source<'a> {
+    File(&'a Path),
+    Mapping(&'a str),
+}
+
+impl Source<'_> {
+    /// The half of the `frame:0/0` complaint that names what the host could not
+    /// open, and what to check.
+    fn unopenable(&self) -> String {
+        match self {
+            Self::File(path) => format!(
+                "it could not open {}, so the pane has been left blank. Check that the \
+                 process hosting the pane can read the frame directory",
+                path.display()
+            ),
+            Self::Mapping(name) => format!(
+                "it could not open the mapping {name}, so the pane has been left blank. \
+                 The name is in the `Local\\` namespace, so the process hosting the \
+                 pane must be in this logon session"
+            ),
+        }
     }
 }
 
@@ -892,14 +1080,46 @@ fn frame_args(path: &Path, span: (u32, u32)) -> String {
     args.push_str(&FRAME_IMAGE_ID.to_string());
     args.push_str(",\"path\":");
     push_quoted(&mut args, &path.to_string_lossy());
+    push_placement(&mut args, span);
+    args.push_str("}]}");
+    args
+}
+
+/// `{"images":[{…}]}` — the `args` of one `image.frameshm` request (spec § JSON
+/// args).
+///
+/// Every number is [`Published`]'s — the slot, the sequence and the descriptor the
+/// mapping was actually written with — so the request cannot disagree with the
+/// bytes. The placement is [`push_placement`]'s, the one `image.frame` sends: the
+/// two verbs are siblings, and a frame must land in the same place whichever
+/// carried it.
+fn frameshm_args(name: &str, published: Published, span: (u32, u32)) -> String {
+    let Published {
+        slot,
+        seq,
+        descriptor,
+    } = published;
+    let mut args = String::from("{\"images\":[{\"id\":");
+    args.push_str(&FRAME_IMAGE_ID.to_string());
+    args.push_str(",\"name\":");
+    push_quoted(&mut args, name);
+    args.push_str(&format!(
+        ",\"slot\":{slot},\"seq\":{seq},\"width\":{},\"height\":{},\"stride\":{},\"format\":{}",
+        descriptor.width, descriptor.height, descriptor.stride, descriptor.format
+    ));
+    push_placement(&mut args, span);
+    args.push_str("}]}");
+    args
+}
+
+/// The placement both verbs share: the pane's origin, spanning `span` cells.
+fn push_placement(args: &mut String, span: (u32, u32)) {
     // The pane's origin: the frame is the pane's whole content, and `cols`/`rows`
     // are what scale it there.
     args.push_str(",\"row\":0,\"col\":0,\"cols\":");
     args.push_str(&span.0.to_string());
     args.push_str(",\"rows\":");
     args.push_str(&span.1.to_string());
-    args.push_str("}]}");
-    args
 }
 
 /// Reads `frame:<placed>/<transmitted>` back out of the reply.
@@ -922,22 +1142,39 @@ mod tests {
 
     use super::*;
     use crate::agwinterm::fixture::{PipeServer, Turn};
+    use crate::frame_shm::TRANSPORT_VAR;
+    use crate::frame_shm::layout::{Descriptor, HEADER_LEN};
+    use crate::frame_shm::mapping::testing::Reader;
 
-    /// An empty environment, which is deliberately not `of_process()`: the suite
-    /// may itself be running in an agwinterm pane whose `TERMINAL_BROWSER_*` is
-    /// set, and a test that appended to the developer's budget file would be
+    /// `pairs` and nothing else, which is deliberately not `of_process()`: the
+    /// suite may itself be running in an agwinterm pane whose `TERMINAL_BROWSER_*`
+    /// is set, and a test that appended to the developer's budget file would be
     /// measuring itself.
-    fn no_budget() -> crate::terminal::SessionEnv {
-        crate::terminal::SessionEnv::of_session(Default::default())
+    fn env_of(pairs: &[(&str, &str)]) -> crate::terminal::SessionEnv {
+        crate::terminal::SessionEnv::of_session(
+            pairs
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        )
+    }
+
+    /// The file path, asked for by name, and no budget file.
+    ///
+    /// The tests below drive a fixture that answers `ok` to anything, and under
+    /// `auto` that fixture is a host with the fast path: the first request would
+    /// be an `image.frameshm` and the frame would never reach disk. Forcing the
+    /// file path is what `TERMINAL_BROWSER_FRAME_TRANSPORT=file` is for.
+    fn file_only() -> crate::terminal::SessionEnv {
+        env_of(&[(TRANSPORT_VAR, "file")])
     }
 
     /// The same, plus a budget file at `path`.
     fn budget_to(path: &Path) -> crate::terminal::SessionEnv {
-        crate::terminal::SessionEnv::of_session(
-            [(BUDGET_ENV.to_string(), path.display().to_string())]
-                .into_iter()
-                .collect(),
-        )
+        env_of(&[
+            (TRANSPORT_VAR, "file"),
+            (BUDGET_ENV, &path.display().to_string()),
+        ])
     }
 
     fn canvas(width: u32, height: u32) -> Canvas {
@@ -1064,7 +1301,7 @@ mod tests {
         const FRAMES: usize = 12;
         let server = PipeServer::answering(&ok_frame(), FRAMES);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         let mut seen = std::collections::HashSet::new();
@@ -1105,7 +1342,7 @@ mod tests {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
         let publisher = {
-            let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+            let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
             publisher
                 .publish(&mut client, &canvas(16, 16), (1, 1))
                 .expect("one frame");
@@ -1221,7 +1458,7 @@ mod tests {
     #[test]
     fn a_new_publisher_sweeps_before_it_writes() {
         // The sweep is on the construction path, which is the only place it runs.
-        let publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         assert!(
             publisher.dir().starts_with(std::env::temp_dir()),
             "frames go somewhere other than the temp dir, where the sweep looks",
@@ -1239,7 +1476,7 @@ mod tests {
     fn a_frame_the_directory_cannot_hold_is_reported_and_the_next_one_still_goes() {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         // The temp dir gets swept by the OS, by cleaners, and by another browser's
@@ -1270,7 +1507,7 @@ mod tests {
     fn a_frame_reaches_the_host_as_one_addressed_image_frame_request() {
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         let written = publisher
             .publish(&mut client, &canvas(80 * 9, 24 * 19), (80, 24))
@@ -1326,7 +1563,7 @@ mod tests {
     fn a_refused_frame_is_an_error_and_leaves_no_file_behind() {
         let server = PipeServer::always(r#"{"ok":false,"error":"sixel file not found"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         let err = publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -1392,7 +1629,7 @@ mod tests {
         // path — which is why the retention window is more than one frame deep.
         let server = PipeServer::scripted(vec![Turn::Hangup, Turn::Reply(ok_frame())]);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -1420,7 +1657,7 @@ mod tests {
         let mark = log_mark();
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:1/0"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
 
         for _ in 0..3 {
@@ -1468,7 +1705,7 @@ mod tests {
         // arm returns before the complaint. See [`SHARED_LOG`].
         let server = PipeServer::always(r#"{"ok":true,"result":"shown"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
 
         publisher
@@ -1516,7 +1753,7 @@ mod tests {
         let mark = log_mark();
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         for _ in 0..3 {
             publisher
@@ -1559,7 +1796,7 @@ mod tests {
     fn the_way_out_takes_the_picture_with_it() {
         let server = PipeServer::answering(&ok_frame(), 2);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -1580,7 +1817,7 @@ mod tests {
         // down on its way out.
         let server = PipeServer::answering(&ok_frame(), 1);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         publisher.clear(&mut client).expect("nothing to do");
 
@@ -1604,7 +1841,7 @@ mod tests {
             Turn::Reply(r#"{"ok":false,"error":"no session"}"#.to_owned()),
         ]);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -1628,7 +1865,7 @@ mod tests {
             Turn::Reply(r#"{"ok":false,"error":"no session"}"#.to_owned()),
         ]);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         publisher
@@ -1653,7 +1890,7 @@ mod tests {
         // and "cleared" different reports rather than the same one twice.
         let server = PipeServer::answering(&ok_frame(), 2);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let dir = publisher.dir().to_owned();
 
         publisher
@@ -1674,7 +1911,7 @@ mod tests {
         // evidence. See [`PANE_FILE`].
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
         let expected = format!(
             "{}\n{}\n",
@@ -1702,7 +1939,7 @@ mod tests {
         // pane painted and unrecoverable.
         let server = PipeServer::always(&ok_frame());
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
         let expected = format!(
             "{}\n{}\n",
@@ -1729,7 +1966,7 @@ mod tests {
         // a directory whose frames never reached a pane at all.
         let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
 
         publisher
@@ -1747,7 +1984,7 @@ mod tests {
         // exited would have cleared that placement on the way out.
         let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
@@ -1778,7 +2015,7 @@ mod tests {
         // directory of whoever did.
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
         let marker = publisher.dir().join(PANE_FILE);
 
         publisher
@@ -1806,7 +2043,7 @@ mod tests {
         // its exit takes down the placement whoever *can* reach the directory made.
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
         let mut client = server.client();
-        let mut publisher = FramePublisher::new(&no_budget()).expect("a temp directory");
+        let mut publisher = FramePublisher::new(&file_only()).expect("a temp directory");
 
         for _ in 0..3 {
             publisher
@@ -1993,18 +2230,11 @@ mod tests {
         fs::remove_dir_all(&scratch).ok();
     }
 
-    // -- the transport that is not there yet -------------------------------
+    // -- the transport, and the host that lacks the fast one ----------------
 
     /// An empty environment plus a forced transport.
     fn transport_of(value: &str) -> crate::terminal::SessionEnv {
-        crate::terminal::SessionEnv::of_session(
-            [(
-                crate::frame_shm::TRANSPORT_VAR.to_string(),
-                value.to_string(),
-            )]
-            .into_iter()
-            .collect(),
-        )
+        env_of(&[(TRANSPORT_VAR, value)])
     }
 
     /// The log store is one per process and `cargo test` runs these in threads, so
@@ -2030,25 +2260,74 @@ mod tests {
             .map_or(0, |entry| entry.seq + 1)
     }
 
+    /// The *warnings* since `mark` that mention `needle`. Warnings only: a host
+    /// without the fast path is the ordinary case under `auto`, and the line that
+    /// records it is information, not an apology.
     fn warnings_since(mark: u64, needle: &str) -> Vec<String> {
         crate::logging::entries_after(mark)
             .into_iter()
+            .filter(|entry| entry.level == crate::logging::LogLevel::Warn)
             .filter(|entry| entry.message.contains(needle))
             .map(|entry| entry.message)
             .collect()
     }
 
+    /// The host's literal refusal of a verb it lacks, as `Reply::parse` receives
+    /// it: .NET escapes the apostrophes (`agwinterm.rs` has the same literal for
+    /// `session.metrics`).
+    fn unknown_verb() -> &'static str {
+        r#"{"ok":false,"error":"unknown command \u0027image.frameshm\u0027"}"#
+    }
+
+    fn refusal(why: &str) -> String {
+        format!(r#"{{"ok":false,"error":"{why}"}}"#)
+    }
+
+    /// A fixture answering `lines`, one per request, in order.
+    fn scripted(lines: &[&str]) -> PipeServer {
+        PipeServer::scripted(
+            lines
+                .iter()
+                .map(|line| Turn::Reply((*line).to_owned()))
+                .collect(),
+        )
+    }
+
+    /// The verb of every request the fixture saw, in order.
+    fn verbs(server: &PipeServer) -> Vec<String> {
+        server
+            .requests()
+            .iter()
+            .map(|request| {
+                let rest = request
+                    .strip_prefix(r#"{"cmd":""#)
+                    .expect("a request opens with its verb");
+                rest[..rest.find('"').expect("the verb closes")].to_owned()
+            })
+            .collect()
+    }
+
+    /// The name of the mapping the publisher's last fast-path frame went into.
+    fn mapping_of(publisher: &FramePublisher) -> String {
+        publisher
+            .producer
+            .as_ref()
+            .and_then(Producer::current_name)
+            .expect("the fast path has a mapping")
+            .to_owned()
+    }
+
     #[test]
-    fn asking_for_the_fast_path_still_publishes_over_the_file_one() {
-        // The fallback the plan asks for, in the only form available while
-        // `image.frameshm`'s layout is unpublished: the frame goes out, and it goes
-        // out as an `image.frame`. A request for a transport this build lacks must
-        // never cost a frame.
+    fn asking_for_a_fast_path_the_host_lacks_still_publishes_over_the_file_one() {
+        // Every agwinterm release as of 2026-09, and agliteterm for good: the first
+        // request is answered `unknown command`, and from then on the frames go
+        // out as `image.frame` — including the one that was refused. A request for
+        // a transport the host lacks must never cost a frame.
         //
         // This one reads no log, but publishing under `shm` *writes* one, and a
         // reader holding the lock would otherwise count this line as its own.
         let _alone = alone_with_the_log();
-        let server = PipeServer::answering(&ok_frame(), 3);
+        let server = scripted(&[unknown_verb(), &ok_frame(), &ok_frame(), &ok_frame()]);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
 
@@ -2057,13 +2336,20 @@ mod tests {
                 .publish(&mut client, &canvas(24, 8), (2, 1))
                 .expect("the frame goes out on the path that exists");
         }
-        assert!(
-            server
-                .requests()
-                .iter()
-                .all(|request| request.contains(FRAME_CMD)),
-            "a request went out under a verb this build cannot send: {:?}",
-            server.requests(),
+        assert_eq!(
+            verbs(&server),
+            [
+                "image.frameshm",
+                "image.frame",
+                "image.frame",
+                "image.frame"
+            ],
+            "asked once, then never again",
+        );
+        assert_eq!(
+            files_in(publisher.dir()).len(),
+            3,
+            "every frame reached disk"
         );
     }
 
@@ -2073,7 +2359,8 @@ mod tests {
         // the budget file would be measuring the logging.
         let _alone = alone_with_the_log();
         let mark = log_mark();
-        let server = PipeServer::answering(&ok_frame(), 5);
+        let ok = ok_frame();
+        let server = scripted(&[unknown_verb(), &ok, &ok, &ok, &ok, &ok]);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
 
@@ -2083,17 +2370,29 @@ mod tests {
                 .expect("every frame");
         }
 
-        let said = warnings_since(mark, crate::frame_shm::FRAMESHM_CMD);
+        let said = warnings_since(mark, FRAMESHM_CMD);
         assert_eq!(said.len(), 1, "said {} times: {said:?}", said.len());
+        assert!(
+            said[0].contains("unknown command"),
+            "the reason is the host's answer, not a missing layout: {}",
+            said[0]
+        );
     }
 
     #[test]
     fn the_path_that_exists_is_never_apologised_for() {
-        // `auto` and `file` both get what they asked for, so neither may log.
+        // `file` gets what it asked for, and `auto` asked for whichever works, so
+        // neither may warn — not even on the host that lacks the fast path, where
+        // the line that records the choice is information.
         let _alone = alone_with_the_log();
         for value in ["file", "auto", ""] {
             let mark = log_mark();
-            let server = PipeServer::answering(&ok_frame(), 2);
+            let ok = ok_frame();
+            let server = if value == "file" {
+                scripted(&[&ok, &ok])
+            } else {
+                scripted(&[unknown_verb(), &ok, &ok, &ok])
+            };
             let mut client = server.client();
             let mut publisher =
                 FramePublisher::new(&transport_of(value)).expect("a temp directory");
@@ -2102,7 +2401,7 @@ mod tests {
                     .publish(&mut client, &canvas(16, 16), (1, 1))
                     .expect("every frame");
             }
-            let said = warnings_since(mark, crate::frame_shm::FRAMESHM_CMD);
+            let said = warnings_since(mark, FRAMESHM_CMD);
             assert!(said.is_empty(), "{value:?} was warned about: {said:?}");
         }
     }
@@ -2114,18 +2413,360 @@ mod tests {
         // is in play matters most.
         let _alone = alone_with_the_log();
         let mark = log_mark();
-        let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
+        let server = scripted(&[unknown_verb(), &refusal("no session")]);
         let mut client = server.client();
         let mut publisher = FramePublisher::new(&transport_of("shm")).expect("a temp directory");
 
         publisher
             .publish(&mut client, &canvas(16, 16), (1, 1))
-            .expect_err("the host refuses");
+            .expect_err("the host refuses the file frame too");
 
+        assert_eq!(warnings_since(mark, FRAMESHM_CMD).len(), 1);
+    }
+
+    // -- the fast path ---------------------------------------------------------
+
+    #[test]
+    fn a_frame_goes_out_as_one_image_frameshm_request_repeating_its_slot() {
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        let bytes = publisher
+            .publish(&mut client, &canvas(1920, 1080), (120, 30))
+            .expect("the host takes it");
         assert_eq!(
-            warnings_since(mark, crate::frame_shm::FRAMESHM_CMD).len(),
-            1
+            bytes,
+            1920 * 1080 * 4,
+            "what carried the frame is the pixels copied"
         );
+
+        let name = mapping_of(&publisher);
+        assert!(
+            name.starts_with(&format!(
+                r"Local\agwinterm-frame-browser-{}-",
+                std::process::id()
+            )),
+            "{name}"
+        );
+        let mut quoted = String::new();
+        push_quoted(&mut quoted, &name);
+        assert_eq!(
+            server.requests(),
+            vec![format!(
+                r#"{{"cmd":"image.frameshm","target":"s3","args":{{"images":[{{"id":1,"name":{quoted},"slot":1,"seq":1,"width":1920,"height":1080,"stride":7680,"format":32,"row":0,"col":0,"cols":120,"rows":30}}]}}}}"#
+            )],
+        );
+        // No encode and no file: the frame is in the mapping, published.
+        assert_eq!(files_in(publisher.dir()), Vec::<String>::new());
+        let reader = Reader::open(&name, HEADER_LEN).expect("the mapping is alive");
+        assert_eq!(reader.ready(), 1, "and its header says the frame is there");
+    }
+
+    #[test]
+    fn frameshm_args_is_the_specs_json_and_places_like_image_frame() {
+        let published = Published {
+            slot: 1,
+            seq: 7,
+            descriptor: Descriptor {
+                width: 1920,
+                height: 1080,
+                stride: 7680,
+                format: 32,
+            },
+        };
+        let args = frameshm_args(
+            r"Local\agwinterm-frame-browser-4812-0",
+            published,
+            (120, 30),
+        );
+        assert_eq!(
+            args,
+            r#"{"images":[{"id":1,"name":"Local\\agwinterm-frame-browser-4812-0","slot":1,"seq":7,"width":1920,"height":1080,"stride":7680,"format":32,"row":0,"col":0,"cols":120,"rows":30}]}"#
+        );
+        // The two verbs are siblings: the placement is one function, so a frame
+        // lands in the same place whichever carried it.
+        let placement = r#","row":0,"col":0,"cols":120,"rows":30}]}"#;
+        assert!(args.ends_with(placement), "{args}");
+        let file = frame_args(Path::new(r"C:\f\frame-00000001.png"), (120, 30));
+        assert!(file.ends_with(placement), "{file}");
+    }
+
+    #[test]
+    fn a_host_without_the_verb_latches_the_file_path_and_drops_no_frame() {
+        let _alone = alone_with_the_log();
+        let server = scripted(&[unknown_verb(), &ok_frame(), &ok_frame()]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the same frame goes out over the file");
+        assert_eq!(verbs(&server), ["image.frameshm", "image.frame"]);
+        assert_eq!(
+            files_in(publisher.dir()).len(),
+            1,
+            "the frame the host would not take over shm reached disk"
+        );
+        assert_eq!(publisher.fast_path, Latched::Unavailable);
+        assert!(
+            publisher.producer.is_none(),
+            "a mapping no host will read is not kept alive"
+        );
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the next frame");
+        assert_eq!(
+            verbs(&server),
+            ["image.frameshm", "image.frame", "image.frame"],
+            "the host is not asked again"
+        );
+    }
+
+    #[test]
+    fn a_refusal_for_any_other_reason_costs_no_frame_and_does_not_latch() {
+        // `no such pane`, a bad slot, a mapping the host could not open: real
+        // errors about this frame, said out loud, and the frame goes out over the
+        // file — but one of them is not a capability gap, and the next frame asks
+        // again.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = scripted(&[&refusal("no such pane"), &ok_frame(), &ok_frame()]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("over the file");
+        assert_eq!(verbs(&server), ["image.frameshm", "image.frame"]);
+        assert_eq!(publisher.fast_path, Latched::Open);
+        assert_eq!(publisher.refusals.len(), 1);
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("over the mapping");
+        assert_eq!(
+            verbs(&server),
+            ["image.frameshm", "image.frame", "image.frameshm"],
+            "the fast path is tried again"
+        );
+        assert!(
+            publisher.refusals.is_empty(),
+            "an accepted frame resets the count"
+        );
+        let said = warnings_since(mark, "no such pane");
+        assert_eq!(said.len(), 1, "the host's message is logged: {said:?}");
+    }
+
+    #[test]
+    fn three_refusals_in_a_row_latch_the_fast_path_off_and_say_which() {
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let ok = ok_frame();
+        let server = scripted(&[
+            &refusal("no such pane"),
+            &ok,
+            &refusal("slot 0 overruns the view"),
+            &ok,
+            &refusal("bad magic"),
+            &ok,
+            &ok,
+        ]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        for _ in 0..4 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("every frame goes out");
+        }
+        assert_eq!(
+            verbs(&server),
+            [
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+                "image.frame",
+                "image.frame",
+            ],
+            "three tries, then the file path without asking"
+        );
+        assert_eq!(publisher.fast_path, Latched::Unavailable);
+        assert!(publisher.producer.is_none());
+        let said = warnings_since(mark, "3 frames in a row");
+        assert_eq!(said.len(), 1, "{said:?}");
+        for why in ["no such pane", "slot 0 overruns the view", "bad magic"] {
+            assert!(
+                said[0].contains(why),
+                "the line names all three: {}",
+                said[0]
+            );
+        }
+    }
+
+    #[test]
+    fn an_accepted_frame_resets_the_refusal_count() {
+        let _alone = alone_with_the_log();
+        let ok = ok_frame();
+        let server = scripted(&[
+            &refusal("a"),
+            &ok,
+            &refusal("b"),
+            &ok,
+            &ok,
+            &refusal("c"),
+            &ok,
+            &refusal("d"),
+            &ok,
+            &ok,
+        ]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        for _ in 0..6 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("every frame goes out");
+        }
+        assert_eq!(
+            verbs(&server),
+            [
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+                "image.frame",
+                "image.frameshm",
+            ],
+        );
+        assert_eq!(
+            publisher.fast_path,
+            Latched::Open,
+            "four refusals, never three in a row"
+        );
+    }
+
+    #[test]
+    fn the_file_transport_sends_only_image_frame_and_builds_no_mapping() {
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("file")).expect("a temp directory");
+
+        for _ in 0..3 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("every frame");
+        }
+        assert_eq!(verbs(&server), ["image.frame"; 3]);
+        assert!(
+            publisher.producer.is_none(),
+            "`file` never constructs a producer"
+        );
+        assert_eq!(files_in(publisher.dir()).len(), 3);
+    }
+
+    #[test]
+    fn each_publish_returns_only_after_its_own_reply() {
+        // The contract's one producer rule (spec § Producer obligations): a slot is
+        // not refilled until the reply for the frame that last used it has
+        // returned. With two slots, frame N+2 refills frame N's slot, and it cannot
+        // begin before frame N+1 was published, which cannot begin before `publish`
+        // returned for frame N — so the rule is exactly "publish does not return
+        // before the host has answered". A host that takes its time makes that
+        // visible: every publish lasts at least the host's delay, and the fixture
+        // never holds a request it has not yet answered when the next one arrives.
+        let delay = Duration::from_millis(40);
+        let server = PipeServer::scripted(vec![Turn::ReplyAfter(delay, ok_frame()); 3]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+        let frame = canvas(16, 16);
+
+        for seq in 1..=3u64 {
+            let started = Instant::now();
+            publisher
+                .publish(&mut client, &frame, (1, 1))
+                .expect("the host answers, slowly");
+            assert!(
+                started.elapsed() >= delay,
+                "frame {seq} returned before its reply"
+            );
+            let reader = Reader::open(&mapping_of(&publisher), HEADER_LEN).expect("alive");
+            assert_eq!(reader.ready(), seq, "the mapping says frame {seq} is there");
+            assert_eq!(
+                server.requests().len() as u64,
+                seq,
+                "one request per frame, and none ahead of a reply"
+            );
+        }
+        let requests = server.requests();
+        for (request, slot_seq) in requests.iter().zip([
+            r#""slot":1,"seq":1"#,
+            r#""slot":0,"seq":2"#,
+            r#""slot":1,"seq":3"#,
+        ]) {
+            assert!(request.contains(slot_seq), "{request}");
+        }
+    }
+
+    #[test]
+    fn a_frame_the_host_placed_none_of_over_shm_goes_out_over_the_file() {
+        // `frame:0/0` on this path is a host that cannot open the mapping — which
+        // it will answer on every frame — so beyond not being a placement, it is a
+        // refusal: this frame goes out over the file, and it counts.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = scripted(&[r#"{"ok":true,"result":"frame:0/0"}"#, &ok_frame()]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the frame goes out, over the file");
+        assert_eq!(verbs(&server), ["image.frameshm", "image.frame"]);
+        assert_eq!(publisher.refusals.len(), 1, "counted with the refusals");
+        assert!(
+            publisher.dir().join(PANE_FILE).exists(),
+            "the file frame is the placement that names the pane"
+        );
+        let said = warnings_since(mark, "placed none of the frame");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("mapping"),
+            "the complaint names the mapping, not a path: {}",
+            said[0]
+        );
+    }
+
+    #[test]
+    fn a_shm_placement_is_owned_exactly_as_a_file_one() {
+        // `pane-clear` ownership is about placements, not files: a frame that went
+        // over the mapping names the pane it landed on, and is taken back on the
+        // way out.
+        let server = scripted(&[&ok_frame(), r#"{"ok":true,"result":"ok"}"#]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+        let expected = format!(
+            "{}\n{}\n",
+            client.target().pipe(),
+            client.target().session()
+        );
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the frame");
+        let marker = publisher.dir().join(PANE_FILE);
+        assert_eq!(fs::read_to_string(&marker).expect("a marker"), expected);
+        assert!(publisher.placed);
+
+        publisher.clear(&mut client).expect("the clear lands");
+        assert_eq!(verbs(&server), ["image.frameshm", "image.clear"]);
     }
 
     /// A directory of this test's own, under the temp dir.

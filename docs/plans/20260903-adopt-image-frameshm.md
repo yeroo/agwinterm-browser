@@ -275,41 +275,50 @@ talks to.
 
 ### Task 5: The request and the fallback — in `frame_file.rs`
 
-- [ ] `frameshm_args(name, published, span) -> String` beside `frame_args`, using
+- [x] `frameshm_args(name, published, span) -> String` beside `frame_args`, using
       `push_quoted`, producing the spec's JSON: `images: [{ id, name, slot, seq, width,
       height, stride, format, row, col, cols, rows }]` with `row`/`col` and the span exactly as
       `frame_args` sends them (the two verbs are siblings and the placement must not differ)
-- [ ] add a `FramePublisher::publish_shm` route: when `transport` is `Auto` or `Shm` and the
+- [x] add a `FramePublisher::publish_shm` route: when `transport` is `Auto` or `Shm` and the
       fast path has not been latched off, `producer.publish(canvas)` then
       `client.send(FRAMESHM_CMD, Some(&frameshm_args(..)))`, awaiting the `Reply` before
       returning — this await **is** the slot-reuse rule; leave a comment there that says so and
       points at the Task 5 test
-- [ ] on `Reply::Err` where `is_unknown_command(msg, FRAMESHM_CMD)`: set a session latch
+- [x] on `Reply::Err` where `is_unknown_command(msg, FRAMESHM_CMD)`: set a session latch
       `fast_path = Latched::Unavailable`, log once (through the same warning channel the
       existing `warnings_since` tests read), and send **this same frame** through the file
       path so nothing is dropped; every later frame takes the file path without asking again
-- [ ] on any other `Reply::Err` (validation, no such pane): send this frame through the file
+- [x] on any other `Reply::Err` (validation, no such pane): send this frame through the file
       path and log the host's message; count consecutive refusals and latch the fast path off
       after 3, with a log line saying which three; a success resets the count. A host that
       rejects the mapping is telling this producer something is wrong with it, and a producer
       that keeps re-sending a rejected frame at 26 fps is the failure mode to avoid
-- [ ] `Transport::File` never constructs a `Producer`; `Transport::Shm` on a latched session
+- [x] `Transport::File` never constructs a `Producer`; `Transport::Shm` on a latched session
       logs `unavailable_reason` once per session — rewrite `unavailable_reason`'s text: the
       reason is now "the host answered unknown command", not "the layout is not published"
-- [ ] `check_transmitted` applies to the shm reply exactly as to the file reply: `frame:0/0`
+- [x] `check_transmitted` applies to the shm reply exactly as to the file reply: `frame:0/0`
       is not a placement; a successful shm frame marks the pane (`mark_pane`) on the first
       accepted frame just as the file path does, since `pane-clear` ownership is about
       placements, not files
-- [ ] write tests with the recording fake client: the exact JSON for a 1920×1080 frame at
+- [x] write tests with the recording fake client: the exact JSON for a 1920×1080 frame at
       span (120, 30) with `id`, `slot`, `seq`, `stride 7680`, `format 32`; an `unknown command`
       reply latches, the same frame arrives as an `image.frame`, and the *next* frame sends
       no `image.frameshm` at all; a `no such pane` reply does not latch, and three in a row do;
       a success after two refusals resets the counter; `Transport::File` sends only
       `image.frame` and creates no mapping; the fake client asserts it never sees a second
       `image.frameshm` before it has answered the first (the slot-reuse rule, pinned)
-- [ ] extend the three existing `warnings_since` tests so that `shm` on a host that lacks
+- [x] extend the three existing `warnings_since` tests so that `shm` on a host that lacks
       the verb warns exactly once, and `file` still never warns
-- [ ] run tests — must pass before Task 6
+- [x] run tests — must pass before Task 6
+- ➕ as built: a `frame:0/0` on the shm reply is not a placement *and* counts as a refusal —
+  this frame goes out over the file, three in a row latch — because on this path it is the
+  answer of a host that cannot open the mapping, which it gives on every frame. A mapping this
+  side cannot create (a size the contract does not admit) is counted the same way.
+- ➕ as built: `unknown command` is logged at `info` under `auto` (the file path is simply the
+  path on every release as of 2026-09) and as the `unavailable_reason` warning under `shm`;
+  the tests' `warnings_since` reads warnings only. The budget row for a shm frame is Task 6's.
+- ➕ the file-path tests now ask for `file` by name (`file_only()`): under `auto` a fixture that
+  answers `ok` to anything is a host with the fast path, and the frame never reaches disk.
 
 ### Task 6: Budget accounting and teardown
 

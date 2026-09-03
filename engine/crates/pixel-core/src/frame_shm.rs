@@ -104,17 +104,20 @@ impl Transport {
     /// Returns `None` for [`Transport::Auto`] and [`Transport::File`]: neither asked
     /// for anything it did not get, and a line of log per frame about a transport
     /// nobody requested is noise. Only an explicit `shm` earns an explanation, and
-    /// its caller is expected to say it once.
+    /// its caller is expected to say it once — at the moment the host answers
+    /// `unknown command` and the fast path is latched off for the session
+    /// (`FramePublisher::latch_unavailable` in `frame_file.rs`).
     pub(crate) fn unavailable_reason(self) -> Option<String> {
         match self {
             Self::Auto | Self::File => None,
             Self::Shm => Some(format!(
-                "{TRANSPORT_VAR}=shm asked for `{FRAMESHM_CMD}`, which this build \
-                 does not implement: its mapping layout is not published yet \
-                 (agwinterm/docs/specs/image-frameshm.md does not exist, and \
-                 agwinterm's own plan has not defined the header). Frames are going \
-                 out over `image.frame` instead — the picture is the same, the cost \
-                 is the one in docs/design/02-frame-budget.md"
+                "{TRANSPORT_VAR}=shm asked for `{FRAMESHM_CMD}`, which this host does \
+                 not implement: it answered `unknown command`. The verb (agwinterm's \
+                 docs/specs/image-frameshm.md) is on agwinterm `main` from 8230d0e \
+                 and in no release as of 2026-09, and agliteterm never has it. Frames \
+                 are going out over `image.frame` for the rest of this session — the \
+                 picture is the same, the cost is the one in \
+                 docs/design/02-frame-budget.md"
             )),
         }
     }
@@ -150,12 +153,8 @@ pub(crate) fn is_unknown_command(message: &str, cmd: &str) -> bool {
 /// Nothing in here touches Win32, so the layout compiles and is tested on every
 /// platform; the mapping that carries it is Windows-only and lives beside it.
 ///
-/// Consumers arrive task by task (the mapping, then the producer, then the request
-/// in `frame_file.rs`); until they do the module is reachable only from its tests.
-#[allow(
-    dead_code,
-    reason = "the request that repeats a published frame's layout lands in a later task"
-)]
+/// The mapping and the producer build on it here; the request that repeats a
+/// published frame's layout to the host is `frame_file.rs`'s.
 pub(crate) mod layout {
     use std::io;
     use std::ops::Range;
@@ -245,6 +244,7 @@ pub(crate) mod layout {
         }
 
         /// The header's `slotStride`.
+        #[cfg(test)]
         pub(crate) fn slot_stride(&self) -> usize {
             self.slot_stride
         }
@@ -647,10 +647,6 @@ pub(crate) mod layout {
 /// Reachable only from [`producer`] and the tests until `frame_file.rs` sends a
 /// frame this way; the `dead_code` allowance goes with the one on [`layout`].
 #[cfg(windows)]
-#[allow(
-    dead_code,
-    reason = "the request that sends a published frame lands in a later task"
-)]
 pub(crate) mod mapping {
     use std::io;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1472,10 +1468,6 @@ pub(crate) mod mapping {
 /// A publish that fails leaves the producer as it was: `seq` un-bumped, the
 /// previous mapping in place. The next attempt reuses the same `seq`.
 #[cfg(windows)]
-#[allow(
-    dead_code,
-    reason = "the request that sends a published frame lands in a later task"
-)]
 pub(crate) mod producer {
     use std::io;
 
@@ -1581,6 +1573,7 @@ pub(crate) mod producer {
         }
 
         /// The sequence of the last frame published, `0` before the first.
+        #[cfg(test)]
         pub(crate) fn seq(&self) -> u64 {
             self.seq
         }
