@@ -294,4 +294,7 @@ with a shell — read it like you would read a `Makefile`.
 
 ## Licence
 
-Upstream's, unchanged — see [`LICENSE`](LICENSE).
+MIT. [`LICENSE`](LICENSE) is upstream's notice, byte for byte — redistributing the vendored code
+requires it, and `tools/vendor-check` refuses a change to it. The port's own work — the engine's
+Windows tty layer, the CLI and store changes, the `tools/` tree — is
+Copyright (c) 2026 Boris Kudriashov, under the same terms.
