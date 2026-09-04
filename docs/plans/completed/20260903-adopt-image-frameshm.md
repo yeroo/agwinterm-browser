@@ -6,14 +6,14 @@ The browser publishes every frame to agwinterm over `image.frame`: PNG-encode th
 it to a file under `%LOCALAPPDATA%`, name the path over the control pipe, and let the host read
 and decode it. At the largest pane measured that costs **38 ms per frame, 26 fps**, of which
 **27.6 ms** is the encode and the write — work that exists only because the transport is a file
-([`02-frame-budget.md`](../design/02-frame-budget.md)).
+([`02-frame-budget.md`](../../design/02-frame-budget.md)).
 
 agwinterm now implements `image.frameshm` (agwinterm `8230d0e`, 2026-09-03): a named
 shared-memory mapping carrying raw 4-bpp pixels, with the placement machinery of `image.frame`
 unchanged. Its contract is published and versioned —
 [`docs/specs/image-frameshm.md`](https://github.com/yeroo/agwinterm/blob/main/docs/specs/image-frameshm.md),
 layout version 1 — and it is the contract this tree's own design section insisted on before a
-producer could be written ([`00-port-brief.md` § Chosen transport](../design/00-port-brief.md#chosen-transport)).
+producer could be written ([`00-port-brief.md` § Chosen transport](../../design/00-port-brief.md#chosen-transport)).
 The gate was honoured; this plan is what it was gating.
 
 This plan adds the producer. After it:

@@ -543,7 +543,11 @@ pub(crate) mod layout {
 
             let bytes = 1080 * 7680;
             assert!(layout.slot_stride() >= bytes, "a slot holds its frame");
-            assert_eq!(layout.slot_stride() % PAGE, 0, "slots sit whole pages apart");
+            assert_eq!(
+                layout.slot_stride() % PAGE,
+                0,
+                "slots sit whole pages apart"
+            );
             assert!(
                 layout.slot_stride() - bytes < PAGE,
                 "and no more than a page of padding"
