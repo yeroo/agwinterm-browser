@@ -1,0 +1,50 @@
+# seq	canvas	span	bytes	encode_ms	write_ms	publish_ms	transport	copy_ms
+# transport is what carried the frame: file (image.frame) or shm (image.frameshm).
+# On file: bytes is the PNG, encode_ms and write_ms are the browser's, copy_ms is 0,
+# and publish_ms is the image.frame round trip: agwinterm's read + its brief
+# placement lock + the pipe. Its PNG decode is async and is not in here.
+# On shm: bytes is the pixels, and encode_ms and write_ms are 0.
+# copy_ms is the copy into the mapping (plus its creation, on a frame that needed a
+# new one); publish_ms is the image.frameshm round trip: agwinterm's copy out of the
+# slot + the placement lock + the pipe. There is no decode after it.
+# seq is the frame's number on its transport: the path's on file, the mapping's
+# seq on shm.
+0	790x580	79x29	515737	4.43	0.50	5.44	file	0.00
+1	790x580	79x29	1833583	5.84	0.93	5.69	file	0.00
+2	790x580	79x29	1833583	4.65	1.28	5.47	file	0.00
+3	790x580	79x29	1833583	4.33	0.87	5.74	file	0.00
+4	790x580	79x29	1833583	4.64	0.90	6.05	file	0.00
+5	790x580	79x29	1833583	4.76	0.90	5.83	file	0.00
+6	790x580	79x29	1833583	4.27	0.96	6.70	file	0.00
+7	790x580	79x29	1833583	4.12	3.03	6.18	file	0.00
+8	790x580	79x29	1833583	4.10	0.83	5.01	file	0.00
+9	790x580	79x29	1833583	3.94	0.77	6.12	file	0.00
+10	790x580	79x29	1833583	4.51	0.78	5.84	file	0.00
+11	790x580	79x29	1833583	3.84	0.77	5.33	file	0.00
+12	790x580	79x29	1833583	3.95	0.79	7.01	file	0.00
+13	790x580	79x29	1833583	4.38	1.26	7.70	file	0.00
+14	790x580	79x29	1833583	4.92	1.10	9.21	file	0.00
+15	790x580	79x29	1833583	4.84	0.96	5.66	file	0.00
+16	790x580	79x29	1833583	4.75	1.12	6.81	file	0.00
+17	790x580	79x29	1833583	4.96	0.97	6.09	file	0.00
+18	790x580	79x29	1833583	4.77	1.00	6.82	file	0.00
+19	790x580	79x29	1833583	4.65	0.86	7.06	file	0.00
+20	790x580	79x29	1833583	5.07	0.91	5.97	file	0.00
+21	790x580	79x29	1833583	4.53	0.76	5.05	file	0.00
+22	790x580	79x29	1833583	4.30	0.85	5.44	file	0.00
+23	790x580	79x29	1833583	4.19	1.96	5.77	file	0.00
+24	790x580	79x29	1833583	4.82	0.84	6.44	file	0.00
+25	790x580	79x29	1833583	4.19	1.45	6.61	file	0.00
+26	790x580	79x29	1833583	4.57	0.97	6.23	file	0.00
+27	790x580	79x29	1833583	4.18	1.69	4.76	file	0.00
+28	790x580	79x29	1833583	4.28	0.83	5.74	file	0.00
+29	790x580	79x29	1833583	4.17	1.33	5.96	file	0.00
+30	790x580	79x29	1833583	4.19	0.95	5.35	file	0.00
+31	790x580	79x29	1833583	4.36	2.62	5.17	file	0.00
+32	790x580	79x29	1833583	4.39	0.79	4.84	file	0.00
+33	790x580	79x29	1833583	4.87	0.77	5.87	file	0.00
+34	790x580	79x29	1833583	4.36	0.74	5.98	file	0.00
+35	790x580	79x29	1833583	4.54	0.81	4.83	file	0.00
+36	790x580	79x29	1833583	4.16	0.84	5.75	file	0.00
+37	790x580	79x29	1833583	6.40	0.89	7.93	file	0.00
+38	790x580	79x29	1833583	4.78	0.93	6.37	file	0.00

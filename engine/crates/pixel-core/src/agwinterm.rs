@@ -8,12 +8,10 @@
 //!
 //! This module is that client. It is deliberately narrow — a target resolved from
 //! the environment, a connection that can be re-dialled, and an envelope parser —
-//! because the verbs on top of it belong to their own tasks: Task 7 sends
-//! `image.frame`, and Task 12 was to send `image.frameshm` — which it does not,
-//! because that verb's mapping layout is still unpublished. See
-//! [`crate::frame_shm`], which holds what survives that blocker: the transport
-//! selection, and the one reading of `unknown command` every capability probe here
-//! shares.
+//! because the verbs on top of it belong to their own modules: [`crate::frame_file`]
+//! sends `image.frame` and `image.frameshm`, and the mapping the latter names is
+//! [`crate::frame_shm`]'s, which also holds the transport selection and the one
+//! reading of `unknown command` every capability probe here shares.
 //!
 //! ## Addressing: the pane, never "active"
 //!

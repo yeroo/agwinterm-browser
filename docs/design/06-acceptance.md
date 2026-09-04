@@ -75,8 +75,9 @@ cell metrics, with `TERMINAL_BROWSER_CELL_PX` as the explicit override.
 ## 3. The file-based path carries a frame when the fast one is asked for
 
 Run: `TERMINAL_BROWSER_FRAME_TRANSPORT=shm`, which names `image.frameshm` — a verb
-this build does not produce and agwinterm does not answer. The frame must go out
-anyway, over `image.frame`, and the reason must be said once rather than per frame.
+this build did not yet produce, and agwinterm did not answer, when this was accepted
+(2026-08). The frame must go out anyway, over `image.frame`, and the reason must be
+said once rather than per frame.
 
 `tools/milestone/run-fallback.cmd` in a dev pane, with a frame-budget TSV:
 
@@ -92,8 +93,16 @@ that went out over the file path. On screen:
 
 ![the page, with the fast path requested](img/14-file-fallback-shm-requested.png)
 
-Pinned by `frame_file.rs`'s `asking_for_the_fast_path_still_publishes_over_the_file_one`
+Pinned by `frame_file.rs`'s `asking_for_a_fast_path_the_host_lacks_still_publishes_over_the_file_one`
 and `the_unavailable_fast_path_is_said_once_and_not_per_frame`.
+
+➕ *2026-09:* the build now produces the verb (plan `20260903-adopt-image-frameshm.md`),
+so this criterion reads "a host that answers `unknown command`" — every agwinterm
+release before v0.17.10, and agliteterm always — and the budget file has grown a
+`transport` and a `copy_ms` column after the seven shown. It is re-accepted against a
+host older than v0.17.10 by `tools/acceptance/frameshm.test.mjs`, which also reads the
+once-said reason out of the CLI's `stderr.log`; on a host at v0.17.10 or later the
+suite skips this case and runs the two fast-path cases instead.
 
 ➕ **A test-isolation bug surfaced here.** The transport tests share one process-wide
 log store behind a mutex, but the mutex was taken only by the tests that *read* it —
@@ -201,18 +210,20 @@ in either direction and cross-checks that every entry has an `UPSTREAM.md` secti
 
 ## 6. Tests, lints and coverage
 
-Re-run on **2026-08-26**, after
-[the deferred-browser-defects plan](../plans/completed/20260826-deferred-browser-defects.md) and its review
-round; the run before it was [the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md)'s,
-whose node row was 510 / 112 suites. The numbers this table carried on 2026-08-21 were
-421 / 364+57 / 266 and on 2026-08-25 the node row was 389 / 90 suites, and leaving any of
-them would have made the table a claim about a tree that no longer exists.
+Re-run on **2026-09-04**, after the `image.frameshm` plan (`20260903-adopt-image-frameshm.md`)
+and its review round; the run before it was
+[the deferred-browser-defects plan](../plans/completed/20260826-deferred-browser-defects.md)'s on
+2026-08-26, whose rows were 467 / 410+57 / 551 over 125 suites, and before that
+[the vendor-check-gap plan](../plans/completed/20260826-vendor-check-gap.md)'s, whose node row was
+510 / 112 suites. The numbers this table carried on 2026-08-21 were 421 / 364+57 / 266 and on
+2026-08-25 the node row was 389 / 90 suites, and leaving any of them would have made the table
+a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **467 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 410 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **551 passed**, 125 suites, **0 skipped**, 12.8 s wall clock |
+| `cargo nextest run --workspace` | **528 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 471 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **573 passed**, 130 suites, **1 skipped** (the `frameshm` fallback case, which needs a host older than v0.17.10; this was a v0.17.10 host, so the two fast-path cases ran), 29.5 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -290,7 +301,11 @@ every one is:
 | | | | `vendor-check/upstream-doc.test.mjs` | 15 |
 | | | | the rest | 161 |
 
-Re-counted on **2026-08-26**; the node column sums to the 551 above. Most of the
+Re-counted on **2026-08-26**; the node column sums to the 551 of that day's run. The
+2026-09-04 run's new suites are `browser/engine-log.test.mjs` (8) and
+`acceptance/frameshm.test.mjs` (4, of which a host's version skips one or two: the fallback
+case on v0.17.10 or later, the two fast-path cases before it), plus one
+case in `docs-check/docs`; the breakdown above was not redone. Most of the
 growth in the table's "the rest" is three suites that did not exist at the previous
 count, all from the deferred-browser-defects plan: `browser/foreground.test.mjs` (14),
 `browser/profile.test.mjs` (12) and `acceptance/profile-lock.test.mjs` (5). The other

@@ -40,15 +40,22 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 467 Rust tests and 551 node tests
-pass on Windows, including the 203 inherited tests in the files this port did not touch.
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 528 Rust tests and 573 node tests
+pass on Windows — of the three node cases that talk to a live host, which of them skip depends
+on the host's version, as the acceptance section below says — including the 203 inherited tests
+in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
-the pointer resolves to one character cell, and cell pixel metrics have to be set by hand for a
-sharp picture. Both are [documented ceilings](docs/design/07-as-built.md#3-the-accepted-ceilings)
-with a named fix on the agwinterm side. One planned feature did not ship — the `image.frameshm`
-fast path, blocked on an unpublished contract — so frames go out as PNG at about **26 fps** at a
-131×37 pane. Enough for a page; not enough for smooth scrolling.
+the pointer resolves to one character cell, and on any agwinterm release before v0.17.10 cell
+pixel metrics have to be set by hand for a sharp picture. Both are
+[documented ceilings](docs/design/07-as-built.md#3-the-accepted-ceilings) with a named fix on the
+agwinterm side; the second's, `session.metrics`, is in agwinterm from v0.17.10 (`8230d0e`) beside
+`image.frameshm`, and the browser already asks for it. One planned feature shipped later than the port: the
+`image.frameshm` fast path, adopted in 2026-09 once agwinterm published its contract. On a host
+that has the verb — agwinterm v0.17.10 (released 2026-09-03) or later — frames go over shared
+memory at about **114 fps** at a 131×37 pane. On any other
+host, and on agliteterm always, they go out as PNG at about **25 fps**: enough for a page, not
+enough for smooth scrolling.
 
 ## Requirements
 
@@ -118,9 +125,9 @@ Run it **in the pane that is wrong**. A browser that exits normally cleans up af
 that is force-killed, crashes, or has its pane closed out from under it runs no cleanup at all,
 and leaves two separate things behind:
 
-- **the frame.** A picture is a *placement* — agwinterm holds the last PNG until something
-  replaces it — so the final page stays painted over the shell running underneath. The pane is a
-  working terminal you cannot read.
+- **the frame.** A picture is a *placement* — agwinterm holds the last frame, a PNG it read or
+  the pixels it copied out of the mapping, until something replaces it — so the final page stays
+  painted over the shell running underneath. The pane is a working terminal you cannot read.
 - **the console.** The alternate screen buffer, a hidden cursor, and mouse reporting, all left on.
   The shell comes back cursorless and echoless, and every pointer move over the pane types
   `\x1b[<555;39;9M` at the prompt.
@@ -146,9 +153,11 @@ neither does the CLI's clear on the way out.
 
 ### Getting a sharp picture
 
-agwinterm does not publish its cell size yet, so the engine falls back to 16×32 px per cell and
-agwinterm resamples the result. Tell it the truth and text sharpens, the page's viewport stops being
-~1.8× too large, and the frame gets **2.5× cheaper**:
+An agwinterm before v0.17.10 does not publish its cell size — `session.metrics` arrived in
+v0.17.10 (`8230d0e`), and the browser asks for it before falling back — so on an older release
+the engine falls back to 16×32 px per cell and agwinterm resamples the result. Tell it the truth
+and text sharpens, the page's
+viewport stops being ~1.8× too large, and the frame gets **2.5× cheaper**:
 
 ```powershell
 $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
@@ -159,9 +168,14 @@ $env:TERMINAL_BROWSER_CELL_PX = "10x20"   # your font's cell, in device pixels
 | variable | what it does |
 |---|---|
 | `TERMINAL_BROWSER_CELL_PX` | `<width>x<height>` in device pixels. Consulted before the host, so it also corrects a host that answers wrongly. |
-| `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
-| `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
+| `TERMINAL_BROWSER_FRAME_TRANSPORT` | `auto` (default), `file`, or `shm`. `auto` takes the shared-memory path on a host that answers `image.frameshm` and the file path otherwise; `file` forces the file path, which is what keeps the baseline measurable; `shm` asks for the fast path and says once, as a warning, if the host cannot carry it. See [the transports](docs/design/07-as-built.md#1-the-two-frame-transports). |
+| `TERMINAL_BROWSER_FRAME_BUDGET` | a path to append one tab-separated line per frame: `seq, canvas, span, bytes, encode_ms, write_ms, publish_ms, transport, copy_ms`, where `transport` is `file` or `shm` and the stages a transport does not pay are `0.00`. This is what [the frame budget](docs/design/02-frame-budget.md) was measured with. |
 | `TERMINAL_BROWSER_ALLOW_PIPE` | the agwinterm instances this build may address: a comma- or semicolon-separated list of pipe names, or `*`. Unset means no guard — and unset is what you want unless you are developing the browser. Set, it stops the **CLI** launching into an instance it does not name, in every build, and stops a **debug** engine drawing into one. See [Working on the browser](#working-on-the-browser). |
+
+The engine's warnings and errors — the `shm` explanation among them — are appended under the CLI to
+`%LOCALAPPDATA%\<app>\logs\stderr.log` as `engine <level> <target>: …` lines
+(`browser/src/engine-log.ts`). Only under the CLI: a browser started by hand with fd 2 on the
+console gets none, so a line cannot paint over the placement.
 
 ### Working on the browser
 
@@ -221,9 +235,17 @@ platform check standing in for a reason — the reasons are in
 Not through the terminal's output stream, which is the whole reason this is a port:
 
 ```
-Electron OSR paint(BGRA)  ->  pixel-core composites  ->  PNG to a fresh path under %TEMP%
+Electron OSR paint(BGRA)  ->  pixel-core composites  ->  RGBA into a slot of Local\agwinterm-frame-browser-<pid>-<start>-<n>
+    ->  {"cmd":"image.frameshm", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
+
+                                                   ->  PNG to a fresh path under %TEMP%       (host without the verb)
     ->  {"cmd":"image.frame", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
 ```
+
+The upper route needs an agwinterm that implements `image.frameshm` (v0.17.10 or later; the
+verb landed at `8230d0e`). The first frame asks; a host that answers `unknown command` gets
+the lower route for the rest of the session, and that first frame is re-sent down it rather
+than dropped.
 
 Input goes the other way and needs no side channel: it arrives *through* the pty as ordinary VT
 sequences, decoded by the 659-line decoder inherited from upstream's `terminal.rs`. Hold onto that
@@ -238,6 +260,14 @@ cd engine; cargo test --workspace  # not redundant: one process, so it can see r
 python tools/vendor-check/fmt-scope.py
 python tools/vendor-check/clippy-scope.py
 ```
+
+`tools/acceptance/frameshm.test.mjs` is the one suite that talks to a live host. Run from an
+agwinterm pane, it opens sessions on *that* instance (`session.new`, never the pane it runs in),
+runs the built browser in each, and closes them. On a host older than v0.17.10 it runs only the
+fallback case and skips the two fast-path cases; a pane of an instance at v0.17.10 or later (the
+installed release, or a build with `--app-id agwinterm-dev`) runs those too, and skips the fallback
+case instead. With no host — CI — it skips entirely, and a
+launch that fails keeps its scratch directory and names it in the message.
 
 `tools/vendor-check/` is the suite that keeps this port honest about upstream. It takes its
 scope from the vendoring commit rather than from a checked-in list: the 239 paths `45b5e43`

@@ -13,10 +13,11 @@ mod engine;
 // the Kitty escapes.
 #[cfg(windows)]
 mod frame_file;
-// Which transport carries a frame, and how a host without the fast one announces
-// itself. Windows-only alongside `frame_file`, for the same reason. The fast path's
-// producer is not here: its mapping layout is not published yet, and the module's
-// own docs record that as a decision.
+// The fast frame path: the `image.frameshm` mapping layout, the mapping, and the
+// producer that fills a slot per frame — plus which transport carries a frame, and
+// how a host without the fast one announces itself. Windows-only alongside
+// `frame_file`, for the same reason. The layout half has no Win32 in it, but
+// nothing on unix would use it, so it is gated with the rest.
 #[cfg(windows)]
 mod frame_shm;
 #[cfg(unix)]
@@ -32,8 +33,8 @@ pub mod ghostty;
 mod herdr;
 mod image_cache;
 // Kitty-escape emitters. Their only caller was the tty backend in `terminal`, which
-// is gated out on Windows, so the whole module reads as dead there until Task 12
-// decides what - if anything - the agwinterm frame path reuses from it.
+// is gated out on Windows, so the whole module reads as dead there. The agwinterm
+// frame path (`frame_file`, `frame_shm`) reuses nothing from it.
 #[cfg_attr(windows, allow(dead_code))]
 mod kitty;
 pub mod logging;

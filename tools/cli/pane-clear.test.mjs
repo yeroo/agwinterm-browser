@@ -777,13 +777,16 @@ const MINE = { pipe: "agwinterm", target: "pane-1" };
 /**
  * A frame directory the way a killed browser leaves one.
  *
- * `frames: 0` is the browser that died before drawing anything, which is the
- * engine's `written.is_empty()` — a directory exists, nothing was ever placed.
- *
  * `mark` is `FrameDir::mark_pane`'s file: the pipe, then the session id. The engine
- * writes it with the first frame the host accepts, so a directory holding frames
- * with no marker beside them is one this engine did not write — which is why
- * `mark: null` below is a fixture rather than an omission.
+ * writes it with the first frame the host accepts over either route, so a directory
+ * holding frames with no marker beside them is one this engine did not write — which
+ * is why `mark: null` below is a fixture rather than an omission.
+ *
+ * `frames: 0` with a marker is a placement that went over shared memory: the
+ * `image.frameshm` route (`frame_shm.rs`) writes no file, so the marker is the whole
+ * of what it leaves. `frames: 0` with `mark: null` is the browser that died before
+ * drawing anything, which is the engine's `!placed` — a directory exists, nothing
+ * was ever placed.
  */
 function leftoverFrames(root, pid, frames = 1, mark = MINE) {
   const dir = path.join(root, `${pane.FRAME_DIR_PREFIX}${pid}-0`);
@@ -791,7 +794,7 @@ function leftoverFrames(root, pid, frames = 1, mark = MINE) {
   for (let seq = 0; seq < frames; seq += 1) {
     fs.writeFileSync(path.join(dir, `frame-${String(seq).padStart(8, "0")}.png`), "");
   }
-  if (mark && frames > 0) {
+  if (mark) {
     fs.writeFileSync(path.join(dir, pane.FRAME_PANE_FILE), `${mark.pipe}\n${mark.target}\n`);
   }
   return dir;
@@ -893,10 +896,52 @@ describe("whose placement it is", () => {
   it("owns nothing when a browser died before it drew anything", (t) => {
     // The directory is created by `FramePublisher::new` and the first frame may
     // never arrive -- a refused pane, an unwritable frame directory, an instant
-    // crash. `written` would be empty; so is this.
+    // crash. `placed` would be false; so is this: no marker, no frame.
     const root = freshRoot(t, "undrawn");
-    leftoverFrames(root, 4242, 0);
+    leftoverFrames(root, 4242, 0, null);
     assert.equal(pane.ownedFrames({ root, pane: MINE }), null);
+    assert.equal(pane.ownedFrames({ root, pid: 4242 }), null);
+  });
+
+  it("owns a placement that went over shared memory, which left no frame file", (t) => {
+    // `FramePublisher::publish_shm` marks the pane past the same `frame:0/0` guard
+    // the file route does, and writes nothing else: the pixels went through a
+    // mapping (`frame_shm.rs`). So the marker is the whole of the evidence, and a
+    // rule that counted frame files read every wreck the fast path left as
+    // "nothing of ours" -- on the exit path and in the verb alike, which left a
+    // force-killed browser's page over a live shell with no command able to take it
+    // down. The engine's own `clear` guard moved from `written` to `placed` for the
+    // same reason; this is the CLI's half of that move.
+    const root = freshRoot(t, "shm");
+    const dir = leftoverFrames(root, 4242, 0);
+    const owned = pane.ownedFrames({ root, pane: MINE });
+    assert.equal(owned?.dir, dir);
+    assert.equal(owned.frames, 0, "no frame file, and none invented");
+    // The exit path's exact question adopts it too, marked for this pane or asked
+    // without one.
+    assert.equal(pane.ownedFrames({ root, pid: 4242, pane: MINE })?.dir, dir);
+    assert.equal(pane.ownedFrames({ root, pid: 4242 })?.dir, dir);
+    // And the marker still decides *whose*: another pane's is not ours.
+    assert.equal(
+      pane.ownedFrames({ root, pane: { pipe: "agwinterm", target: "pane-2" } }),
+      null,
+    );
+  });
+
+  it("is a shape the engine's fast path actually produces", () => {
+    // Pinned against the Rust rather than assumed: the test above is only worth
+    // having while `publish_shm` marks the pane and writes no frame. If the fast
+    // path ever starts writing a file, or stops marking, the fixture is fiction.
+    const source = fs.readFileSync(
+      path.join(REPO, "engine", "crates", "pixel-core", "src", "frame_file.rs"),
+      "utf8",
+    );
+    const body = between(source, "fn publish_shm(", "fn latch_unavailable(");
+    assert.match(body, /self\.dir\.mark_pane\(/, "the fast path no longer marks the pane");
+    assert.ok(
+      !/write_frame\(|publish_encoded\(|next_path\(/.test(body),
+      "the fast path now writes a frame file, so a marker-only wreck is no longer its shape",
+    );
   });
 
   it("ignores directories that are not a publisher's", (t) => {
@@ -1399,6 +1444,36 @@ describe("the pane-clear verb", () => {
     assert.match(rec.text, /frame: +cleared/);
     assert.ok(rec.text.includes(dir), "it does not say which frames it found");
     assert.match(rec.text, /pid 4242/);
+  });
+
+  it("repairs a pane the fast path painted, where there is no frame file to count", async (t) => {
+    // The wreck a force-killed browser leaves on a host with `image.frameshm`: the
+    // marker and nothing else. The report must not read "0 frame(s)" at a user
+    // standing in front of a pane that is plainly painted.
+    const host = hostOn(`winterm-verb-${process.pid}-shm`);
+    await host.listening;
+    t.after(() => host.close());
+    const root = freshRoot(t, "verb-shm");
+    const dir = leftoverFrames(root, 4242, 0, { pipe: host.name, target: "pane-1" });
+    const rec = recorder();
+
+    const code = await pane.paneClearCommand({
+      env: inPane({ AGWINTERM_PIPE: host.name, AGWINTERM_SESSION_ID: "pane-1" }),
+      out: rec.out,
+      input: rec.input,
+      cook: rec.cook,
+      root,
+      timeoutMs: 1_000,
+    });
+
+    assert.equal(code, 0);
+    assert.equal(host.lines.length, 1, "the frame half did not run");
+    assert.deepEqual(JSON.parse(host.lines[0]), { cmd: "image.clear", target: "pane-1" });
+    assert.match(rec.text, /frame: +cleared/);
+    assert.match(rec.text, /shared memory/, "it does not say what kind of wreck it found");
+    assert.ok(!/0 frame\(s\)/.test(rec.text), `a marker-only wreck reported as nothing: ${rec.text}`);
+    assert.ok(rec.text.includes(dir), "it does not say where the evidence was");
+    assert.equal(fs.existsSync(dir), false, "the evidence did not go with the placement");
   });
 
   it("reports the modes as not restored when the verb's cooking child will not run", async (t) => {

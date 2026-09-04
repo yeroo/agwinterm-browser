@@ -20,7 +20,7 @@ The agwinterm source tree lives at `C:\Users\boris\source\agwinterm`.
 >
 > | this brief said | what shipped |
 > |---|---|
-> | frames travel over a shared-memory ring (`image.frameshm`) | **PNG over `image.frame`.** The fast path's contract was never published, so it was not built. [§ Chosen transport](#chosen-transport) |
+> | frames travel over a shared-memory ring (`image.frameshm`) | **PNG over `image.frame`** at the port: the fast path's contract was not published, so it was not built. **Adopted 2026-09**, once agwinterm published it. [§ Chosen transport](#chosen-transport) |
 > | where the engine process lives is unresolved | **resolved:** the foreground process, one browser per pane. [`03-process-model.md`](03-process-model.md) |
 > | 43 files kept unchanged | **40 byte-identical, 3 with a written reason.** "No unix API" turned out not to mean "portable". [`06-acceptance.md` §5](06-acceptance.md#5-the-keep-unchanged-files) tabulates all three; [`UPSTREAM.md`](UPSTREAM.md) numbers two of them. |
 > | `herdr.rs`: port to named pipes, or gate off for v1 | **gated off permanently**, and the reason is not effort. [§ the unix dependency](#the-unix-dependency-is-concentrated-not-pervasive) |
@@ -313,7 +313,7 @@ renderer with **no PNG encode, no disk round-trip and no base64**:
 
 ```
 Electron paint(BGRA)
-  └─> CreateFileMapping, NAMED: Local\winterm-browser-<pid>-<id>
+  └─> CreateFileMapping, NAMED: Local\agwinterm-frame-browser-<pid>-<start>-<n>
         └─> pipe: {"cmd":"image.frameshm","args":{"images":[
                     {"id":N,"name":"Local\\...","slot":N,"seq":N,
                      "width":N,"height":N,"stride":N,"format":N,
@@ -354,6 +354,29 @@ The existing file-based `image.frame` stays as the fallback and as the bring-up 
 > versioned contract linked above, the ctl surface, malformed-producer validation and the BGRA
 > renderer path. This does not rewrite what agwinterm-browser shipped: its current transport remains
 > the PNG fallback until a separate consumer change adopts the fast path.
+
+> ⚠️ **As built, 2026-09.** That consumer change shipped: the adopt-`image.frameshm` plan of
+> 2026-09-03 added the producer — `frame_shm.rs`'s layout, mapping and producer, and the
+> `image.frameshm` route in `frame_file.rs`'s publisher — against the contract linked above,
+> layout version 1. On a host that has the verb, frames go over the mapping: measured on the
+> same Release host, the producer's cost at a 131×37 pane fell from **40.4 ms to 8.7 ms per
+> frame, 25 fps to 114** ([`02-frame-budget.md`](02-frame-budget.md)). The verb is in
+> agwinterm from v0.17.10; on any earlier release, and on agliteterm always, the first
+> frame's `unknown command` latches the file path for the session and nothing else changes.
+>
+> Two corrections to the diagram above, both from the contract. The mapping name was
+> `Local\winterm-browser-<pid>-<id>` when this was drawn, before any prefix existed; it now
+> reads the contract's `Local\agwinterm-frame-browser-<pid>-<start>-<n>`, where `<n>` is
+> fresh for every mapping the process creates, so a resize never reuses a name with a
+> restarted sequence, and `<start>` is the millisecond the process made its first producer,
+> so a later browser that Windows gave the same pid never repeats an earlier one's name in
+> a pane whose host still remembers that name's sequence. And what goes into the slot is
+> the composed **canvas**, RGBA (`format: 32`),
+> not Electron's BGRA paint buffer: the canvas is where the chrome, the overlays and the
+> compositor land, and writing the paint buffer straight through would bypass all of them.
+> One number from the earlier callout did not survive either: the 5.5 ms the baseline read as
+> a pipe floor the fast path would inherit was `image.frame`'s, not the pipe's — the
+> `image.frameshm` round trip at the smallest pane is 1.78 ms.
 
 ## Working agreement
 

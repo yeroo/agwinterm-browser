@@ -1,40 +1,67 @@
-//! Which frame transport carries a frame, and the shape of a host that lacks one.
+//! The fast frame path: a canvas into a shared-memory slot, and the host told which.
 //!
-//! ## Status: the fast path is blocked, and this module says so in code
+//! On a host that implements `image.frameshm` — agwinterm from v0.17.10 (`8230d0e`),
+//! contract `docs/specs/image-frameshm.md` layout version 1 — a frame is not
+//! encoded, not written and not decoded. The composed canvas is copied, row by row,
+//! into the inactive slot of a named file mapping, the mapping's `ready` field is
+//! release-stored with the frame's sequence, and one small JSON request names the
+//! mapping, the slot, the sequence and the same placement `image.frame` would carry
+//! (`frameshm_args` in [`crate::frame_file`]). The host copies the pixels out of the
+//! slot before it replies. `docs/design/02-frame-budget.md` has what that deleted:
+//! at the largest pane measured, 40.4 ms of producer time per frame became 8.7 ms.
 //!
-//! Task 12 opens with a precondition — `agwinterm/docs/specs/image-frameshm.md`
-//! must exist *and* state the literal `Local\` mapping-name prefix and the producer
-//! slot-reuse invariant. At the time of writing it does not exist at all. agwinterm
-//! has a plan for the verb (`docs/plans/20260821-image-frameshm-command.md`) with
-//! its Task 1 — the one that defines the header layout and publishes the spec —
-//! still entirely unchecked, and `ControlServer.cs:249` still dispatches
-//! `image.frame` and nothing else.
+//! Three pieces, from the bottom:
 //!
-//! So there is no mapping layout to write into. A producer built now would be
-//! inventing a wire format and calling it a contract, and the first real consumer
-//! would disagree with it in a way that shows up as a torn or rejected frame rather
-//! than as a compile error. The producer is therefore **not** in this module, and
-//! its absence is a recorded decision rather than an oversight.
+//! - [`layout`] — the contract's numbers as arithmetic, with no Win32 in it: the
+//!   magic, the version, the 256-byte header, `ready` at 32, descriptors at
+//!   `64 + 16*slot`, two slots, the `Local\agwinterm-frame-` name prefix. Copied
+//!   from the spec's tables, not designed; where the two disagree the spec wins.
+//! - `mapping` (Windows) — one `CreateFileMappingW` section under a name the layout
+//!   validates, one read-write view sized once, the header written on creation, and
+//!   `publish` for a frame into the slot its sequence selects.
+//! - `producer` (Windows) — the lifetime: a sequence that never restarts while the
+//!   producer lives, a name no earlier process with this pid can have used, a fresh
+//!   mapping-name suffix for every mapping created (a resize creates one; so does
+//!   a name found taken), and `close` for the end.
 //!
-//! What *is* here is the half that does not depend on the layout, and is true
-//! whatever the layout turns out to be:
+//! ## What selects it, and what latches it off
 //!
-//! - [`Transport`] — the file path stays explicitly selectable, by
-//!   [`TRANSPORT_VAR`], rather than becoming whatever the newest code prefers.
-//! - [`is_unknown_command`] — the literal refusal a host gives for a verb it does
-//!   not have (`{"ok":false,"error":"unknown command '…'"}`, `ControlServer.cs:250`).
-//!   This is the fallback trigger, and it is shared with `pane_metrics`, which had
-//!   the same test open-coded. One reading of that reply, used by every capability
-//!   probe.
+//! [`Transport`] is what was asked for, read from [`TRANSPORT_VAR`]; `FramePublisher`
+//! in [`crate::frame_file`] is what does the asking. `Auto` and `Shm` try the verb on
+//! the first frame. `unknown command` — the answer of every agwinterm release before
+//! v0.17.10, and of agliteterm always — latches the file path for the session on the
+//! spot, closes the mapping, and re-sends that same frame as an `image.frame`, so
+//! the probe costs no frame; under `Shm` the latch is explained once
+//! ([`Transport::unavailable_reason`]), under `Auto` it is information. Any other
+//! refusal, an `ok` that placed nothing, or a mapping this side could not make also
+//! costs no frame — it goes over the file path, and its reason is logged — and three
+//! in a row latch the fast path off naming all three; an accepted frame resets the
+//! count. `File` never tries the verb and never builds a mapping, which is what
+//! keeps the baseline in `02-frame-budget.md` re-measurable on a host that has it.
 //!
-//! When the spec lands, what this module gains is the producer and a support latch
-//! on top of [`is_unknown_command`]; nothing here changes shape.
+//! ## The one producer rule, and how the code keeps it
+//!
+//! The contract has one normative rule for a producer: a slot is not refilled until
+//! the reply for the frame that last used it has returned. Nothing here enforces it
+//! with a lock; the construction does. The pipe is one request per connection and
+//! `FramePublisher::publish` returns only after the host has answered, so there is
+//! never more than one frame in flight, and with two slots frame N+2 — the next
+//! user of frame N's slot — cannot begin before N+1 was published, which cannot
+//! begin before N's reply came back. The same fact is what lets a resize drop the
+//! old mapping at once, and `close` unmap on `image.clear`'s reply: no request is
+//! outstanding by the time either runs. `each_publish_returns_only_after_its_own_reply`
+//! in `frame_file.rs` pins the construction. Pipelining across the slots would need
+//! per-slot reply tracking and is deliberately not here.
+//!
+//! [`is_unknown_command`] is the one reading of a host's refusal for a verb it lacks,
+//! shared with every capability probe in the crate: this latch, and `pane_metrics`'s
+//! `session.metrics`.
 
 use crate::terminal::SessionEnv;
 
-/// The verb the fast path will send. Named here — rather than only in the spec that
-/// does not exist yet — because [`is_unknown_command`]'s whole job is recognising a
-/// host that has never heard of it.
+/// The verb the fast path sends. Named here, beside the layout it carries, because
+/// [`is_unknown_command`]'s whole job is recognising a host that has never heard of
+/// it.
 pub(crate) const FRAMESHM_CMD: &str = "image.frameshm";
 
 /// Forces a transport, overriding what the host supports.
@@ -48,8 +75,9 @@ pub(crate) const TRANSPORT_VAR: &str = "TERMINAL_BROWSER_FRAME_TRANSPORT";
 /// Which way a frame reaches the pane.
 ///
 /// `Auto` is not a third transport: it is "whichever works", and it exists so that
-/// the default is not spelled as a preference. `File` is the one that ships today
-/// ([`crate::frame_file`]); `Shm` is the one whose contract is still unpublished.
+/// the default is not spelled as a preference. `File` is the one every host has
+/// ([`crate::frame_file`]); `Shm` is the one in this module, which a host has to
+/// implement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Transport {
     /// The fast path when the host has it, the file path otherwise.
@@ -104,17 +132,20 @@ impl Transport {
     /// Returns `None` for [`Transport::Auto`] and [`Transport::File`]: neither asked
     /// for anything it did not get, and a line of log per frame about a transport
     /// nobody requested is noise. Only an explicit `shm` earns an explanation, and
-    /// its caller is expected to say it once.
+    /// its caller is expected to say it once — at the moment the host answers
+    /// `unknown command` and the fast path is latched off for the session
+    /// (`FramePublisher::latch_unavailable` in `frame_file.rs`).
     pub(crate) fn unavailable_reason(self) -> Option<String> {
         match self {
             Self::Auto | Self::File => None,
             Self::Shm => Some(format!(
-                "{TRANSPORT_VAR}=shm asked for `{FRAMESHM_CMD}`, which this build \
-                 does not implement: its mapping layout is not published yet \
-                 (agwinterm/docs/specs/image-frameshm.md does not exist, and \
-                 agwinterm's own plan has not defined the header). Frames are going \
-                 out over `image.frame` instead — the picture is the same, the cost \
-                 is the one in docs/design/02-frame-budget.md"
+                "{TRANSPORT_VAR}=shm asked for `{FRAMESHM_CMD}`, which this host does \
+                 not implement: it answered `unknown command`. The verb (agwinterm's \
+                 docs/specs/image-frameshm.md) is in agwinterm from v0.17.10 (commit \
+                 8230d0e, 2026-09-03), and agliteterm never has it. Frames \
+                 are going out over `image.frame` for the rest of this session — the \
+                 picture is the same, the cost is the one in \
+                 docs/design/02-frame-budget.md"
             )),
         }
     }
@@ -140,6 +171,1943 @@ pub(crate) fn is_unknown_command(message: &str, cmd: &str) -> bool {
     // A host that answers the bare prefix without naming anything is still telling
     // us the verb is missing; only a *different* name is a disagreement.
     named.is_empty() || named == cmd
+}
+
+/// The `image.frameshm` mapping layout, contract version 1, as arithmetic.
+///
+/// Every number here is copied from the offset tables in agwinterm's
+/// `docs/specs/image-frameshm.md` rather than chosen. The spec is normative: where
+/// this module and the spec disagree, the spec wins and this module is corrected.
+/// Nothing in here touches Win32, though it is compiled and tested only where the
+/// mapping that carries it is: `lib.rs` gates the whole of `frame_shm` on Windows,
+/// because nothing on unix would use the layout either.
+///
+/// The mapping and the producer build on it here; the request that repeats a
+/// published frame's layout to the host is `frame_file.rs`'s.
+pub(crate) mod layout {
+    use std::io;
+    use std::ops::Range;
+
+    /// The bytes `A` `G` `S` `F`, read little-endian from offset 0.
+    pub(crate) const MAGIC: u32 = 0x4653_4741;
+    /// The only layout version a reader accepts.
+    pub(crate) const VERSION: u32 = 1;
+    /// The fixed header, descriptors included; slot 0's pixels start here.
+    pub(crate) const HEADER_LEN: usize = 256;
+    /// Where `ready` lives: 8-byte aligned, so it can be a real atomic.
+    pub(crate) const READY_OFFSET: usize = 32;
+    /// Slot descriptors start here, one every [`DESCRIPTOR_LEN`] bytes.
+    pub(crate) const DESCRIPTOR_OFFSET: usize = 64;
+    /// `width`, `height`, `stride`, `format`, four bytes each.
+    pub(crate) const DESCRIPTOR_LEN: usize = 16;
+    /// The contract's minimum, and all a serialised producer needs: one frame in
+    /// flight, one slot being filled, never the same slot.
+    pub(crate) const SLOT_COUNT: u32 = 2;
+    /// `KittyFormat.Rgba`. The canvas is tiny-skia RGBA, so rows are copied as they
+    /// are; the spec accepts `32` beside its preferred `132` (BGRA).
+    pub(crate) const FORMAT_RGBA: u32 = 32;
+    /// The literal, case-sensitive prefix the reader enforces on every name.
+    pub(crate) const NAME_PREFIX: &str = r"Local\agwinterm-frame-";
+    /// The reader rejects a `width` or `height` outside `1..=16384`.
+    pub(crate) const MAX_DIMENSION: u32 = 16384;
+    /// The control server rejects a request that would copy more than this many
+    /// pixel bytes (spec § Limits: 268,435,456 aggregate per `images` array). One
+    /// frame is one image, so a frame past this is one no request could place —
+    /// and both dimensions inside [`MAX_DIMENSION`] do not keep it under, since
+    /// 16384² × 4 is four times this.
+    pub(crate) const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+    /// What may follow [`NAME_PREFIX`]: 1..=128 characters of `[A-Za-z0-9._-]`.
+    pub(crate) const MAX_NAME_SUFFIX: usize = 128;
+    /// Slot strides are rounded up to this. Not so that a slot starts on a page —
+    /// none does, since the pixels begin at [`HEADER_LEN`], 256 bytes into the view
+    /// — but so that the slots sit a whole number of pages apart: every slot
+    /// boundary then falls at the same offset into its page, and the stride is a
+    /// round figure rather than one frame's exact byte count. It does *not* keep
+    /// the slots on separate pages: a frame whose bytes are themselves a page
+    /// multiple — 1920×1080×4 is one — ends 256 bytes into a page that the next
+    /// slot's first rows share. Nothing depends on their not sharing: the producer
+    /// writes one slot, the inactive one, and the host reads the other by
+    /// descriptor, not by page.
+    pub(crate) const PAGE: usize = 4096;
+    /// Every format the verb carries is 4 bpp; the bounds in the spec assume it.
+    const BYTES_PER_PIXEL: u32 = 4;
+
+    /// Where everything for one frame size lives in the mapping.
+    ///
+    /// Built by [`Layout::for_frame`]; a different frame size is a different
+    /// `Layout` and, for the producer, a different mapping.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Layout {
+        width: u32,
+        height: u32,
+        /// Bytes per row: exactly `width * 4`, no padding.
+        stride: u32,
+        /// Bytes from one slot's pixels to the next: `height * stride`, page-rounded.
+        slot_stride: usize,
+        /// [`HEADER_LEN`] + [`SLOT_COUNT`] slots.
+        mapping_len: usize,
+    }
+
+    impl Layout {
+        /// The layout for a `width`×`height` RGBA frame.
+        ///
+        /// Rejects a dimension the reader would reject, and a frame the control
+        /// server's byte limit would, so a mapping is never created — nor a quarter
+        /// gigabyte copied into it — for a frame no request could place.
+        pub(crate) fn for_frame(width: u32, height: u32) -> io::Result<Self> {
+            for (axis, value) in [("width", width), ("height", height)] {
+                if !(1..=MAX_DIMENSION).contains(&value) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("image.frameshm {axis} {value} is outside 1..={MAX_DIMENSION}"),
+                    ));
+                }
+            }
+            let stride = width * BYTES_PER_PIXEL;
+            let slot_bytes = height as usize * stride as usize;
+            if slot_bytes > MAX_FRAME_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm {width}x{height} is {slot_bytes} bytes, past the \
+                         {MAX_FRAME_BYTES} the host copies per request"
+                    ),
+                ));
+            }
+            let slot_stride = slot_bytes.div_ceil(PAGE) * PAGE;
+            Ok(Self {
+                width,
+                height,
+                stride,
+                slot_stride,
+                mapping_len: HEADER_LEN + slot_stride * SLOT_COUNT as usize,
+            })
+        }
+
+        pub(crate) fn width(&self) -> u32 {
+            self.width
+        }
+
+        pub(crate) fn height(&self) -> u32 {
+            self.height
+        }
+
+        /// Bytes per row, the value the descriptor and the request both carry.
+        pub(crate) fn stride(&self) -> u32 {
+            self.stride
+        }
+
+        /// The header's `slotStride`.
+        #[cfg(test)]
+        pub(crate) fn slot_stride(&self) -> usize {
+            self.slot_stride
+        }
+
+        /// The header's `pixelOffset`: always the end of the fixed header.
+        pub(crate) fn pixel_offset(&self) -> usize {
+            HEADER_LEN
+        }
+
+        /// The size to create the mapping with, and the length of its view.
+        pub(crate) fn mapping_len(&self) -> usize {
+            self.mapping_len
+        }
+
+        /// Writes the fixed header into the first [`HEADER_LEN`] bytes of `view`.
+        ///
+        /// `ready` is written as `0` — nothing published — and every reserved byte
+        /// and every descriptor is zeroed; the descriptors are filled per frame when
+        /// a slot is published.
+        pub(crate) fn write_header(&self, view: &mut [u8]) {
+            assert!(
+                view.len() >= HEADER_LEN,
+                "a {}-byte view cannot hold the {HEADER_LEN}-byte image.frameshm header",
+                view.len()
+            );
+            let header = &mut view[..HEADER_LEN];
+            header.fill(0);
+            put_u32(header, 0, MAGIC);
+            put_u32(header, 4, VERSION);
+            put_u32(header, 8, SLOT_COUNT);
+            put_u32(header, 12, 0); // flags: reserved
+            put_u64(header, 16, self.slot_stride as u64);
+            put_u64(header, 24, self.pixel_offset() as u64);
+            put_u64(header, READY_OFFSET, 0);
+        }
+
+        /// The 16 bytes of `slot`'s descriptor: `64 + 16 * slot`.
+        pub(crate) fn descriptor(&self, slot: u32) -> Range<usize> {
+            assert_slot(slot);
+            let start = DESCRIPTOR_OFFSET + DESCRIPTOR_LEN * slot as usize;
+            start..start + DESCRIPTOR_LEN
+        }
+
+        /// The `height * stride` bytes of `slot`'s pixels:
+        /// `pixelOffset + slot * slotStride`, the slot's own bytes only, not its
+        /// page padding.
+        pub(crate) fn pixels(&self, slot: u32) -> Range<usize> {
+            assert_slot(slot);
+            let start = self.pixel_offset() + self.slot_stride * slot as usize;
+            start..start + self.height as usize * self.stride as usize
+        }
+    }
+
+    fn assert_slot(slot: u32) {
+        assert!(
+            slot < SLOT_COUNT,
+            "slot {slot} is outside this layout's {SLOT_COUNT} slots"
+        );
+    }
+
+    fn put_u32(view: &mut [u8], offset: usize, value: u32) {
+        view[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u64(view: &mut [u8], offset: usize, value: u64) {
+        view[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// The slot sequence `seq` publishes into: `seq % slotCount`.
+    ///
+    /// Sequences start at 1, so the first frame lands in slot 1 and the reader's
+    /// `slot == seq % slotCount` check holds for every positive `seq`.
+    pub(crate) fn slot_for(seq: u64) -> u32 {
+        // The remainder is below SLOT_COUNT, so it fits without truncation.
+        (seq % u64::from(SLOT_COUNT)) as u32
+    }
+
+    /// `Local\agwinterm-frame-browser-<pid>-<start>-<incarnation>`.
+    ///
+    /// `incarnation` changes on every recreate (a resize), because the reader only
+    /// accepts a recreated mapping under an old name when its sequence continues
+    /// and the safe way to guarantee that is never to reuse a name. `start` is the
+    /// process's (`process_start` in `producer`), for the same reason one process
+    /// later: the host remembers the last sequence it accepted under each name for
+    /// as long as the pane lives, longer than any browser run in it, and Windows
+    /// reissues a pid once its process is gone — so a later browser in the same
+    /// pane with a reused pid and only the pid in its names would offer
+    /// `browser-<pid>-0` again with `seq` back at 1, and be refused until the
+    /// fast path latched off.
+    pub(crate) fn mapping_name(pid: u32, start: u64, incarnation: u32) -> String {
+        format!("{NAME_PREFIX}browser-{pid}-{start}-{incarnation}")
+    }
+
+    /// The reader's name rule: the exact prefix, then 1..=[`MAX_NAME_SUFFIX`]
+    /// characters of `[A-Za-z0-9._-]`. No backslash, so a suffix cannot leave
+    /// `Local\`; checked before any Win32 call so a bad name never becomes an object.
+    pub(crate) fn is_valid_name(name: &str) -> bool {
+        let Some(suffix) = name.strip_prefix(NAME_PREFIX) else {
+            return false;
+        };
+        // The charset is ASCII, so once it passes, bytes and characters agree.
+        (1..=MAX_NAME_SUFFIX).contains(&suffix.len())
+            && suffix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    }
+
+    /// One slot's descriptor: the 16 bytes at [`Layout::descriptor`], and the four
+    /// numbers the request repeats so the host can hold them against the mapping
+    /// before it copies (spec § JSON args: a non-zero field "must agree with the
+    /// slot descriptor").
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Descriptor {
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        /// Bytes per row: `width * 4` for this producer, since the canvas has no
+        /// padding.
+        pub(crate) stride: u32,
+        /// [`FORMAT_RGBA`], the canvas's own byte order.
+        pub(crate) format: u32,
+    }
+
+    impl Descriptor {
+        /// The descriptor every frame published at `layout`'s size carries.
+        pub(crate) fn for_layout(layout: &Layout) -> Self {
+            Self {
+                width: layout.width(),
+                height: layout.height(),
+                stride: layout.stride(),
+                format: FORMAT_RGBA,
+            }
+        }
+
+        /// Writes the four fields, little-endian, into a slot's 16 descriptor bytes
+        /// (spec § Slot descriptor: `width` at +0, `height` at +4, `stride` at +8,
+        /// `format` at +12).
+        pub(crate) fn write(&self, descriptor: &mut [u8]) {
+            assert_eq!(
+                descriptor.len(),
+                DESCRIPTOR_LEN,
+                "a slot descriptor is exactly {DESCRIPTOR_LEN} bytes"
+            );
+            put_u32(descriptor, 0, self.width);
+            put_u32(descriptor, 4, self.height);
+            put_u32(descriptor, 8, self.stride);
+            put_u32(descriptor, 12, self.format);
+        }
+    }
+
+    /// What one publish put in the mapping: the slot the frame landed in, the
+    /// sequence that names it, and the descriptor written for it. That is
+    /// everything the `image.frameshm` request has to repeat, so the request is
+    /// built from this value and cannot disagree with the bytes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) struct Published {
+        pub(crate) slot: u32,
+        pub(crate) seq: u64,
+        pub(crate) descriptor: Descriptor,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        //! Each header assertion quotes the spec's offset table
+        //! (`docs/specs/image-frameshm.md` § Fixed header) rather than this module's
+        //! constants, so a constant drifting from the spec fails here.
+
+        use super::*;
+
+        fn u32_at(view: &[u8], offset: usize) -> u32 {
+            u32::from_le_bytes(view[offset..offset + 4].try_into().unwrap())
+        }
+
+        fn u64_at(view: &[u8], offset: usize) -> u64 {
+            u64::from_le_bytes(view[offset..offset + 8].try_into().unwrap())
+        }
+
+        fn hd() -> Layout {
+            Layout::for_frame(1920, 1080).expect("1920x1080 is a legal frame")
+        }
+
+        // -- the header, against the spec's table ------------------------------
+
+        #[test]
+        fn the_header_matches_the_specs_offset_table() {
+            let layout = hd();
+            let mut view = vec![0xAA; layout.mapping_len()];
+            layout.write_header(&mut view);
+
+            assert_eq!(u32_at(&view, 0), 0x46534741, "magic");
+            assert_eq!(&view[0..4], b"AGSF", "the magic reads as its letters");
+            assert_eq!(u32_at(&view, 4), 1, "version");
+            assert_eq!(u32_at(&view, 8), 2, "slotCount");
+            assert_eq!(u32_at(&view, 12), 0, "flags");
+            assert_eq!(u64_at(&view, 16), layout.slot_stride() as u64, "slotStride");
+            assert_eq!(u64_at(&view, 24), 256, "pixelOffset");
+            assert_eq!(u64_at(&view, 32), 0, "ready: nothing published");
+            assert!(
+                view[40..64].iter().all(|&b| b == 0),
+                "reserved bytes are zero"
+            );
+            assert!(
+                view[64..256].iter().all(|&b| b == 0),
+                "descriptors start zeroed and are filled per frame",
+            );
+            assert!(
+                view[256..].iter().all(|&b| b == 0xAA),
+                "write_header touches nothing past the header",
+            );
+        }
+
+        #[test]
+        fn descriptors_sit_sixteen_bytes_apart_from_sixty_four() {
+            let layout = hd();
+            for slot in 0..SLOT_COUNT {
+                let want = 64 + 16 * slot as usize;
+                assert_eq!(layout.descriptor(slot), want..want + 16, "slot {slot}");
+            }
+            assert!(
+                layout.descriptor(SLOT_COUNT - 1).end <= HEADER_LEN,
+                "every descriptor is inside the fixed header",
+            );
+        }
+
+        #[test]
+        fn a_short_view_is_refused_rather_than_half_written() {
+            let result = std::panic::catch_unwind(|| {
+                let mut view = vec![0; HEADER_LEN - 1];
+                hd().write_header(&mut view);
+            });
+            assert!(result.is_err());
+        }
+
+        // -- for_frame ---------------------------------------------------------
+
+        #[test]
+        fn a_1080p_frame_has_the_specs_example_stride_and_two_disjoint_slots() {
+            let layout = hd();
+            assert_eq!(layout.width(), 1920);
+            assert_eq!(layout.height(), 1080);
+            assert_eq!(layout.stride(), 7680, "the stride the spec's example sends");
+            assert_eq!(layout.pixel_offset(), 256);
+
+            let bytes = 1080 * 7680;
+            assert!(layout.slot_stride() >= bytes, "a slot holds its frame");
+            assert_eq!(
+                layout.slot_stride() % PAGE,
+                0,
+                "slots sit whole pages apart"
+            );
+            assert!(
+                layout.slot_stride() - bytes < PAGE,
+                "and no more than a page of padding"
+            );
+
+            let (s0, s1) = (layout.pixels(0), layout.pixels(1));
+            assert_eq!(s0.start, 256, "slot 0 starts at pixelOffset");
+            assert_eq!(s0.len(), bytes);
+            assert_eq!(s1.start, 256 + layout.slot_stride());
+            assert_eq!(s1.len(), bytes);
+            assert!(s0.start >= HEADER_LEN, "slot 0 is clear of the header");
+            assert!(s0.end <= s1.start, "slot 1 does not overlap slot 0");
+            assert!(
+                s1.end <= layout.mapping_len(),
+                "both slots are inside the mapping"
+            );
+            assert_eq!(
+                layout.mapping_len(),
+                256 + 2 * layout.slot_stride(),
+                "pixelOffset + slotStride * slotCount, the spec's minimum",
+            );
+        }
+
+        #[test]
+        fn a_frame_that_is_a_whole_number_of_pages_gets_no_padding() {
+            // 1024 * 4 = 4096 per row: the exact case the rounding must not overshoot.
+            let layout = Layout::for_frame(1024, 3).unwrap();
+            assert_eq!(layout.slot_stride(), 3 * 4096);
+        }
+
+        #[test]
+        fn the_smallest_frame_is_one_pixel() {
+            let layout = Layout::for_frame(1, 1).unwrap();
+            assert_eq!(layout.stride(), 4);
+            assert_eq!(layout.slot_stride(), PAGE);
+            assert_eq!(layout.pixels(0).len(), 4);
+        }
+
+        #[test]
+        fn dimensions_the_reader_rejects_are_rejected_here_first() {
+            for (w, h) in [(0, 1080), (1920, 0), (16385, 1080), (1920, 16385), (0, 0)] {
+                let err = Layout::for_frame(w, h).expect_err(&format!("{w}x{h}"));
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("16384"), "{err}");
+            }
+            assert!(
+                Layout::for_frame(16384, 4096).is_ok(),
+                "the bound is inclusive"
+            );
+        }
+
+        #[test]
+        fn a_frame_past_the_hosts_byte_limit_is_rejected_before_a_mapping_exists() {
+            // Both dimensions legal, the product not: 8192 × 8193 × 4 is one row past
+            // the 256 MiB the control server copies per request, so every request
+            // for it would be refused — after this side had committed a half-gigabyte
+            // mapping and copied a quarter of one into it, three frames running.
+            let err = Layout::for_frame(8192, 8193).expect_err("past the byte limit");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("268435456"), "{err}");
+            assert!(
+                Layout::for_frame(8192, 8192).is_ok(),
+                "exactly the limit is inclusive"
+            );
+            assert!(
+                Layout::for_frame(16384, 16384).is_err(),
+                "the largest legal dimensions are four times the limit"
+            );
+        }
+
+        // -- names -------------------------------------------------------------
+
+        #[test]
+        fn the_producers_own_name_passes_the_readers_rule() {
+            let name = mapping_name(1234, 1_756_950_000_000, 0);
+            assert_eq!(name, r"Local\agwinterm-frame-browser-1234-1756950000000-0");
+            assert!(is_valid_name(&name));
+            assert!(
+                is_valid_name(&mapping_name(u32::MAX, u64::MAX, u32::MAX)),
+                "the longest name is within the suffix bound"
+            );
+            assert_ne!(
+                name,
+                mapping_name(1234, 1_756_950_000_001, 0),
+                "the same pid a millisecond later is another name"
+            );
+        }
+
+        #[test]
+        fn the_prefix_is_required_literally_and_case_sensitively() {
+            assert!(is_valid_name(r"Local\agwinterm-frame-x"));
+            assert!(!is_valid_name(r"local\agwinterm-frame-x"));
+            assert!(!is_valid_name(r"LOCAL\agwinterm-frame-x"));
+            assert!(!is_valid_name(r"Global\agwinterm-frame-x"));
+            assert!(!is_valid_name(r"agwinterm-frame-x"));
+            assert!(
+                !is_valid_name(r"Local\winterm-browser-1-0"),
+                "the pre-contract spelling"
+            );
+            assert!(!is_valid_name(""));
+        }
+
+        #[test]
+        fn the_suffix_is_one_to_128_characters() {
+            assert!(!is_valid_name(NAME_PREFIX), "an empty suffix");
+            let okay = format!("{NAME_PREFIX}{}", "a".repeat(128));
+            assert!(is_valid_name(&okay));
+            let long = format!("{NAME_PREFIX}{}", "a".repeat(129));
+            assert!(!is_valid_name(&long));
+        }
+
+        #[test]
+        fn the_suffix_charset_is_the_readers() {
+            for ok in ["browser-1", "a.b_c-d", "ABCxyz019", "..", "-"] {
+                assert!(is_valid_name(&format!("{NAME_PREFIX}{ok}")), "{ok:?}");
+            }
+            for bad in [r"a\b", "a b", "é", "a/b", "a:b", "a\0", "日本"] {
+                assert!(!is_valid_name(&format!("{NAME_PREFIX}{bad}")), "{bad:?}");
+            }
+        }
+
+        // -- descriptors -------------------------------------------------------
+
+        #[test]
+        fn a_descriptor_is_written_in_the_specs_field_order() {
+            // Spec § Slot descriptor: width at +0, height at +4, stride at +8,
+            // format at +12, each four bytes.
+            let layout = hd();
+            let descriptor = Descriptor::for_layout(&layout);
+            assert_eq!(
+                descriptor,
+                Descriptor {
+                    width: 1920,
+                    height: 1080,
+                    stride: 7680,
+                    format: 32,
+                }
+            );
+            let mut view = vec![0xAA; layout.mapping_len()];
+            layout.write_header(&mut view);
+            descriptor.write(&mut view[layout.descriptor(1)]);
+            let base = 64 + 16;
+            assert_eq!(u32_at(&view, base), 1920, "width");
+            assert_eq!(u32_at(&view, base + 4), 1080, "height");
+            assert_eq!(u32_at(&view, base + 8), 7680, "stride");
+            assert_eq!(u32_at(&view, base + 12), 32, "format: KittyFormat.Rgba");
+            assert!(
+                view[64..80].iter().all(|&b| b == 0),
+                "slot 0's descriptor is untouched"
+            );
+            assert!(
+                view[96..256].iter().all(|&b| b == 0),
+                "and so is the rest of the header"
+            );
+        }
+
+        #[test]
+        fn a_descriptor_refuses_any_length_but_sixteen() {
+            for len in [DESCRIPTOR_LEN - 1, DESCRIPTOR_LEN + 1] {
+                let result = std::panic::catch_unwind(move || {
+                    let mut bytes = vec![0; len];
+                    Descriptor::for_layout(&hd()).write(&mut bytes);
+                });
+                assert!(result.is_err(), "{len} bytes");
+            }
+        }
+
+        // -- slots -------------------------------------------------------------
+
+        #[test]
+        fn sequences_start_at_one_and_alternate_slots() {
+            let slots: Vec<u32> = (1..=8).map(slot_for).collect();
+            assert_eq!(slots, [1, 0, 1, 0, 1, 0, 1, 0]);
+            assert_eq!(slot_for(u64::MAX), 1);
+        }
+    }
+}
+
+/// The named shared-memory mapping a [`layout::Layout`] lives in, Windows only.
+///
+/// This is the Win32 half of the fast path: create the section under the
+/// contract's name, map one view of exactly the layout's length, write the header,
+/// publish frames into its slots ([`mapping::Mapping::publish`]), and tear both down once.
+/// It never learns a length from the mapping — the length it maps is the one it
+/// asked for — and the only header field it reads back is `ready`, its own atomic.
+/// *When* a slot may be refilled, and which sequence a frame gets, is the
+/// producer's business ([`producer`]).
+///
+/// Reached from [`producer`], which `frame_file.rs`'s `FramePublisher::publish_shm`
+/// drives once per frame.
+#[cfg(windows)]
+pub(crate) mod mapping {
+    use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::System::Memory::{
+        CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+        PAGE_READWRITE, UnmapViewOfFile,
+    };
+
+    use super::layout::{
+        Descriptor, Layout, MAX_NAME_SUFFIX, NAME_PREFIX, Published, READY_OFFSET, is_valid_name,
+        slot_for,
+    };
+    use crate::canvas::Canvas;
+
+    /// A page-file-backed section named `name`, with one read-write view over it.
+    ///
+    /// The view is exactly [`Layout::mapping_len`] bytes long: that is the size the
+    /// section was created with and the length the view was mapped with, and it is
+    /// held here rather than re-read from the header, so a reader that scribbles on
+    /// the header cannot change how far this side believes it may write. The handle
+    /// and the view are owned by this struct alone and released once, in [`Drop`],
+    /// view first.
+    pub(crate) struct Mapping {
+        layout: Layout,
+        name: String,
+        handle: HANDLE,
+        view: MEMORY_MAPPED_VIEW_ADDRESS,
+    }
+
+    impl Mapping {
+        /// Creates the section and maps it, then writes the layout's header into it.
+        ///
+        /// A name [`is_valid_name`] rejects is refused before any Win32 call, so a
+        /// bad name never becomes a kernel object. `ERROR_ALREADY_EXISTS` is an error
+        /// too, not a reuse: `CreateFileMappingW` hands back the *existing* section
+        /// in that case, and a producer that finds its own name taken has a stale
+        /// incarnation still alive somewhere and must pick a fresh suffix rather than
+        /// publish into whatever is there.
+        #[allow(unsafe_code)]
+        pub(crate) fn create(layout: &Layout, name: &str) -> io::Result<Self> {
+            if !is_valid_name(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm mapping name `{name}` is not `{NAME_PREFIX}` followed by \
+                         1..={MAX_NAME_SUFFIX} characters of [A-Za-z0-9._-]"
+                    ),
+                ));
+            }
+            let len = layout.mapping_len();
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            // `INVALID_HANDLE_VALUE` for the file means "backed by the page file";
+            // the size is split into the two halves the call takes.
+            let (size_high, size_low) = ((len as u64 >> 32) as u32, len as u32);
+            // SAFETY: `wide` is a NUL-terminated wide string that outlives the call,
+            // the attributes pointer is the documented "default security" null, and
+            // the file handle is the documented page-file sentinel rather than a
+            // handle we would have to own.
+            let handle = unsafe {
+                CreateFileMappingW(
+                    windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE,
+                    std::ptr::null(),
+                    PAGE_READWRITE,
+                    size_high,
+                    size_low,
+                    wide.as_ptr(),
+                )
+            };
+            // `CreateFileMappingW` fails with a null handle, not `INVALID_HANDLE_VALUE`;
+            // and `last_os_error` is read before anything else can overwrite it.
+            let last = io::Error::last_os_error();
+            if handle.is_null() {
+                return Err(io::Error::new(
+                    last.kind(),
+                    format!("CreateFileMappingW({name}): {last}"),
+                ));
+            }
+            if last.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
+                // The handle is real and refers to someone else's section; close it
+                // without touching the section's contents.
+                // SAFETY: `handle` was just returned by `CreateFileMappingW` and is
+                // closed exactly once, here, before it can be stored anywhere.
+                unsafe { CloseHandle(handle) };
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "image.frameshm mapping {name} already exists: a stale incarnation \
+                         is still alive, so this one needs a fresh suffix"
+                    ),
+                ));
+            }
+            // SAFETY: `handle` is a live section handle we own, and `len` is the size
+            // it was created with, so a view of `len` bytes lies inside the section.
+            let view = unsafe { MapViewOfFile(handle, FILE_MAP_ALL_ACCESS, 0, 0, len) };
+            if view.Value.is_null() {
+                let err = io::Error::last_os_error();
+                // SAFETY: as above — a handle we own, closed once on this path.
+                unsafe { CloseHandle(handle) };
+                return Err(io::Error::new(
+                    err.kind(),
+                    format!("MapViewOfFile({name}, {len} bytes): {err}"),
+                ));
+            }
+            let mut mapping = Self {
+                layout: *layout,
+                name: name.to_owned(),
+                handle,
+                view,
+            };
+            layout.write_header(mapping.view());
+            Ok(mapping)
+        }
+
+        /// The whole mapping, [`Layout::mapping_len`] bytes, header first.
+        #[allow(unsafe_code)]
+        pub(crate) fn view(&mut self) -> &mut [u8] {
+            // SAFETY: `view` is the base of a live view mapped with exactly
+            // `mapping_len` bytes from a section created with that size; the length
+            // comes from `self.layout`, never from the header, so no reader can
+            // lengthen it. The view stays mapped until `Drop`, which needs `&mut
+            // self` too, so the slice cannot outlive it; and `&mut self` is the only
+            // way in, so no two slices alias.
+            unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.view.Value.cast::<u8>(),
+                    self.layout.mapping_len(),
+                )
+            }
+        }
+
+        /// Publishes `canvas` as frame `seq`: the spec's recipe (§ Publishing a
+        /// frame) minus the request. Picks `slot_for(seq)`, writes the slot's
+        /// descriptor, copies the rows, then release-stores `seq` into `ready`, and
+        /// returns what the request must repeat.
+        ///
+        /// Nothing is written unless everything will be. A canvas whose size is not
+        /// this mapping's is refused whole: a mapping is sized for one frame size,
+        /// and the caller's answer to a resize is a new mapping (Task 4), never a
+        /// partial slot. A `seq` of `0` — the "nothing published" value — or one at
+        /// or below the current `ready` is refused for the same reason: the reader
+        /// rejects a sequence that goes backwards, and this side would rather say so
+        /// than publish a frame the host will refuse.
+        ///
+        /// The slot-reuse rule (do not refill a slot before the reply for the frame
+        /// that last used it has returned) is not enforced here. With one frame in
+        /// flight it holds by construction, because the caller awaits every reply
+        /// before calling this again; `frame_file.rs` pins that (Task 5).
+        pub(crate) fn publish(&mut self, seq: u64, canvas: &Canvas) -> io::Result<Published> {
+            let layout = self.layout;
+            if (canvas.width, canvas.height) != (layout.width(), layout.height()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm mapping {} is sized for {}x{}, not the {}x{} canvas: \
+                         a resize needs a new mapping",
+                        self.name,
+                        layout.width(),
+                        layout.height(),
+                        canvas.width,
+                        canvas.height,
+                    ),
+                ));
+            }
+            let row = layout.stride() as usize;
+            let frame = row * layout.height() as usize;
+            if canvas.pixels.len() < frame {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm: a {}x{} canvas needs {frame} bytes, has {}",
+                        canvas.width,
+                        canvas.height,
+                        canvas.pixels.len(),
+                    ),
+                ));
+            }
+            let ready = self.ready().load(Ordering::Acquire);
+            if seq == 0 || seq <= ready {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm seq {seq} does not follow {ready}: sequences start at 1 \
+                         and never go backwards"
+                    ),
+                ));
+            }
+
+            let slot = slot_for(seq);
+            let descriptor = Descriptor::for_layout(&layout);
+            let view = self.view();
+            descriptor.write(&mut view[layout.descriptor(slot)]);
+            // Row by row rather than one copy: the two strides agree today because
+            // the canvas has no padding, but the spec lets the slot's be wider.
+            let rows = canvas.pixels[..frame].chunks_exact(row);
+            for (dst, src) in view[layout.pixels(slot)].chunks_exact_mut(row).zip(rows) {
+                dst.copy_from_slice(src);
+            }
+            // The release is what makes the descriptor and the rows above visible
+            // to a reader whose acquire load of `ready` sees `seq`.
+            self.ready().store(seq, Ordering::Release);
+            Ok(Published {
+                slot,
+                seq,
+                descriptor,
+            })
+        }
+
+        /// The header's `ready` field as the atomic the contract says it is.
+        ///
+        /// Addressed through the *mapped* field, as the reader addresses it, rather
+        /// than through a copy: the store has to be the one the reader's acquire
+        /// load pairs with.
+        #[allow(unsafe_code)]
+        pub(crate) fn ready(&self) -> &AtomicU64 {
+            // SAFETY: the view base is allocation-granularity aligned (that is what
+            // `MapViewOfFile` returns) and `READY_OFFSET` is 32, so the pointer is
+            // 8-byte aligned; `READY_OFFSET + 8` is inside the 256-byte header, which
+            // is inside the `mapping_len` bytes the view covers; the view stays
+            // mapped for as long as `self` does, which bounds the returned borrow;
+            // and no non-atomic access to these eight bytes can overlap the
+            // returned reference, because the only other way at them is `view()`,
+            // which needs `&mut self`.
+            unsafe {
+                AtomicU64::from_ptr(self.view.Value.cast::<u8>().add(READY_OFFSET).cast::<u64>())
+            }
+        }
+
+        /// The name the section was created under: what the request carries.
+        pub(crate) fn name(&self) -> &str {
+            &self.name
+        }
+
+        /// The layout this mapping was sized for.
+        pub(crate) fn layout(&self) -> &Layout {
+            &self.layout
+        }
+    }
+
+    impl std::fmt::Debug for Mapping {
+        /// The name and the layout; the handle and the view address are not
+        /// interesting and would only differ between runs.
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Mapping")
+                .field("name", &self.name)
+                .field("layout", &self.layout)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Drop for Mapping {
+        /// Unmaps the view, then closes the handle. Once both are gone and no reader
+        /// holds the section, the name is free and the host's next open of it fails
+        /// with an ordinary error — the contract's expected end of a producer.
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            // SAFETY: `view` is the base address `MapViewOfFile` returned and it is
+            // unmapped exactly once, here; no slice from `view()` can be alive,
+            // because `drop` holds the `&mut self` such a slice would borrow from.
+            unsafe { UnmapViewOfFile(self.view) };
+            // SAFETY: `handle` is the section handle `CreateFileMappingW` returned
+            // and is closed exactly once, here, after the view that depended on it.
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// The reader's side, for the tests here and in [`super::producer`]. The real
+    /// reader is not in this tree, so the tests *are* the reader: they open the
+    /// section by name with `OpenFileMappingW`, the call `ShmFrameLayout.cs` makes,
+    /// and look at the bytes through that second view.
+    #[cfg(test)]
+    pub(crate) mod testing {
+        use std::io;
+
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::Memory::{
+            FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, OpenFileMappingW,
+            UnmapViewOfFile,
+        };
+
+        /// A read-only view opened by name.
+        pub(crate) struct Reader {
+            handle: HANDLE,
+            view: MEMORY_MAPPED_VIEW_ADDRESS,
+            len: usize,
+        }
+
+        impl Reader {
+            /// Opens `name` and maps `len` bytes of it, which may be fewer than the
+            /// section holds: a test that only wants the header asks for that much.
+            #[allow(unsafe_code)]
+            pub(crate) fn open(name: &str, len: usize) -> io::Result<Self> {
+                let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+                // SAFETY: `wide` is NUL-terminated and outlives the call.
+                let handle = unsafe { OpenFileMappingW(FILE_MAP_READ, 0, wide.as_ptr()) };
+                if handle.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                // SAFETY: a handle we own; `len` is at most what the producer created
+                // the section with, so the view lies inside it.
+                let view = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, len) };
+                if view.Value.is_null() {
+                    let err = io::Error::last_os_error();
+                    // SAFETY: closed once, on the failure path only.
+                    unsafe { CloseHandle(handle) };
+                    return Err(err);
+                }
+                Ok(Self { handle, view, len })
+            }
+
+            #[allow(unsafe_code)]
+            pub(crate) fn bytes(&self) -> &[u8] {
+                // SAFETY: a live read-only view of `len` bytes, unmapped only in
+                // `Drop`, which cannot run while this borrow is alive.
+                unsafe { std::slice::from_raw_parts(self.view.Value.cast::<u8>(), self.len) }
+            }
+
+            /// The header's `ready`: the eight bytes at offset 32 through this
+            /// view. A read-only view cannot be handed to `AtomicU64::from_ptr`,
+            /// which wants write access, and the producer and this reader are one
+            /// thread, so a plain read races with nothing; the acquire side is
+            /// exercised through the producer's own atomic.
+            pub(crate) fn ready(&self) -> u64 {
+                u64::from_le_bytes(self.bytes()[32..40].try_into().unwrap())
+            }
+        }
+
+        impl std::fmt::Debug for Reader {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "Reader({} bytes)", self.len)
+            }
+        }
+
+        impl Drop for Reader {
+            #[allow(unsafe_code)]
+            fn drop(&mut self) {
+                // SAFETY: each released once, view before handle, as the producer does.
+                unsafe {
+                    UnmapViewOfFile(self.view);
+                    CloseHandle(self.handle);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io;
+
+        use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+
+        use super::super::layout::{HEADER_LEN, NAME_PREFIX, PAGE};
+        use super::testing::Reader;
+        use super::*;
+        use crate::canvas::Canvas;
+
+        /// A name no other test, and no other test process, will create: the test's
+        /// own tag plus this process's id.
+        fn test_name(tag: &str) -> String {
+            format!("{NAME_PREFIX}test-{}-{tag}", std::process::id())
+        }
+
+        fn hd() -> Layout {
+            Layout::for_frame(1920, 1080).unwrap()
+        }
+
+        fn u32_at(view: &[u8], offset: usize) -> u32 {
+            u32::from_le_bytes(view[offset..offset + 4].try_into().unwrap())
+        }
+
+        fn u64_at(view: &[u8], offset: usize) -> u64 {
+            u64::from_le_bytes(view[offset..offset + 8].try_into().unwrap())
+        }
+
+        // -- the round trip ----------------------------------------------------
+
+        #[test]
+        fn a_reader_opening_the_name_sees_the_header_and_the_producers_writes() {
+            let layout = hd();
+            let name = test_name("roundtrip");
+            let mut mapping = Mapping::create(&layout, &name).expect("create");
+            assert_eq!(mapping.name(), name);
+            assert_eq!(mapping.layout(), &layout);
+            assert_eq!(mapping.view().len(), layout.mapping_len());
+
+            let reader = Reader::open(&name, layout.mapping_len()).expect("open by name");
+            let seen = reader.bytes();
+
+            // The header, at the spec's offsets — the same assertions Task 1 makes
+            // against a Vec, now against the bytes another handle to the section sees.
+            assert_eq!(u32_at(seen, 0), 0x46534741, "magic");
+            assert_eq!(u32_at(seen, 4), 1, "version");
+            assert_eq!(u32_at(seen, 8), 2, "slotCount");
+            assert_eq!(u32_at(seen, 12), 0, "flags");
+            assert_eq!(u64_at(seen, 16), layout.slot_stride() as u64, "slotStride");
+            assert_eq!(u64_at(seen, 24), 256, "pixelOffset");
+            assert_eq!(u64_at(seen, 32), 0, "ready");
+            assert!(
+                seen[40..HEADER_LEN].iter().all(|&b| b == 0),
+                "reserved and descriptors"
+            );
+            let mut expected = vec![0; HEADER_LEN];
+            layout.write_header(&mut expected);
+            assert_eq!(
+                &seen[..HEADER_LEN],
+                &expected[..],
+                "byte for byte, Task 1's header"
+            );
+            assert!(
+                seen[HEADER_LEN..].iter().all(|&b| b == 0),
+                "a fresh section is zero-filled past the header",
+            );
+
+            // A byte written through the producer's view is the reader's byte.
+            let probe = layout.pixels(1).start + 7;
+            mapping.view()[probe] = 0xC3;
+            assert_eq!(reader.bytes()[probe], 0xC3, "same pages, seen at once");
+            let last = layout.mapping_len() - 1;
+            mapping.view()[last] = 0x5A;
+            assert_eq!(reader.bytes()[last], 0x5A, "the view reaches its last byte");
+        }
+
+        #[test]
+        fn the_view_is_the_layouts_length_not_the_sections_page_rounding() {
+            // 1x1 needs 256 + 2 * 4096 bytes; the section is 3 pages, and so is the
+            // view — the length is the layout's, whatever the kernel rounds to.
+            let layout = Layout::for_frame(1, 1).unwrap();
+            let mut mapping = Mapping::create(&layout, &test_name("len")).unwrap();
+            assert_eq!(mapping.view().len(), 256 + 2 * PAGE);
+            assert_eq!(mapping.view().len(), layout.mapping_len());
+        }
+
+        // -- error paths ---------------------------------------------------------
+
+        #[test]
+        fn an_invalid_name_is_refused_before_it_can_become_an_object() {
+            let layout = hd();
+            for bad in [
+                NAME_PREFIX.to_owned(),                  // empty suffix
+                r"Local\winterm-browser-1-0".to_owned(), // the pre-contract spelling
+                format!("{NAME_PREFIX}with space"),
+                format!("{NAME_PREFIX}a\\b"),
+                format!("{NAME_PREFIX}{}", "x".repeat(129)),
+            ] {
+                let err = Mapping::create(&layout, &bad).expect_err(&bad);
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+                assert!(err.to_string().contains(&bad), "{err}");
+                assert!(err.to_string().contains(NAME_PREFIX), "{err}");
+                // Nothing was created: the name does not open. (The names with a
+                // space or a second backslash are legal kernel names, so this is a
+                // real check that no call was made, not a check that it would fail.)
+                let open = Reader::open(&bad, layout.mapping_len()).expect_err("no object");
+                // A second backslash makes the object manager look for a directory
+                // that is not there, which reports as "path" rather than "file".
+                assert!(
+                    matches!(
+                        open.raw_os_error(),
+                        Some(code) if code == ERROR_FILE_NOT_FOUND as i32 || code == ERROR_PATH_NOT_FOUND as i32
+                    ),
+                    "{bad:?}: {open}"
+                );
+            }
+        }
+
+        #[test]
+        fn creating_the_same_name_twice_is_a_stale_incarnation_not_a_reuse() {
+            let layout = hd();
+            let name = test_name("twice");
+            let mut first = Mapping::create(&layout, &name).expect("first");
+            first.view()[HEADER_LEN] = 0x77;
+
+            let err = Mapping::create(&layout, &name).expect_err("the name is taken");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+            assert!(err.to_string().contains(&name), "{err}");
+            assert!(err.to_string().contains("fresh suffix"), "{err}");
+
+            // The refusal touched nothing: the first mapping is intact and still open.
+            let reader = Reader::open(&name, layout.mapping_len()).expect("still there");
+            assert_eq!(u32_at(reader.bytes(), 0), 0x46534741);
+            assert_eq!(
+                reader.bytes()[HEADER_LEN],
+                0x77,
+                "the header was not rewritten"
+            );
+        }
+
+        #[test]
+        fn after_drop_the_name_no_longer_opens() {
+            let layout = hd();
+            let name = test_name("drop");
+            let mapping = Mapping::create(&layout, &name).expect("create");
+            // Prove it was there, then let go of *both* handles: a section lives as
+            // long as any handle to it, so the reader's has to go too.
+            drop(Reader::open(&name, layout.mapping_len()).expect("open while alive"));
+            drop(mapping);
+
+            let err = Reader::open(&name, layout.mapping_len()).expect_err("gone");
+            assert_eq!(
+                err.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{err}"
+            );
+        }
+
+        // -- publishing ------------------------------------------------------------
+
+        /// A canvas painted one colour through the canvas's byte-copying fill.
+        fn flat(width: u32, height: u32, rgba: [u8; 4]) -> Canvas {
+            let mut canvas = Canvas::new(width, height);
+            canvas.fill(rgba);
+            canvas
+        }
+
+        /// A canvas in which no two nearby pixels agree, so a row landing in the
+        /// wrong place, or the wrong slot, is visible.
+        fn gradient(width: u32, height: u32) -> Canvas {
+            let mut canvas = Canvas::new(width, height);
+            for (i, px) in canvas.pixels.chunks_exact_mut(4).enumerate() {
+                px.copy_from_slice(&[(i % 251) as u8, (i / 251) as u8, (i % 7) as u8, 255]);
+            }
+            canvas
+        }
+
+        fn ready_seen_by(reader: &Reader) -> u64 {
+            reader.ready()
+        }
+
+        #[test]
+        fn a_publish_writes_the_descriptor_then_the_rows_then_ready() {
+            let layout = Layout::for_frame(8, 4).unwrap();
+            let name = test_name("publish");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            assert_eq!(ready_seen_by(&reader), 0, "nothing published yet");
+
+            let first = gradient(8, 4);
+            let published = mapping.publish(1, &first).expect("first frame");
+            assert_eq!(
+                published,
+                Published {
+                    slot: 1,
+                    seq: 1,
+                    descriptor: Descriptor {
+                        width: 8,
+                        height: 4,
+                        stride: 32,
+                        format: 32,
+                    },
+                },
+                "sequences start at 1, which is slot 1"
+            );
+
+            let seen = reader.bytes();
+            // Slot 1's descriptor at 64 + 16 * 1, in the spec's field order.
+            assert_eq!(u32_at(seen, 80), 8, "width");
+            assert_eq!(u32_at(seen, 84), 4, "height");
+            assert_eq!(u32_at(seen, 88), 32, "stride");
+            assert_eq!(u32_at(seen, 92), 32, "format");
+            assert!(
+                seen[64..80].iter().all(|&b| b == 0),
+                "slot 0's descriptor is untouched"
+            );
+            assert_eq!(
+                &seen[layout.pixels(1)],
+                &first.pixels[..],
+                "the rows, in order"
+            );
+            assert!(
+                seen[layout.pixels(0)].iter().all(|&b| b == 0),
+                "slot 0's pixels are untouched"
+            );
+            assert_eq!(ready_seen_by(&reader), 1, "ready names the frame");
+            assert_eq!(
+                mapping.ready().load(Ordering::Acquire),
+                1,
+                "and an acquire load of the atomic agrees"
+            );
+
+            // The next frame takes the other slot and leaves this one alone: the
+            // host may still be copying it, and it is the reply, not this call,
+            // that frees it.
+            let second = flat(8, 4, [1, 2, 3, 255]);
+            let published = mapping.publish(2, &second).expect("second frame");
+            assert_eq!((published.slot, published.seq), (0, 2));
+            let seen = reader.bytes();
+            assert_eq!(u32_at(seen, 64), 8, "slot 0's descriptor now");
+            assert_eq!(&seen[layout.pixels(0)], &second.pixels[..]);
+            assert_eq!(
+                &seen[layout.pixels(1)],
+                &first.pixels[..],
+                "slot 1 still holds frame 1"
+            );
+            assert_eq!(ready_seen_by(&reader), 2);
+            assert_eq!(mapping.ready().load(Ordering::Acquire), 2);
+        }
+
+        #[test]
+        fn the_slot_holds_the_canvass_bytes_in_the_canvass_order() {
+            let layout = Layout::for_frame(3, 2).unwrap();
+            let name = test_name("order");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+
+            // Opaque: an RGBA colour lands as those four bytes, R first. The canvas
+            // is tiny-skia RGBA and `format: 32` tells the host exactly that.
+            mapping
+                .publish(1, &flat(3, 2, [0x11, 0x22, 0x33, 0xFF]))
+                .unwrap();
+            let pixels = &reader.bytes()[layout.pixels(1)];
+            assert_eq!(pixels.len(), 3 * 2 * 4);
+            for px in pixels.chunks_exact(4) {
+                assert_eq!(px, [0x11, 0x22, 0x33, 0xFF], "R, G, B, A in that order");
+            }
+
+            // Translucent: the plan says premultiplied storage is identical for
+            // opaque pixels, and this is the case where it is *not*. Painted
+            // through tiny-skia over a transparent canvas, (0, 200, 0, 128) is
+            // stored premultiplied — green scaled by alpha, about 100 — and the
+            // slot carries exactly those stored bytes. So a translucent pixel
+            // reaches the host premultiplied; browser frames are opaque, so none
+            // does.
+            let mut translucent = Canvas::new(3, 2);
+            let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, 3.0, 2.0).unwrap();
+            translucent.fill_path(&tiny_skia::PathBuilder::from_rect(rect), [0, 200, 0, 128]);
+            let stored = tiny_skia::ColorU8::from_rgba(0, 200, 0, 128).premultiply();
+            assert_eq!((stored.red(), stored.blue(), stored.alpha()), (0, 0, 128));
+            assert!(
+                (99..=101).contains(&stored.green()),
+                "premultiplied green is 200 * 128 / 255, got {}",
+                stored.green()
+            );
+            mapping.publish(2, &translucent).unwrap();
+            let pixels = &reader.bytes()[layout.pixels(0)];
+            assert_eq!(
+                pixels,
+                &translucent.pixels[..],
+                "the slot is the canvas, byte for byte"
+            );
+            for px in pixels.chunks_exact(4) {
+                assert_eq!((px[0], px[2], px[3]), (0, 0, 128), "{px:?}");
+                assert!(
+                    (i32::from(px[1]) - i32::from(stored.green())).abs() <= 1,
+                    "green is premultiplied, not 200: {px:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_full_hd_frame_fills_its_slot_and_nothing_past_it() {
+            // The size the budget was measured at: the copy lands whole and the page
+            // padding after the last row stays zero.
+            let layout = hd();
+            let name = test_name("hd");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            let canvas = gradient(1920, 1080);
+            let published = mapping.publish(1, &canvas).unwrap();
+            assert_eq!(published.descriptor.stride, 7680);
+            let seen = reader.bytes();
+            assert_eq!(&seen[layout.pixels(1)], &canvas.pixels[..]);
+            let padding = layout.pixels(1).end..layout.mapping_len();
+            assert!(
+                seen[padding].iter().all(|&b| b == 0),
+                "the copy stops at the last row"
+            );
+        }
+
+        #[test]
+        fn a_canvas_of_another_size_is_refused_and_nothing_moves() {
+            let layout = Layout::for_frame(8, 4).unwrap();
+            let name = test_name("mismatch");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            mapping.publish(1, &gradient(8, 4)).unwrap();
+            let before = reader.bytes().to_vec();
+
+            for (w, h) in [(9, 4), (8, 5), (4, 8), (1, 1), (16, 8)] {
+                let err = mapping
+                    .publish(2, &gradient(w, h))
+                    .expect_err(&format!("{w}x{h}"));
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(err.to_string().contains(&name), "{err}");
+                assert!(err.to_string().contains("8x4"), "{err}");
+                assert!(err.to_string().contains(&format!("{w}x{h}")), "{err}");
+                assert!(err.to_string().contains("new mapping"), "{err}");
+            }
+            // A right-sized canvas that does not carry its own pixels: the check
+            // `encode_png` makes, made here too.
+            let mut short = gradient(8, 4);
+            short.pixels.truncate(8);
+            let err = mapping.publish(2, &short).expect_err("short");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("128 bytes, has 8"), "{err}");
+
+            assert_eq!(reader.bytes(), &before[..], "not a byte changed");
+            assert_eq!(ready_seen_by(&reader), 1, "ready stays put");
+            // The sequence was not consumed either: 2 still publishes.
+            assert_eq!(mapping.publish(2, &gradient(8, 4)).unwrap().seq, 2);
+        }
+
+        #[test]
+        fn a_sequence_that_does_not_advance_is_refused_before_the_host_can() {
+            let layout = Layout::for_frame(2, 2).unwrap();
+            let name = test_name("seq");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            let canvas = flat(2, 2, [9, 9, 9, 255]);
+
+            let err = mapping
+                .publish(0, &canvas)
+                .expect_err("0 means nothing published");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("start at 1"), "{err}");
+            assert_eq!(ready_seen_by(&reader), 0);
+            assert!(
+                reader.bytes()[HEADER_LEN..].iter().all(|&b| b == 0),
+                "no slot was touched"
+            );
+
+            mapping.publish(5, &canvas).unwrap();
+            let before = reader.bytes().to_vec();
+            for stale in [5, 4, 1] {
+                let err = mapping.publish(stale, &canvas).expect_err("backwards");
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                assert!(err.to_string().contains("does not follow 5"), "{err}");
+            }
+            assert_eq!(reader.bytes(), &before[..]);
+            // Gaps are fine: the reader asks only that `seq` never go backwards.
+            assert_eq!(mapping.publish(7, &canvas).unwrap().slot, 1);
+            assert_eq!(ready_seen_by(&reader), 7);
+        }
+
+        #[test]
+        fn ready_is_released_last_and_nothing_else_writes_it() {
+            // One thread cannot observe the ordering, so this pins the construction
+            // that gives it: `publish` writes the descriptor, then the rows, then
+            // `ready` — once, with `Release` — and no other store to the atomic
+            // exists in this file. A reader's acquire load that sees `seq` therefore
+            // sees the descriptor and the rows written before it.
+            let source = include_str!("frame_shm.rs");
+            let publish = source
+                .split("pub(crate) fn publish(")
+                .nth(1)
+                .expect("publish exists");
+            let body = publish.split("pub(crate) fn ready(").next().unwrap();
+            let descriptor = body
+                .find("descriptor.write(")
+                .expect("the descriptor is written");
+            let rows = body
+                .find("dst.copy_from_slice(src)")
+                .expect("the rows are copied");
+            let release = body
+                .find(".store(seq, Ordering::Release)")
+                .expect("ready is release-stored");
+            assert!(
+                descriptor < rows && rows < release,
+                "descriptor, rows, then ready"
+            );
+            assert_eq!(
+                body.matches("Ordering::Release").count(),
+                1,
+                "exactly one release store in publish"
+            );
+            // And the mapping module's production code — from its opening to its
+            // first `cfg(test)` — stores to an atomic once. Bounded to this module
+            // so a test elsewhere in the file with an atomic of its own cannot
+            // fail it.
+            let module = source
+                .split("pub(crate) mod mapping {")
+                .nth(1)
+                .expect("the mapping module");
+            let production = module.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(
+                production.matches(".store(").count(),
+                1,
+                "publish's is the only store to ready"
+            );
+        }
+
+        #[test]
+        fn a_reader_keeps_the_section_alive_but_the_producer_does_not_care() {
+            // The contract: a vanished mapping between calls reports as an ordinary
+            // failure. A reader that is mid-copy keeps the pages alive on its own
+            // handle, so the producer dropping is safe for it too.
+            let layout = Layout::for_frame(4, 4).unwrap();
+            let name = test_name("outlive");
+            let mut mapping = Mapping::create(&layout, &name).unwrap();
+            let probe = layout.pixels(0).start;
+            mapping.view()[probe] = 0x11;
+            let reader = Reader::open(&name, layout.mapping_len()).unwrap();
+            drop(mapping);
+            assert_eq!(
+                reader.bytes()[probe],
+                0x11,
+                "the reader's view survives the producer"
+            );
+        }
+    }
+}
+
+/// The producer: the one thing `frame_file.rs` talks to. Owns the mapping, the
+/// sequence counter and the incarnation, and keeps the four rules that tie them
+/// together in one place:
+///
+/// - **`seq` is monotonic for the life of the producer.** It is bumped on every
+///   successful publish and never restarted, not even when the mapping is
+///   replaced: the host rejects a `seq` that goes backwards and skips the copy
+///   when `(id, name, seq)` repeats, so a restarted counter would be a dropped or
+///   refused frame. A second producer in the same process starts its own count at
+///   1 — that is safe only because the second rule gives it names of its own
+///   ([`producer::RANGE`]: each producer's suffixes are nobody else's).
+/// - **A resize is a fresh mapping under a fresh name.** A mapping is sized for one
+///   frame size ([`mapping::Mapping::publish`] refuses any other), and the contract only
+///   admits a recreated mapping under an old name if its sequence continues, so
+///   the safe answer is never to reuse a name: every mapping this producer
+///   creates takes the next `incarnation`. A name found already taken is a stale
+///   incarnation still alive somewhere and gets the next suffix too. The suffixes
+///   are the only thing that tells two producers of one process apart — the pid
+///   is the process's — so each producer owns a range of them
+///   ([`producer::RANGE`]) and none is ever offered by two.
+/// - **A name is this process's alone, not its pid's.** The host keeps the last
+///   sequence it accepted under each name for the pane's lifetime, and a pane
+///   outlives the browsers run in it; Windows reissues a pid once its process is
+///   gone. A later browser in the same pane under a reused pid, naming its mappings
+///   by pid alone, would offer the same first name with `seq` back at 1 and be
+///   refused on every frame until the fast path latched off. So every name also
+///   carries [`producer::process_start`], the millisecond this process made its
+///   first producer, which no earlier holder of the pid can share.
+/// - **The old mapping is dropped only after the new one exists and only while no
+///   request is outstanding.** The drop happens inside [`producer::Producer::publish`], and
+///   `publish` is only called after the reply for the previous frame has returned
+///   (one frame in flight; `frame_file.rs` awaits every reply and pins that), so
+///   the host is never mid-copy from a mapping this side unmaps.
+///
+/// A publish that fails leaves the producer as it was: `seq` un-bumped, the
+/// previous mapping in place. The next attempt reuses the same `seq`.
+#[cfg(windows)]
+pub(crate) mod producer {
+    use std::io;
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::layout::{Layout, Published, mapping_name};
+    use super::mapping::Mapping;
+    use crate::canvas::Canvas;
+
+    /// How many suffixes are tried, when a name is found taken, before giving up.
+    /// One stale incarnation is plausible; sixteen means something else is wrong.
+    const NAME_ATTEMPTS: u32 = 16;
+
+    /// How many mapping-name suffixes one producer owns.
+    ///
+    /// Every producer takes the next range of this many from [`NEXT_RANGE`] when it
+    /// is made, so two producers alive in one process never offer the same name —
+    /// the pid is the process's, and without this the second would find the
+    /// first's names taken, or worse, free and reusable with a restarted `seq`,
+    /// which the host rejects. One producer per `Terminal` is what production
+    /// makes; `cargo test` makes them by the dozen, as threads of one process. A
+    /// producer spends one suffix per mapping created — a resize, a stale name —
+    /// so 65536 is far past what any spends, and leaves as many producers per
+    /// process, which none reaches.
+    pub(crate) const RANGE: u32 = 1 << 16;
+
+    /// The first suffix of the next producer's range. The first producer in a
+    /// process starts at `0`, which is the name the spec's example shows.
+    static NEXT_RANGE: AtomicU32 = AtomicU32::new(0);
+
+    /// When this process made its first producer: milliseconds since the Unix
+    /// epoch, captured once and the same for every producer after.
+    static PROCESS_START: OnceLock<u64> = OnceLock::new();
+
+    /// The segment of every name that tells this process from an earlier one with
+    /// the same pid.
+    ///
+    /// Two processes never hold one pid at once, so the later one made its first
+    /// producer after the earlier one had exited — later on the clock, whose
+    /// millisecond is what the name carries. That is what keeps a name from
+    /// repeating across processes, as the ranges keep it from repeating within
+    /// one; it matters because the host remembers the last sequence accepted
+    /// under a name for the pane's lifetime and refuses a `seq` that goes
+    /// backwards, so a repeated name with a restarted `seq` is refused, not
+    /// skipped. A clock before the epoch reads as `0`, which is still a name; it
+    /// is not a clock this code runs under.
+    pub(crate) fn process_start() -> u64 {
+        *PROCESS_START.get_or_init(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| {
+                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+                })
+        })
+    }
+
+    /// See the [module doc](self).
+    #[derive(Debug)]
+    pub(crate) struct Producer {
+        /// This process's id, and when it made its first producer
+        /// ([`process_start`]): the middle of every name this producer creates.
+        pid: u32,
+        start: u64,
+        /// The sequence of the last frame published, `0` until the first. Never
+        /// restarted while the producer lives.
+        seq: u64,
+        /// The suffix the *next* mapping is created under.
+        incarnation: u32,
+        /// One past the last suffix this producer may offer: the end of its
+        /// [`RANGE`].
+        end: u32,
+        /// The mapping the last frame went into, sized for that frame; `None`
+        /// before the first publish.
+        mapping: Option<Mapping>,
+    }
+
+    impl Producer {
+        /// No mapping yet: the first publish creates one at the first frame's size,
+        /// under the first suffix of a range no other producer in this process has.
+        pub(crate) fn new() -> Self {
+            let start = NEXT_RANGE.fetch_add(RANGE, Ordering::Relaxed);
+            Self {
+                pid: std::process::id(),
+                start: process_start(),
+                seq: 0,
+                incarnation: start,
+                end: start.saturating_add(RANGE),
+                mapping: None,
+            }
+        }
+
+        /// Publishes `canvas` as the next frame, creating a mapping first if there
+        /// is none or the current one is sized for another frame.
+        ///
+        /// The sequence is bumped first — frames count from 1 — but only committed
+        /// once the frame is in the mapping, so a failure anywhere leaves `seq`
+        /// where it was and the next attempt reuses it. The returned
+        /// [`Published`] and [`Producer::current_name`] are what the request
+        /// repeats.
+        pub(crate) fn publish(&mut self, canvas: &Canvas) -> io::Result<Published> {
+            let seq = self.seq + 1;
+            let fits = self.mapping.as_ref().is_some_and(|mapping| {
+                (mapping.layout().width(), mapping.layout().height())
+                    == (canvas.width, canvas.height)
+            });
+            if !fits {
+                let layout = Layout::for_frame(canvas.width, canvas.height)?;
+                let fresh = self.create(&layout)?;
+                // This assignment drops the previous mapping, and it is the only
+                // place one is dropped while the producer lives. Two things make
+                // that safe: the new mapping already exists, so there is never a
+                // moment without one; and no request is outstanding, because this
+                // is `publish`, which is called only after the reply for the last
+                // frame has returned (one frame in flight — `frame_file.rs` awaits
+                // every reply before the next publish and its tests pin that). A
+                // host that pipelined would need the drop deferred until its
+                // reply; this one does not.
+                self.mapping = Some(fresh);
+            }
+            let mapping = self
+                .mapping
+                .as_mut()
+                .expect("a mapping sized for the canvas exists past the check above");
+            let published = mapping.publish(seq, canvas)?;
+            self.seq = seq;
+            Ok(published)
+        }
+
+        /// A mapping under the next incarnation's name, skipping any name that is
+        /// already taken. The incarnation counter advances for every name tried,
+        /// taken or not, so no name is offered twice — and never past the end of
+        /// this producer's range, which is the next producer's.
+        fn create(&mut self, layout: &Layout) -> io::Result<Mapping> {
+            for _ in 0..NAME_ATTEMPTS {
+                if self.incarnation >= self.end {
+                    return Err(io::Error::other(
+                        "image.frameshm: every mapping-name suffix of this producer's range \
+                         has been used",
+                    ));
+                }
+                let name = mapping_name(self.pid, self.start, self.incarnation);
+                self.incarnation += 1;
+                match Mapping::create(layout, &name) {
+                    Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                    other => return other,
+                }
+            }
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "image.frameshm: {NAME_ATTEMPTS} mapping names in a row were already \
+                     taken, up to {}",
+                    mapping_name(self.pid, self.start, self.incarnation - 1)
+                ),
+            ))
+        }
+
+        /// Lets the mapping go, keeping the counters.
+        ///
+        /// This is the producer's end as the contract expects it: the view is
+        /// unmapped and the handle closed, so once no reader holds the section the
+        /// name is free and the host's next open of it fails with an ordinary
+        /// error. The caller's obligation is the contract's — no request may be
+        /// outstanding — and `frame_file.rs` meets it by closing only after the
+        /// reply to `image.clear`, or when nothing was ever sent.
+        ///
+        /// `seq` and the incarnation are kept, not the mapping alone, so a frame
+        /// published after this gets a fresh name with the sequence continuing.
+        /// The host allows a name to be reused only if its sequence continues and
+        /// rejects a `seq` that goes backwards, so a producer that started over
+        /// would be refused on every frame.
+        pub(crate) fn close(&mut self) {
+            self.mapping = None;
+        }
+
+        /// The name of the mapping the last frame went into, for the request and
+        /// the logs; `None` before the first publish.
+        pub(crate) fn current_name(&self) -> Option<&str> {
+            self.mapping.as_ref().map(Mapping::name)
+        }
+
+        /// The sequence of the last frame published, `0` before the first.
+        #[cfg(test)]
+        pub(crate) fn seq(&self) -> u64 {
+            self.seq
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::io;
+
+        use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+
+        use super::super::layout::{HEADER_LEN, Layout, NAME_PREFIX, mapping_name};
+        use super::super::mapping::Mapping;
+        use super::super::mapping::testing::Reader;
+        use super::*;
+        use crate::canvas::Canvas;
+
+        /// A canvas painted one colour.
+        fn flat(width: u32, height: u32, rgba: [u8; 4]) -> Canvas {
+            let mut canvas = Canvas::new(width, height);
+            canvas.fill(rgba);
+            canvas
+        }
+
+        /// Whether `name` still opens: only the header is mapped, which is enough
+        /// to tell.
+        fn opens(name: &str) -> io::Result<Reader> {
+            Reader::open(name, HEADER_LEN)
+        }
+
+        /// The incarnation a name of this producer's ends in.
+        fn incarnation_of(name: &str) -> u32 {
+            let prefix = format!(
+                "{NAME_PREFIX}browser-{}-{}-",
+                std::process::id(),
+                process_start()
+            );
+            name.strip_prefix(&prefix)
+                .unwrap_or_else(|| panic!("{name} is not this process's: expected {prefix}…"))
+                .parse()
+                .unwrap_or_else(|err| panic!("{name}: {err}"))
+        }
+
+        #[test]
+        fn a_new_producer_has_no_mapping_and_no_sequence() {
+            let producer = Producer::new();
+            assert_eq!(producer.current_name(), None);
+            assert_eq!(producer.seq(), 0);
+            assert_eq!(producer.pid, std::process::id());
+            assert_eq!(producer.start, process_start());
+            assert_eq!(
+                producer.incarnation % RANGE,
+                0,
+                "the first mapping takes the first suffix of the producer's range"
+            );
+            assert_eq!(producer.end, producer.incarnation + RANGE);
+        }
+
+        #[test]
+        fn the_process_start_is_captured_once_and_is_in_every_name() {
+            // Captured once: a producer made later in the process carries the same
+            // start as the first, so the ranges alone tell them apart. Nonzero: it
+            // is a real clock reading, not the fallback.
+            let start = process_start();
+            assert!(start > 0);
+            assert_eq!(process_start(), start, "the same for the process's life");
+            let mut producer = Producer::new();
+            assert_eq!(producer.start, start);
+            producer.publish(&flat(4, 4, [1, 1, 1, 255])).unwrap();
+            let name = producer.current_name().unwrap();
+            assert!(
+                name.contains(&format!("-{start}-")),
+                "{name} carries the process start"
+            );
+            assert_ne!(
+                name,
+                mapping_name(producer.pid, start + 1, producer.incarnation - 1),
+                "a process one millisecond later under this pid names its first mapping differently"
+            );
+        }
+
+        #[test]
+        fn two_producers_in_one_process_never_offer_the_same_name() {
+            // The pid is the same for both, so the ranges are what keep them
+            // apart — in production one per `Terminal`, here one per test thread.
+            let first = Producer::new();
+            let second = Producer::new();
+            assert!(
+                first.end <= second.incarnation || second.end <= first.incarnation,
+                "the ranges overlap: {}..{} and {}..{}",
+                first.incarnation,
+                first.end,
+                second.incarnation,
+                second.end
+            );
+        }
+
+        #[test]
+        fn sixteen_taken_names_in_a_row_are_a_refusal_that_spends_them_all() {
+            // One stale incarnation is plausible and skipped; sixteen means
+            // something else is wrong, and the producer says so rather than
+            // trying forever. Every name tried is spent, so the next attempt
+            // starts past all of them, and `seq` was never consumed.
+            let layout = Layout::for_frame(4, 4).unwrap();
+            let mut producer = Producer::new();
+            let start = producer.incarnation;
+            let held: Vec<Mapping> = (0..NAME_ATTEMPTS)
+                .map(|i| {
+                    Mapping::create(
+                        &layout,
+                        &mapping_name(producer.pid, producer.start, start + i),
+                    )
+                })
+                .collect::<io::Result<_>>()
+                .expect("hold the next sixteen names");
+
+            let err = producer
+                .publish(&flat(4, 4, [3, 3, 3, 255]))
+                .expect_err("sixteen taken names");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+            assert!(err.to_string().contains("16 mapping names"), "{err}");
+            assert!(
+                err.to_string().contains(&mapping_name(
+                    producer.pid,
+                    producer.start,
+                    start + NAME_ATTEMPTS - 1
+                )),
+                "the last name tried is named: {err}"
+            );
+            assert_eq!(
+                producer.incarnation,
+                start + NAME_ATTEMPTS,
+                "all sixteen spent"
+            );
+            assert_eq!(producer.seq(), 0, "no sequence consumed");
+            assert_eq!(producer.current_name(), None);
+
+            drop(held);
+            let published = producer.publish(&flat(4, 4, [3, 3, 3, 255])).unwrap();
+            assert_eq!(published.seq, 1);
+            assert_eq!(
+                incarnation_of(producer.current_name().unwrap()),
+                start + NAME_ATTEMPTS,
+                "the next attempt starts past the sixteen, not over them"
+            );
+        }
+
+        #[test]
+        fn frames_at_one_size_share_a_mapping_and_count_from_one() {
+            let mut producer = Producer::new();
+            let canvas = flat(8, 4, [1, 2, 3, 255]);
+
+            let first = producer.publish(&canvas).expect("first frame");
+            let name = producer
+                .current_name()
+                .expect("a mapping exists now")
+                .to_owned();
+            assert_eq!(
+                incarnation_of(&name),
+                producer.incarnation - 1,
+                "the name is this process's, under the incarnation just used"
+            );
+            assert_eq!(
+                name,
+                mapping_name(producer.pid, producer.start, producer.incarnation - 1)
+            );
+            assert_eq!((first.seq, first.slot), (1, 1), "sequences start at 1");
+
+            let second = producer.publish(&canvas).expect("second frame");
+            let third = producer.publish(&canvas).expect("third frame");
+            assert_eq!((second.seq, second.slot), (2, 0));
+            assert_eq!((third.seq, third.slot), (3, 1));
+            assert_eq!(producer.seq(), 3);
+            assert_eq!(
+                producer.current_name(),
+                Some(name.as_str()),
+                "one mapping for all three"
+            );
+            assert_eq!(
+                incarnation_of(&name) + 1,
+                producer.incarnation,
+                "no other mapping was created"
+            );
+            let reader = opens(&name).expect("the mapping is alive");
+            assert_eq!(reader.ready(), 3, "the host would see the third frame");
+        }
+
+        #[test]
+        fn a_resize_is_a_fresh_name_and_the_sequence_keeps_counting() {
+            let mut producer = Producer::new();
+            let small = flat(8, 4, [1, 2, 3, 255]);
+            for _ in 0..3 {
+                producer.publish(&small).unwrap();
+            }
+            let old = producer.current_name().unwrap().to_owned();
+            opens(&old).expect("the first mapping is alive before the switch");
+
+            let large = flat(16, 8, [4, 5, 6, 255]);
+            let fourth = producer.publish(&large).expect("fourth frame, new size");
+            let new = producer.current_name().unwrap().to_owned();
+            assert_ne!(new, old, "a resize is a new name");
+            assert_eq!(
+                incarnation_of(&new),
+                incarnation_of(&old) + 1,
+                "the next suffix, not a reused one"
+            );
+            assert_eq!(fourth.seq, 4, "the sequence continues across the switch");
+            assert_eq!(fourth.slot, 0, "4 % 2");
+            assert_eq!(fourth.descriptor.width, 16);
+            assert_eq!(fourth.descriptor.height, 8);
+            assert_eq!(fourth.descriptor.stride, 64);
+
+            let reader = opens(&new).expect("the new mapping is alive");
+            assert_eq!(reader.ready(), 4, "ready in the fresh mapping is 4, not 1");
+
+            let gone = opens(&old).expect_err("the old name no longer opens");
+            assert_eq!(
+                gone.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{gone}"
+            );
+
+            // Back at the first size: another fresh mapping, never the old name.
+            let fifth = producer.publish(&small).unwrap();
+            assert_eq!(fifth.seq, 5);
+            let newer = producer.current_name().unwrap().to_owned();
+            assert_ne!(newer, old);
+            assert_ne!(newer, new);
+            assert_eq!(incarnation_of(&newer), incarnation_of(&new) + 1);
+        }
+
+        #[test]
+        fn a_mapping_that_cannot_be_created_leaves_the_sequence_alone() {
+            let mut producer = Producer::new();
+            let start = producer.incarnation;
+
+            // Nothing to size a mapping for: the layout refuses, so no mapping is
+            // created and no sequence is consumed.
+            let err = producer.publish(&Canvas::new(0, 0)).expect_err("0x0");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+            assert_eq!(producer.seq(), 0, "seq stays un-bumped");
+            assert_eq!(producer.current_name(), None, "and nothing was created");
+            assert_eq!(producer.incarnation, start, "no name was spent either");
+
+            // The next attempt reuses the sequence the failure did not consume.
+            let canvas = flat(8, 4, [7, 7, 7, 255]);
+            assert_eq!(producer.publish(&canvas).unwrap().seq, 1);
+            let name = producer.current_name().unwrap().to_owned();
+
+            // With a mapping in place, a size the contract does not admit fails to
+            // create its replacement; the old mapping stays, and so does `seq`.
+            let too_wide = Canvas::new(16385, 1);
+            let err = producer.publish(&too_wide).expect_err("16385 wide");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+            assert!(err.to_string().contains("16385"), "{err}");
+            assert_eq!(producer.seq(), 1, "seq stays un-bumped");
+            assert_eq!(
+                producer.current_name(),
+                Some(name.as_str()),
+                "the previous mapping is kept"
+            );
+            let reader = opens(&name).expect("and is still alive");
+            assert_eq!(reader.ready(), 1, "with its last frame");
+            drop(reader);
+
+            // A failure past creation — a right-sized canvas short of its own
+            // pixels, which the mapping refuses — is the same story.
+            let mut short = flat(8, 4, [7, 7, 7, 255]);
+            short.pixels.truncate(8);
+            let err = producer.publish(&short).expect_err("short canvas");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+            assert_eq!(producer.seq(), 1, "seq stays un-bumped");
+            assert_eq!(opens(&name).unwrap().ready(), 1, "ready stays put");
+
+            // And the same `seq` goes out next, into the same mapping.
+            let next = producer.publish(&canvas).unwrap();
+            assert_eq!((next.seq, next.slot), (2, 0));
+            assert_eq!(producer.current_name(), Some(name.as_str()));
+        }
+
+        #[test]
+        fn a_taken_name_is_a_stale_incarnation_and_gets_the_next_suffix() {
+            // Someone — a previous producer in this process that never dropped, in
+            // real life — holds the name this producer would have used first.
+            let layout = Layout::for_frame(8, 4).unwrap();
+            let mut producer = Producer::new();
+            let taken = mapping_name(producer.pid, producer.start, producer.incarnation);
+            let stale = Mapping::create(&layout, &taken).expect("hold the name");
+
+            let published = producer.publish(&flat(8, 4, [0, 0, 0, 255])).unwrap();
+            assert_eq!(published.seq, 1);
+            let name = producer.current_name().unwrap().to_owned();
+            assert_ne!(name, taken, "not published into the stale mapping");
+            assert!(
+                incarnation_of(&name) > incarnation_of(&taken),
+                "{name} is a later suffix than {taken}"
+            );
+            let mine = opens(&name).unwrap();
+            assert_eq!(mine.ready(), 1);
+            let theirs = opens(&taken).unwrap();
+            assert_eq!(theirs.ready(), 0, "the stale mapping was not touched");
+            drop(stale);
+        }
+
+        #[test]
+        fn dropping_the_producer_frees_its_name() {
+            let mut producer = Producer::new();
+            producer.publish(&flat(4, 4, [1, 1, 1, 255])).unwrap();
+            let name = producer.current_name().unwrap().to_owned();
+            drop(opens(&name).expect("alive while the producer is"));
+            drop(producer);
+            let gone = opens(&name).expect_err("gone with the producer");
+            assert_eq!(
+                gone.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{gone}"
+            );
+        }
+
+        #[test]
+        fn closing_frees_the_name_and_keeps_the_counters() {
+            // `close` is the clear's end of the producer: the mapping goes, the
+            // name is free, and a frame published afterwards gets a fresh
+            // incarnation with the sequence continuing — never the old name with
+            // a restarted `seq`, which the host would reject.
+            let mut producer = Producer::new();
+            producer.publish(&flat(4, 4, [1, 1, 1, 255])).unwrap();
+            let before = producer.current_name().unwrap().to_owned();
+
+            producer.close();
+            assert_eq!(producer.current_name(), None, "no mapping to name");
+            let gone = opens(&before).expect_err("gone with the close");
+            assert_eq!(
+                gone.raw_os_error(),
+                Some(ERROR_FILE_NOT_FOUND as i32),
+                "{gone}"
+            );
+
+            let published = producer.publish(&flat(4, 4, [2, 2, 2, 255])).unwrap();
+            let after = producer.current_name().unwrap().to_owned();
+            assert_eq!(published.seq, 2, "the sequence continued");
+            assert_eq!(producer.seq(), 2);
+            assert_ne!(after, before, "a closed name is not offered again");
+            assert_eq!(incarnation_of(&after), incarnation_of(&before) + 1);
+            assert_eq!(opens(&after).unwrap().ready(), 2);
+        }
+    }
 }
 
 #[cfg(test)]

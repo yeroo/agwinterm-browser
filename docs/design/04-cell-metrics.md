@@ -5,6 +5,9 @@ explicit `TERMINAL_BROWSER_CELL_PX` overrides it and is what works before the ve
 ships. When neither answers, the backend returns `(16, 32)` with a warning that names
 the fix — and, crucially, returns it *rather than `None`*.**
 
+*Status, 2026-09: the verb is in agwinterm from v0.17.10 (`8230d0e`, beside `image.frameshm`);
+on an older release the override is still what works.*
+
 This is the port plan's Task 6. It had to be settled before Task 7 because the frame
 path publishes a `cols`/`rows` cell span and the renderer scales the image into it.
 

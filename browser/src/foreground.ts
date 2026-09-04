@@ -2,7 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { app } from "electron";
+// A deep import, because `pixel-react`'s index does not export the store and
+// adding an export there would be a divergence from a vendored file for one
+// symbol. The package has no `exports` map, so the path is stable.
+import { engineLogs } from "pixel-react/dist/devtools/stores.js";
 
+import { forwardEngineWarnings } from "./engine-log";
 import { callerCwd, FOREGROUND_SIGNALS } from "./entry";
 import { createSession } from "./session/session";
 import type { SessionHandle } from "./session/session";
@@ -122,6 +127,22 @@ export async function runForeground(cdpPort: number | null, argv: string[]): Pro
   // were missing. `tools/process-model/entry.test.mjs` pins this against the CLI's
   // list, which the two halves have to agree on.
   for (const [signal, code] of FOREGROUND_SIGNALS) process.on(signal, () => stop(code));
+
+  // The engine's warnings, to fd 2 — which under the CLI is the log file
+  // `openInForeground` opened (`stderr.log` under `LOGS_DIR`), and is the only
+  // place a foreground browser's warnings can be read back from: devtools are off
+  // in this shape, and `engineLogs` is otherwise a buffer nothing reads
+  // (`engine-log.ts`). Not when fd 2 is a console: that is a browser started by
+  // hand (`tools/milestone/run-milestone.cmd`), and a line written there paints
+  // over the frame the host is holding as a placement — the same reason the CLI
+  // redirects Electron's own chatter. Installed before the session so the first
+  // warning the engine emits is not missed; never uninstalled, because the process
+  // ends with the session.
+  if (process.stderr.isTTY !== true) {
+    forwardEngineWarnings(engineLogs, (line) => {
+      process.stderr.write(line);
+    });
+  }
 
   session = createSession({
     key: `${process.pid}-1`,

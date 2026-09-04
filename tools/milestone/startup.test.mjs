@@ -166,6 +166,7 @@ describe("the frame budget stays measurable", () => {
       "measure-host-decode.ps1",
       "measure-frame-verb.ps1",
       "measure-pipe.ps1",
+      "measure-transports.mjs",
       "run-milestone.cmd",
     ]) {
       assert.ok(fs.existsSync(path.join(HERE, script)), `${script} went missing`);

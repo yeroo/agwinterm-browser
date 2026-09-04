@@ -27,6 +27,9 @@ windows-sys = { version = "0.61", features = [
     # The control-pipe client dials with `OpenOptions`, but its test fixture is a
     # real `CreateNamedPipeW` server rather than a mock of one.
     "Win32_System_Pipes",
+    # The `image.frameshm` producer (`frame_shm::mapping`): a page-file-backed
+    # section and one view of it. The tests open it back by name as the host does.
+    "Win32_System_Memory",
 ] }
 
 [workspace.lints.rust]
