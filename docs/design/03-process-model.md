@@ -86,7 +86,10 @@ flag. Done here, and deliberately small:
 - `browser/src/entry.ts` — `entryMode(argv)`, import-free so it is testable without a
   built engine, matching `--daemon` exactly rather than by substring.
 - `browser/src/foreground.ts` — one session, `createSession` from the same factory the
-  daemon uses, signal handling, exit on close.
+  daemon uses, signal handling, exit on close — and, when fd 2 is not a console, the
+  engine's `warn`/`error` rows forwarded to it as `engine <level> <target>: …` lines
+  (`browser/src/engine-log.ts`). Under the CLI that is `logs\stderr.log`, the one place
+  a warning from the Rust side can be read without devtools.
 - `browser/src/main.tsx` — three lines, choosing between them.
 
 The daemon path is entered exactly when the CLI asks for it, which every existing

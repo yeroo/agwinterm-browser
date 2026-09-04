@@ -91,6 +91,10 @@ what keeps two installs, and a dev tree beside a release, from sharing a pipe na
 `appPaths(platform, env, home, appDirName)` is a pure function so both columns of
 that table are checked from one test run on one machine.
 
+The browser's fd 2 under the CLI is `logs\stderr.log`, and since 2026-09 the engine's
+warnings and errors are appended there as `engine <level> <target>: …` lines
+(`browser/src/engine-log.ts`); a browser started by hand keeps them off the console.
+
 ## What is scoped to "here"
 
 `--split` is unsupported (below), so the Windows shape is one browser per pane,

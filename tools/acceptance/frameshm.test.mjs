@@ -175,8 +175,11 @@ function exchange(endpoint, request) {
  * Whether the host has the verb, decided by a request it refuses before it opens
  * anything: a name outside `Local\agwinterm-frame-` fails validation on a capable
  * host, and the dispatch on an older one — "unknown command" is the *only* answer
- * that means the verb is absent, which is `is_unknown_command`'s reading too. A
- * target the host cannot resolve answers `no session`, which is the verb existing.
+ * that means the verb is absent, which is `is_unknown_command`'s reading too.
+ * `no session` says nothing about the verb: the host resolves the target before it
+ * dispatches anything (`ControlServer.cs`), so it is every verb's answer to a
+ * target the host does not have, and a probe that ends there is thrown rather than
+ * read either way.
  */
 async function probe(pipe) {
   const request = (target) => ({
@@ -211,6 +214,11 @@ async function probe(pipe) {
   }
   assert.equal(reply.ok, false, `the host accepted a mapping outside the contract's prefix: ${JSON.stringify(reply)}`);
   const error = String(reply.error ?? "").trim();
+  if (error === "no session") {
+    throw new Error(
+      `${pipe} resolves neither ${PROBE_TARGET} nor an active session, so its answer says nothing about image.frameshm; run this from a pane of that instance`,
+    );
+  }
   return { capable: !error.startsWith("unknown command"), error };
 }
 
@@ -231,7 +239,7 @@ before(async () => {
   try {
     host = { pipe: HOST, ...(await probe(HOST)) };
   } catch (error) {
-    host = { skip: `AGWINTERM_PIPE=${HOST} answers nothing: ${error.message}` };
+    host = { skip: `AGWINTERM_PIPE=${HOST} could not be probed: ${error.message}` };
   }
 });
 
@@ -455,12 +463,8 @@ describe("the host", () => {
     if (host.skip) return t.skip(host.skip);
     assert.ok(host.error.length > 0, "the probe got a refusal with no message");
     if (host.capable) {
-      // A validation refusal names the verb, and `no session` is the host resolving
-      // the target first; either is a host that dispatched `image.frameshm`.
-      assert.ok(
-        host.error.startsWith("image.frameshm") || host.error === "no session",
-        `not a refusal image.frameshm gives: ${host.error}`,
-      );
+      // A validation refusal names the verb: the host dispatched `image.frameshm`.
+      assert.ok(host.error.startsWith("image.frameshm"), `not a refusal image.frameshm gives: ${host.error}`);
     } else {
       assert.equal(host.error, "unknown command 'image.frameshm'");
     }

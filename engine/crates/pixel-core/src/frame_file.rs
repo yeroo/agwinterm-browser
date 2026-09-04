@@ -1048,10 +1048,17 @@ impl FramePublisher {
     /// `image.frame` answers `frame:<placed>/<transmitted>`, and `image.frameshm`
     /// mirrors it (spec § JSON args), so one reading serves both.
     ///
-    /// Transmitted below placed means the host decided our bytes were the ones it
-    /// already had, or could not read them — the two silent failures unique paths
-    /// exist to prevent. If it ever happens the picture is frozen, so it is said
-    /// out loud rather than inferred from a still screen.
+    /// On the file route, transmitted below placed means the host decided our bytes
+    /// were the ones it already had, or could not read them — the two silent
+    /// failures unique paths exist to prevent. If it ever happens the picture is
+    /// frozen, so it is said out loud rather than inferred from a still screen.
+    /// On the mapping route the same reply is the spec's `(id, name, seq)` cache
+    /// hit: "`transmits` counts the entries whose pixels were actually copied; the
+    /// rest were served from the cache". The one way this client produces it is
+    /// `ControlClient::request`'s single replay after a dropped pipe — the same
+    /// name, slot and sequence go out again, and the host re-places the pixels it
+    /// already copied. That is a correct picture, so it is information, said every
+    /// time, and it does not spend the once-per-publisher warning below.
     /// A `placed` of zero is the case a `transmitted < placed` test cannot see,
     /// because `0 < 0` is false. It is what agwinterm answers when it cannot open
     /// the path at all: `HandleImageFrame` skips an image whose file it cannot find
@@ -1072,6 +1079,19 @@ impl FramePublisher {
         if placed > 0 && transmitted >= placed {
             return true;
         }
+        if placed > 0
+            && let Source::Mapping(name) = source
+        {
+            crate::logging::info(
+                "agwinterm",
+                format!(
+                    "agwinterm placed {placed} image(s) from its cache rather than copying \
+                     them ({result:?}): the request repeated a sequence it had already \
+                     taken from {name}, which is what the replay after a dropped pipe does"
+                ),
+            );
+            return true;
+        }
         // Said once per publisher, but decided every frame — the warning is for the
         // user and the answer is for the caller, and latching the first must not
         // latch the second.
@@ -1085,6 +1105,7 @@ impl FramePublisher {
                 source.unopenable()
             )
         } else {
+            // The file route: the mapping route returned above.
             format!(
                 "agwinterm placed {placed} image(s) but read {transmitted} of them \
                  ({result:?}): the pane is showing a stale frame. Every frame is \
@@ -2372,6 +2393,17 @@ mod tests {
             .collect()
     }
 
+    /// The *information* since `mark` that mentions `needle`: the lines a host
+    /// without the fast path earns under `auto`, and a cache hit on the fast one.
+    fn infos_since(mark: u64, needle: &str) -> Vec<String> {
+        crate::logging::entries_after(mark)
+            .into_iter()
+            .filter(|entry| entry.level == crate::logging::LogLevel::Info)
+            .filter(|entry| entry.message.contains(needle))
+            .map(|entry| entry.message)
+            .collect()
+    }
+
     /// The host's literal refusal of a verb it lacks, as `Reply::parse` receives
     /// it: .NET escapes the apostrophes (`agwinterm.rs` has the same literal for
     /// `session.metrics`).
@@ -2503,6 +2535,20 @@ mod tests {
             }
             let said = warnings_since(mark, FRAMESHM_CMD);
             assert!(said.is_empty(), "{value:?} was warned about: {said:?}");
+            // Not warned about, but not silent either: under `auto` the host's
+            // answer and the path taken are recorded once, as information.
+            let told = infos_since(mark, FRAMESHM_CMD);
+            if value == "file" {
+                assert!(told.is_empty(), "`file` never asked: {told:?}");
+            } else {
+                assert_eq!(told.len(), 1, "{value:?}: {told:?}");
+                assert!(told[0].contains("unknown command"), "{}", told[0]);
+                assert!(
+                    told[0].contains(FRAME_CMD),
+                    "names the path taken: {}",
+                    told[0]
+                );
+            }
         }
     }
 
@@ -2842,6 +2888,143 @@ mod tests {
             "the complaint names the mapping, not a path: {}",
             said[0]
         );
+    }
+
+    #[test]
+    fn a_shm_frame_the_host_served_from_its_cache_is_a_placement_and_not_a_stale_one() {
+        // `frame:1/0` on the mapping route is the spec's `(id, name, seq)` cache
+        // hit — the host re-placed pixels it had already copied, which is what a
+        // replayed request gets — not the file route's "could not read the file".
+        // So: a placement, not resent, not counted, and recorded as information
+        // rather than spending the once-per-publisher stale-frame warning.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = scripted(&[r#"{"ok":true,"result":"frame:1/0"}"#, &ok_frame()]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("a placement");
+        assert_eq!(
+            verbs(&server),
+            ["image.frameshm"],
+            "not resent over the file"
+        );
+        assert!(publisher.placed, "served from the cache is placed");
+        assert!(publisher.refusals.is_empty(), "and not a refusal");
+        assert_eq!(files_in(publisher.dir()), Vec::<String>::new());
+        assert!(
+            !publisher.warned_untransmitted,
+            "the stale-frame warning is still available to the file route"
+        );
+        assert!(
+            warnings_since(mark, "stale frame").is_empty(),
+            "a cache hit was called a stale frame"
+        );
+        let told = infos_since(mark, "from its cache");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].contains(&mapping_of(&publisher)), "{}", told[0]);
+    }
+
+    #[test]
+    fn a_frame_this_side_could_not_publish_goes_out_over_the_file_and_counts() {
+        // A mapping this side cannot make — here a width past the layout's
+        // `MAX_DIMENSION`, which the PNG route carries without complaint — is
+        // not the host's refusal but counts as one: the frame goes out over the
+        // file, the reason is said, and three in a row latch the fast path off.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+        let too_wide = canvas(16385, 1);
+
+        publisher
+            .publish(&mut client, &too_wide, (1, 1))
+            .expect("over the file");
+        assert_eq!(
+            verbs(&server),
+            ["image.frame"],
+            "the host was never asked over shm"
+        );
+        assert_eq!(publisher.refusals.len(), 1, "counted with the refusals");
+        assert_eq!(publisher.fast_path, Latched::Open, "one is not a latch");
+        assert_eq!(files_in(publisher.dir()).len(), 1, "the frame reached disk");
+        assert!(publisher.placed);
+        let said = warnings_since(mark, "could not publish it");
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("16385"), "names the reason: {}", said[0]);
+
+        for _ in 0..2 {
+            publisher
+                .publish(&mut client, &too_wide, (1, 1))
+                .expect("over the file");
+        }
+        assert_eq!(verbs(&server), ["image.frame"; 3]);
+        assert_eq!(publisher.fast_path, Latched::Unavailable, "three in a row");
+        assert!(publisher.producer.is_none());
+    }
+
+    #[test]
+    fn a_host_that_dropped_the_pipe_under_a_shm_frame_gets_the_same_request_again() {
+        // The client replays once on a dropped connection. On this route the
+        // replay must be the same name, slot and sequence — the slot is not
+        // refilled and `seq` is not bumped for it — because the host may be
+        // mid-copy from that slot, and a repeated `(id, name, seq)` is what its
+        // cache is for.
+        let server = PipeServer::scripted(vec![Turn::Hangup, Turn::Reply(ok_frame())]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the reconnect carries the frame");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "the request was replayed once");
+        assert_eq!(
+            requests[0], requests[1],
+            "the replay is a second publish rather than the same request"
+        );
+        assert!(
+            requests[1].contains(r#""slot":1,"seq":1"#),
+            "{}",
+            requests[1]
+        );
+        let reader = Reader::open(&mapping_of(&publisher), HEADER_LEN).expect("alive");
+        assert_eq!(reader.ready(), 1, "the mapping still says frame 1");
+        assert!(publisher.placed);
+        assert!(publisher.refusals.is_empty());
+        assert_eq!(files_in(publisher.dir()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_clear_with_nothing_placed_sends_no_clear_but_still_takes_the_mapping() {
+        // A host that places nothing over either route — `frame:0/0` to the
+        // mapping and again to the file — has a mapping and no placement. The
+        // clear must not go out, since it would take down whatever the pane is
+        // showing for someone else, and the mapping must still go.
+        let _alone = alone_with_the_log();
+        let none = r#"{"ok":true,"result":"frame:0/0"}"#;
+        let server = scripted(&[none, none]);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("both routes answered, neither placed");
+        assert_eq!(verbs(&server), ["image.frameshm", "image.frame"]);
+        assert!(!publisher.placed);
+        let name = mapping_of(&publisher);
+        assert!(mapping_opens(&name));
+
+        publisher.clear(&mut client).expect("nothing to take back");
+        assert_eq!(
+            verbs(&server),
+            ["image.frameshm", "image.frame"],
+            "no image.clear at a placement that is not ours"
+        );
+        assert!(!mapping_opens(&name), "the mapping went with the clear");
     }
 
     #[test]

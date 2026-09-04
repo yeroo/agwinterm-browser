@@ -12,7 +12,7 @@
 //!
 //! Three pieces, from the bottom:
 //!
-//! - [`layout`] — the contract's numbers as arithmetic, on every platform: the
+//! - [`layout`] — the contract's numbers as arithmetic, with no Win32 in it: the
 //!   magic, the version, the 256-byte header, `ready` at 32, descriptors at
 //!   `64 + 16*slot`, two slots, the `Local\agwinterm-frame-` name prefix. Copied
 //!   from the spec's tables, not designed; where the two disagree the spec wins.
@@ -177,8 +177,9 @@ pub(crate) fn is_unknown_command(message: &str, cmd: &str) -> bool {
 /// Every number here is copied from the offset tables in agwinterm's
 /// `docs/specs/image-frameshm.md` rather than chosen. The spec is normative: where
 /// this module and the spec disagree, the spec wins and this module is corrected.
-/// Nothing in here touches Win32, so the layout compiles and is tested on every
-/// platform; the mapping that carries it is Windows-only and lives beside it.
+/// Nothing in here touches Win32, though it is compiled and tested only where the
+/// mapping that carries it is: `lib.rs` gates the whole of `frame_shm` on Windows,
+/// because nothing on unix would use the layout either.
 ///
 /// The mapping and the producer build on it here; the request that repeats a
 /// published frame's layout to the host is `frame_file.rs`'s.
@@ -671,8 +672,8 @@ pub(crate) mod layout {
 /// *When* a slot may be refilled, and which sequence a frame gets, is the
 /// producer's business ([`producer`]).
 ///
-/// Reachable only from [`producer`] and the tests until `frame_file.rs` sends a
-/// frame this way; the `dead_code` allowance goes with the one on [`layout`].
+/// Reached from [`producer`], which `frame_file.rs`'s `FramePublisher::publish_shm`
+/// drives once per frame.
 #[cfg(windows)]
 pub(crate) mod mapping {
     use std::io;
@@ -1438,13 +1439,17 @@ pub(crate) mod mapping {
                 1,
                 "exactly one release store in publish"
             );
-            // And everything in this file up to this test — every production
-            // line, and the tests that come before it — stores to an atomic once.
-            let before_this_test = &source[..source
-                .find("fn ready_is_released_last_and_nothing_else_writes_it")
-                .unwrap()];
+            // And the mapping module's production code — from its opening to its
+            // first `cfg(test)` — stores to an atomic once. Bounded to this module
+            // so a test elsewhere in the file with an atomic of its own cannot
+            // fail it.
+            let module = source
+                .split("pub(crate) mod mapping {")
+                .nth(1)
+                .expect("the mapping module");
+            let production = module.split("#[cfg(test)]").next().unwrap();
             assert_eq!(
-                before_this_test.matches(".store(").count(),
+                production.matches(".store(").count(),
                 1,
                 "publish's is the only store to ready"
             );
@@ -1485,7 +1490,10 @@ pub(crate) mod mapping {
 ///   admits a recreated mapping under an old name if its sequence continues, so
 ///   the safe answer is never to reuse a name: every mapping this producer
 ///   creates takes the next `incarnation`. A name found already taken is a stale
-///   incarnation still alive somewhere and gets the next suffix too.
+///   incarnation still alive somewhere and gets the next suffix too. The suffixes
+///   are the only thing that tells two producers of one process apart — the pid
+///   is the process's — so each producer owns a range of them
+///   ([`producer::RANGE`]) and none is ever offered by two.
 /// - **The old mapping is dropped only after the new one exists and only while no
 ///   request is outstanding.** The drop happens inside [`producer::Producer::publish`], and
 ///   `publish` is only called after the reply for the previous frame has returned
@@ -1497,6 +1505,7 @@ pub(crate) mod mapping {
 #[cfg(windows)]
 pub(crate) mod producer {
     use std::io;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::layout::{Layout, Published, mapping_name};
     use super::mapping::Mapping;
@@ -1505,6 +1514,23 @@ pub(crate) mod producer {
     /// How many suffixes are tried, when a name is found taken, before giving up.
     /// One stale incarnation is plausible; sixteen means something else is wrong.
     const NAME_ATTEMPTS: u32 = 16;
+
+    /// How many mapping-name suffixes one producer owns.
+    ///
+    /// Every producer takes the next range of this many from [`NEXT_RANGE`] when it
+    /// is made, so two producers alive in one process never offer the same name —
+    /// the pid is the process's, and without this the second would find the
+    /// first's names taken, or worse, free and reusable with a restarted `seq`,
+    /// which the host rejects. One producer per `Terminal` is what production
+    /// makes; `cargo test` makes them by the dozen, as threads of one process. A
+    /// producer spends one suffix per mapping created — a resize, a stale name —
+    /// so 65536 is far past what any spends, and leaves as many producers per
+    /// process, which none reaches.
+    pub(crate) const RANGE: u32 = 1 << 16;
+
+    /// The first suffix of the next producer's range. The first producer in a
+    /// process starts at `0`, which is the name the spec's example shows.
+    static NEXT_RANGE: AtomicU32 = AtomicU32::new(0);
 
     /// See the [module doc](self).
     #[derive(Debug)]
@@ -1516,18 +1542,24 @@ pub(crate) mod producer {
         seq: u64,
         /// The suffix the *next* mapping is created under.
         incarnation: u32,
+        /// One past the last suffix this producer may offer: the end of its
+        /// [`RANGE`].
+        end: u32,
         /// The mapping the last frame went into, sized for that frame; `None`
         /// before the first publish.
         mapping: Option<Mapping>,
     }
 
     impl Producer {
-        /// No mapping yet: the first publish creates one at the first frame's size.
+        /// No mapping yet: the first publish creates one at the first frame's size,
+        /// under the first suffix of a range no other producer in this process has.
         pub(crate) fn new() -> Self {
+            let start = NEXT_RANGE.fetch_add(RANGE, Ordering::Relaxed);
             Self {
                 pid: std::process::id(),
                 seq: 0,
-                incarnation: 0,
+                incarnation: start,
+                end: start.saturating_add(RANGE),
                 mapping: None,
             }
         }
@@ -1571,13 +1603,18 @@ pub(crate) mod producer {
 
         /// A mapping under the next incarnation's name, skipping any name that is
         /// already taken. The incarnation counter advances for every name tried,
-        /// taken or not, so no name is offered twice.
+        /// taken or not, so no name is offered twice — and never past the end of
+        /// this producer's range, which is the next producer's.
         fn create(&mut self, layout: &Layout) -> io::Result<Mapping> {
             for _ in 0..NAME_ATTEMPTS {
+                if self.incarnation >= self.end {
+                    return Err(io::Error::other(
+                        "image.frameshm: every mapping-name suffix of this producer's range \
+                         has been used",
+                    ));
+                }
                 let name = mapping_name(self.pid, self.incarnation);
-                self.incarnation = self.incarnation.checked_add(1).ok_or_else(|| {
-                    io::Error::other("image.frameshm: every mapping-name suffix has been used")
-                })?;
+                self.incarnation += 1;
                 match Mapping::create(layout, &name) {
                     Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                     other => return other,
@@ -1664,7 +1701,70 @@ pub(crate) mod producer {
             assert_eq!(producer.current_name(), None);
             assert_eq!(producer.seq(), 0);
             assert_eq!(producer.pid, std::process::id());
-            assert_eq!(producer.incarnation, 0, "the first mapping takes suffix 0");
+            assert_eq!(
+                producer.incarnation % RANGE,
+                0,
+                "the first mapping takes the first suffix of the producer's range"
+            );
+            assert_eq!(producer.end, producer.incarnation + RANGE);
+        }
+
+        #[test]
+        fn two_producers_in_one_process_never_offer_the_same_name() {
+            // The pid is the same for both, so the ranges are what keep them
+            // apart — in production one per `Terminal`, here one per test thread.
+            let first = Producer::new();
+            let second = Producer::new();
+            assert!(
+                first.end <= second.incarnation || second.end <= first.incarnation,
+                "the ranges overlap: {}..{} and {}..{}",
+                first.incarnation,
+                first.end,
+                second.incarnation,
+                second.end
+            );
+        }
+
+        #[test]
+        fn sixteen_taken_names_in_a_row_are_a_refusal_that_spends_them_all() {
+            // One stale incarnation is plausible and skipped; sixteen means
+            // something else is wrong, and the producer says so rather than
+            // trying forever. Every name tried is spent, so the next attempt
+            // starts past all of them, and `seq` was never consumed.
+            let layout = Layout::for_frame(4, 4).unwrap();
+            let mut producer = Producer::new();
+            let start = producer.incarnation;
+            let held: Vec<Mapping> = (0..NAME_ATTEMPTS)
+                .map(|i| Mapping::create(&layout, &mapping_name(producer.pid, start + i)))
+                .collect::<io::Result<_>>()
+                .expect("hold the next sixteen names");
+
+            let err = producer
+                .publish(&flat(4, 4, [3, 3, 3, 255]))
+                .expect_err("sixteen taken names");
+            assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
+            assert!(err.to_string().contains("16 mapping names"), "{err}");
+            assert!(
+                err.to_string()
+                    .contains(&mapping_name(producer.pid, start + NAME_ATTEMPTS - 1)),
+                "the last name tried is named: {err}"
+            );
+            assert_eq!(
+                producer.incarnation,
+                start + NAME_ATTEMPTS,
+                "all sixteen spent"
+            );
+            assert_eq!(producer.seq(), 0, "no sequence consumed");
+            assert_eq!(producer.current_name(), None);
+
+            drop(held);
+            let published = producer.publish(&flat(4, 4, [3, 3, 3, 255])).unwrap();
+            assert_eq!(published.seq, 1);
+            assert_eq!(
+                incarnation_of(producer.current_name().unwrap()),
+                start + NAME_ATTEMPTS,
+                "the next attempt starts past the sixteen, not over them"
+            );
         }
 
         #[test]
@@ -1751,6 +1851,7 @@ pub(crate) mod producer {
         #[test]
         fn a_mapping_that_cannot_be_created_leaves_the_sequence_alone() {
             let mut producer = Producer::new();
+            let start = producer.incarnation;
 
             // Nothing to size a mapping for: the layout refuses, so no mapping is
             // created and no sequence is consumed.
@@ -1758,7 +1859,7 @@ pub(crate) mod producer {
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
             assert_eq!(producer.seq(), 0, "seq stays un-bumped");
             assert_eq!(producer.current_name(), None, "and nothing was created");
-            assert_eq!(producer.incarnation, 0, "no name was spent either");
+            assert_eq!(producer.incarnation, start, "no name was spent either");
 
             // The next attempt reuses the sequence the failure did not consume.
             let canvas = flat(8, 4, [7, 7, 7, 255]);

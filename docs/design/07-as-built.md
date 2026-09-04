@@ -43,9 +43,9 @@ two, both in this build, and **the host decides which one carries a frame**.
 an image whose file it cannot open *before* it counts it, so a redirected `TEMP`, a pane
 hosted by another user and an antivirus quarantine all present this way, as success on
 every frame with the pane left blank. That is treated exactly as a refusal is: the file is
-deleted as litter rather than kept as history, the directory is not marked, and nothing
-enters `written`, so the publisher's `Drop` sends no `image.clear` at a picture it never
-put there.
+deleted as litter rather than kept as history, the directory is not marked, and `placed`
+stays false — it is set only past this guard, on either route — so the clear that follows
+the publisher out sends no `image.clear` at a picture it never put there.
 
 **The fresh path per frame is load-bearing, not tidiness.** Rewriting one path races
 the host's `File.ReadAllBytes`, whose failure is swallowed (`ControlServer.cs:458`)

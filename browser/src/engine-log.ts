@@ -51,44 +51,40 @@ export function formatEngineLog(row: Pick<EngineLogRow, "level" | "target" | "te
  * Writes every `warn`/`error` occurrence in `logs` to `write`, now and as they
  * arrive, and returns the unsubscribe.
  *
- * Each occurrence is written once: a row is tracked by id and by how many of its
- * `count` have gone out, so a fold onto the previous row writes the line again
- * rather than losing the repeat — a warning the engine said twice is two lines,
- * which is what lets a reader assert "exactly once". Rows already in the store
- * when this is installed are written too; the store starts empty and the engine
- * starts after `runForeground` installs this, so in practice that is nothing, and
- * replaying is the choice that cannot lose a line.
- *
- * The store caps its rows and drops the oldest, so the tracking map is pruned to
- * the ids still present whenever it has grown past the cap — otherwise a long
- * session would grow it without bound, one entry per row the store has forgotten.
+ * Each occurrence is written once. The store only ever changes its *last* row — a
+ * message identical to it is folded in by bumping `count`; anything else is a new
+ * row with the next id — and drops rows from the front, so the whole of "what has
+ * gone out" is the last row's id and how many of its `count` were written. A row
+ * with a smaller id was the last row once and went out in full then, or was never
+ * the last row and so never grew; either way it is done. A fold onto the last row
+ * writes the line again rather than losing the repeat — a warning the engine said
+ * twice is two lines, which is what lets a reader assert "exactly once". Rows
+ * already in the store when this is installed are written too; the store starts
+ * empty and the engine starts after `runForeground` installs this, so in practice
+ * that is nothing, and replaying is the choice that cannot lose a line. Nothing
+ * here grows with the session.
  */
 export function forwardEngineWarnings(
   logs: EngineLogSource,
   write: (line: string) => void,
 ): () => void {
-  const written = new Map<number, number>();
+  let lastId = 0;
+  let lastCount = 0;
   const drain = () => {
     const rows = logs.store.get().rows;
     for (const row of rows) {
-      const before = written.get(row.id) ?? 0;
-      if (row.count <= before) continue;
-      written.set(row.id, row.count);
-      if (!FORWARDED_LEVELS.has(row.level)) continue;
-      for (let n = before; n < row.count; n += 1) write(formatEngineLog(row));
+      if (row.id < lastId) continue;
+      const before = row.id === lastId ? lastCount : 0;
+      if (FORWARDED_LEVELS.has(row.level)) {
+        for (let n = before; n < row.count; n += 1) write(formatEngineLog(row));
+      }
     }
-    if (written.size > PRUNE_ABOVE) {
-      const live = new Set(rows.map((row) => row.id));
-      for (const id of written.keys()) if (!live.has(id)) written.delete(id);
+    const last = rows[rows.length - 1];
+    if (last) {
+      lastId = last.id;
+      lastCount = last.count;
     }
   };
   drain();
   return logs.store.subscribe(drain);
 }
-
-/**
- * Past this many tracked rows the map is pruned to the store's live ids. Above
- * `createLogStore`'s `LOG_CAP` (2000), so a store that is full and turning over
- * is pruned rather than churned on every push.
- */
-const PRUNE_ABOVE = 4096;

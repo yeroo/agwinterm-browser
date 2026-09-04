@@ -135,7 +135,11 @@ function exchange(endpoint, request) {
   });
 }
 
-/** `true` when the host dispatches `image.frameshm` at all; the probe touches nothing. */
+/**
+ * `true` when the host dispatches `image.frameshm` at all; the probe touches nothing.
+ * `no session` is the host failing to resolve `active` before it dispatches any
+ * verb, which says nothing about this one, so it is thrown rather than read.
+ */
 async function hasVerb(pipe) {
   const reply = await control(pipe, {
     cmd: "image.frameshm",
@@ -146,7 +150,11 @@ async function hasVerb(pipe) {
       ],
     },
   });
-  return !String(reply.error ?? "").startsWith("unknown command");
+  const error = String(reply.error ?? "").trim();
+  if (error === "no session") {
+    throw new Error(`${pipe} has no active session to probe image.frameshm against; run this from a pane of that instance`);
+  }
+  return !error.startsWith("unknown command");
 }
 
 // -- one session -----------------------------------------------------------------------

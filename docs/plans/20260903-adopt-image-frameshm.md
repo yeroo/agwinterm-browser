@@ -165,6 +165,10 @@ Half of this already exists, and it is the half that did not depend on the layou
 The contract's header and slot arithmetic, with no Win32 in it, so it is testable on any
 platform and reads like the spec's tables.
 
+➕ as built: gated with the rest of `frame_shm` under `cfg(windows)` in `lib.rs`, so its
+tests run on Windows only — nothing on unix would use the layout, and Task 9's unix check
+confirms the module is absent there rather than that it compiles.
+
 - [x] add a `layout` submodule to `engine/crates/pixel-core/src/frame_shm.rs` with named
       constants for every offset and value the spec fixes: `MAGIC = 0x46534741`, `VERSION = 1`,
       `HEADER_LEN = 256`, `READY_OFFSET = 32`, `DESCRIPTOR_OFFSET = 64`, `DESCRIPTOR_LEN = 16`,
@@ -554,9 +558,12 @@ latched.
 ## Deferred
 
 - **Pipelining** (up to 8 slots with per-slot reply tracking). The contract permits it and
-  warns about it. Worth it only if Task 8 shows the round trip dominating after the encode and
-  write are gone; the numbers say it should not (6.6 ms, of which 5.5 ms is fixed cost inside
-  agwinterm and is agwinterm's to find).
+  warns about it. Task 8 found the round trip *is* most of a fast-path frame — 86% at the
+  largest pane — but that it is the host's copy out of the slot before it replies, linear in
+  pixels, not a fixed pipe cost (the baseline's "5.5 ms fixed" was `image.frame`'s). A second
+  slot in flight would only overlap that copy if the host copied asynchronously, which is
+  agwinterm's side to change; until it does, pipelining here buys nothing and costs the one
+  producer rule its simplicity.
 - **Zero-copy from Electron's paint buffer.** The producer copies the composed canvas, which is
   the right seam: chrome, overlays and the compositor all live in the canvas. Writing Electron's
   BGRA straight into a slot would bypass all of them.

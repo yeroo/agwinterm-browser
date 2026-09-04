@@ -132,12 +132,11 @@ describe("forwardEngineWarnings", () => {
     assert.deepEqual(out.lines, ["engine warn agwinterm: before\n"]);
   });
 
-  it("does not grow without bound on a store that is turning over", () => {
-    // The store keeps `LOG_CAP` rows and drops the oldest. The forwarder tracks
-    // rows by id; without pruning, a long session is one map entry per row the
-    // store has already forgotten. The observable claim is that nothing is
-    // written twice and nothing is missed across the turnover — the size is
-    // checked indirectly, through a writer that would notice a replay.
+  it("writes each occurrence once across a store that is turning over", () => {
+    // The store keeps `LOG_CAP` rows and drops the oldest. The forwarder keeps
+    // only the last row's id and count, so the rows that have left the store are
+    // nothing to it; what has to hold across the turnover is that nothing is
+    // written twice and nothing is missed.
     const logs = fakeLogs(8);
     const out = recorder();
     forwardEngineWarnings(logs, out.write);

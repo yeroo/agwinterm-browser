@@ -16,7 +16,8 @@ mod frame_file;
 // The fast frame path: the `image.frameshm` mapping layout, the mapping, and the
 // producer that fills a slot per frame — plus which transport carries a frame, and
 // how a host without the fast one announces itself. Windows-only alongside
-// `frame_file`, for the same reason; the layout half compiles everywhere.
+// `frame_file`, for the same reason. The layout half has no Win32 in it, but
+// nothing on unix would use it, so it is gated with the rest.
 #[cfg(windows)]
 mod frame_shm;
 #[cfg(unix)]
