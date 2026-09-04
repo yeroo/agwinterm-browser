@@ -1,0 +1,270 @@
+{
+  "scope": {
+    "task": "ralphex-20260903-adopt-image-frameshm",
+    "run": "20260904-115622-3611031-23690-1",
+    "scope_path": "C:\\Users\\boris\\source\\winterm-browser\\.revmux\\tasks\\ralphex-20260903-adopt-image-frameshm\\20260904-115622-3611031-23690-1\\input\\scope.md"
+  },
+  "sources": {
+    "expected": 4,
+    "reported": 4,
+    "degraded": [],
+    "agents": [
+      {
+        "name": "bugs+impl",
+        "lenses": [
+          "bugs",
+          "impl"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 1809165,
+        "raised": 2,
+        "degraded": false
+      },
+      {
+        "name": "arch+quality",
+        "lenses": [
+          "architecture",
+          "quality"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 2482603,
+        "raised": 5,
+        "degraded": false
+      },
+      {
+        "name": "docs+tests",
+        "lenses": [
+          "docs",
+          "tests",
+          "comments"
+        ],
+        "executor": "claude",
+        "requested_model": "opus",
+        "actual_model": "claude-opus-5",
+        "effort": "high",
+        "tokens": 3912953,
+        "raised": 10,
+        "degraded": false
+      },
+      {
+        "name": "adversarial",
+        "lenses": [
+          "adversarial"
+        ],
+        "executor": "codex",
+        "requested_model": "gpt-5.6-sol",
+        "actual_model": "gpt-5.6-sol",
+        "effort": "high",
+        "tokens": 104368,
+        "raised": 1,
+        "degraded": false
+      }
+    ]
+  },
+  "findings": [
+    {
+      "id": "bugs+impl-1",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 880,
+      "end_line": 883,
+      "severity": "major",
+      "confidence": 99,
+      "title": "The shared-memory route never refreshes its directory and can never remark, so sweep_stale can reclaim a live publisher's only evidence",
+      "body": "The staleness design rests on an invariant the fast path breaks, and the recovery it names is unreachable from that route.\n\nThe invariant is stated twice. `STALE_AFTER`'s doc says \"A publisher that is *painting* refreshes its directory's timestamp for free: every frame creates a file inside it\", and `sweep_stale`'s doc repeats it as \"a directory gains a file every frame, so a browser drawing anything at all stays fresh\". On the mapping route no file is ever created: `publish_shm` copies pixels into the mapping and writes only the marker, once, on the first accepted frame, under an `if !self.placed` guard. The directory's mtime is therefore frozen at the first accepted frame for the whole session, however hard the browser paints. The frame budget file cannot keep it fresh either, since it is opt-in and names a path of the user's choosing outside the directory.\n\nThe recovery is unreachable. `FrameDir::remark` has exactly one call site, the not-found arm of `write_frame`, which only the file route executes. Its own doc names precisely this failure: a publisher whose directory was reclaimed \"would go on publishing frames nothing could ever attribute, and its wreck would be unrecoverable\". `STALE_AFTER`'s doc makes the same promise about `write_frame` recreating a swept directory. Both mitigations live on the file route.\n\nFailure case: a host with the fast-path verb, transport `auto`, a pane painting continuously for longer than `MARKED_STALE_AFTER` (seven days). The directory holds only the marker, timestamped at day zero. Any second browser launched anywhere on the machine runs `sweep_stale` over the shared temp root, sees the marked directory past its limit, and `remove_dir_all`s it out from under the live publisher. The publisher never notices and will not re-mark, because the accepted arm is guarded by `!self.placed`. The browser is then force-killed, so `Terminal::drop` never sends the clear. Nothing is left on disk, `allOwnedFrames` finds no directory, and `pane-clear` reports nothing owned against a pane that is still fully painted — the exact state this change was written to make recoverable.\n\nThe file route survives the same sweep because its next frame recreates the directory and re-marks it, so this is a degradation the change introduces rather than one it inherits. The plan file records no decision about `sweep_stale`, so it is not a deferred item either.",
+      "fix": "Give the fast path the recovery the file path has: in the accepted arm of `publish_shm`, when `self.placed` is already true, recreate the directory if it is missing and call `self.dir.remark()` before returning. Recreating it also refreshes the mtime, which stops the sweep reaching it. Whichever route is chosen, correct the invariant at `frame_file.rs:115-121`, `:401-410` and `:430-434` so it no longer claims every frame creates a file, or scope the promised recovery to the file route.",
+      "sources": [
+        "bugs+impl",
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "bugs",
+        "impl",
+        "architecture",
+        "quality",
+        "comments",
+        "docs"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "bugs+impl-2",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 1202,
+      "end_line": 1202,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "Three comments still name the removed written.is_empty() clear guard",
+      "body": "The branch moved `FramePublisher::clear`'s ownership test from `written.is_empty()` onto the new `placed` flag (frame_file.rs:748), and this round carried the rename through the CLI module comment, the marker constant's doc, `frame_file.rs:143`, `:184`, `:728`, the test comment at `:1833`, `pane-clear.test.mjs` and the as-built design note. Three sites in `frame_file.rs` were missed and still name a guard that no longer exists:\n\n- `:986`, in `publish_encoded` — \"both of them the 'clear a placement some other process owns' this publisher declines to do when `written` is empty\"\n- `:1202`, in `write_all_new` — \"That is the very thing `FramePublisher::clear`'s `written.is_empty()` guard exists to refuse.\"\n- `:2118`, in `a_frame_the_host_refused_names_no_pane` — \"Same rule as `clear`'s `written.is_empty()`\"\n\n`written` is still a live field, now only the retention list that `reap` trims, so these read as a real guard rather than an obvious relic and point a maintainer at the wrong thing. On the fast path `written` is permanently empty while a placement exists, so following any of the three leads to the opposite conclusion from the code. The `:1202` one is worse than a stale name: it is the explanation of why a failed write must leave no marker behind, which is load-bearing reasoning for the ownership rule this change just moved.\n\nThe lines predate the working-tree diff and still exist on `main` with the same text, but the branch is what made them false by changing the guard, and this diff is the sweep that converted every other `written` mention. Prose only, so nothing runs wrong.",
+      "fix": "Replace all three with `placed`, matching the wording already used at `frame_file.rs:728` and on the marker constant.",
+      "sources": [
+        "bugs+impl",
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "impl",
+        "architecture",
+        "comments",
+        "docs"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "arch+quality-4",
+      "file": "engine/crates/pixel-core/src/frame_file.rs",
+      "line": 1066,
+      "end_line": 1066,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "check_transmitted's doc still calls the untransmitted warning once-per-publisher after this change made it per-route",
+      "body": "This diff replaced the single `warned_untransmitted` boolean with the `Warned` struct so each route latches its own complaint, and updated the inline comment at `:1102` to say \"Per route rather than per publisher\". Two comments describing the same latch were not updated and now contradict it:\n\n- `:1066`, in `check_transmitted`'s own doc, immediately above the code that changed: \"it does not spend the once-per-publisher warning below.\"\n- `:2979`, in the test comment for the cache-hit case: \"rather than spending the once-per-publisher stale-frame warning.\"\n\nThe same change states the rule twice in the same function and gets it right once. Both stale sites sit next to lines this diff edited, `:1102` for the first and the `.any()` assertion at `:2995` for the second, so this is an incomplete pass rather than an inherited defect. The claim matters because the whole point of the change is that the mapping route's complaint must not spend the file route's; a doc still saying the latch is per publisher describes the bug that was just fixed. Prose only, so nothing runs wrong.",
+      "fix": "Say \"once-per-route\" in both comments and point at `Warned`.",
+      "sources": [
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "architecture",
+        "comments",
+        "docs"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "docs+tests-4",
+      "file": "engine/crates/pixel-core/src/frame_shm.rs",
+      "line": 1504,
+      "end_line": 1504,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "New producer-doc sentence cites the third rule for a guarantee the second rule carries",
+      "body": "The reworded first bullet now ends \"A second producer in the same process starts its own count at 1 — that is safe only because the third rule gives it names of its own.\"\n\nThe third bullet is \"**A name is this process's alone, not its pid's**\" (line 1514), which is about `process_start` separating this process from an earlier holder of the same pid. It says nothing about two producers within one process. What actually makes a second producer safe is the second bullet at line 1510: \"The suffixes are the only thing that tells two producers of one process apart — the pid is the process's — so each producer owns a range of them ([`producer::RANGE`]) and none is ever offered by two.\"\n\nA reader who follows the pointer lands on process-level uniqueness, finds nothing about a second producer, and is left believing the restarted sequence is unexplained. The sentence is new in this diff, and the miscount matches the previous review round's suggested fix text, which named the third bullet in error.",
+      "fix": "Say \"the second rule\", or refer to `producer::RANGE` by name rather than by bullet position.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "docs",
+        "comments"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "arch+quality-5",
+      "file": "tools/acceptance/frameshm.test.mjs",
+      "line": 396,
+      "end_line": 397,
+      "severity": "minor",
+      "confidence": 99,
+      "title": "A pid the teardown force-killed itself stays queued for a second, redundant tree kill",
+      "body": "The new teardown prunes `strays` on the fulfilled branch only:\n\n```js\nawait settlesWithin(() =\u003e !alive(pid), \"the browser to leave with its session\", EXIT_MS).then(\n  () =\u003e strays.splice(strays.indexOf(pid), 1),\n  () =\u003e forceKill(pid),\n);\n```\n\nThat closes the success branch and leaves open the failure branch the queue exists for. The comment above gives the reason for pruning: \"taken back off the queue once the browser is confirmed gone, because `forceKill` inspects nothing and the pid of a dead process is one Windows hands out again — to the next case's Electron, say.\" The reason applies just as well after the rejection branch runs, because `forceKill` there kills the process: the pid is then equally dead and equally reusable, but it stays in `strays` for the rest of the run.\n\nFailure case: a case whose browser misses `EXIT_MS`, is force-killed at its own teardown, and whose pid Windows reissues to a later case's Electron. The file-level hook at line 250 maps every remaining entry through `forceKill`, which issues `taskkill /F /T` unconditionally and inspects nothing, taking that unrelated process and its tree down mid-run. The window is the remainder of the suite, longer than the window the pruning closes.\n\nThe retained entry also buys nothing: `forceKill` catches everything and never throws, so the second attempt cannot report a failure and the `assert.deepEqual(failures, [])` at `:251` cannot fail on it. Test-only code, so the blast radius is a developer machine, but it is a tree kill against a pid this suite does not own.",
+      "fix": "Prune on both branches — force-kill, then splice, optionally rechecking `alive(pid)` first and retaining only a kill that did not stick — or push the pid only from the rejection handler so the queue holds exactly the pids no teardown ever confirmed dead.",
+      "sources": [
+        "arch+quality",
+        "docs+tests",
+        "adversarial"
+      ],
+      "lenses": [
+        "quality",
+        "tests",
+        "comments",
+        "adversarial"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "docs+tests-7",
+      "file": "tools/acceptance/frameshm.test.mjs",
+      "line": 250,
+      "end_line": 251,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "The suite's stray-kill assertion can never fail",
+      "body": "The file-level hook reads:\n\n```js\nconst failures = await teardown(...strays.map((pid) =\u003e () =\u003e forceKill(pid)));\nassert.deepEqual(failures, [], \"a browser of this suite would not die\");\n```\n\n`teardown` (tools/lib/deadline.mjs:135) collects only what its steps throw, and `forceKill` (line 255) wraps `execFileSync` in a `try`/`catch` that swallows everything, with the comment \"Already gone, which is the state the caller wanted.\" So `failures` is `[]` on every run, including a run where `taskkill` fails on every stray and a live Electron browser is left behind for the whole session. The assertion's stated claim, that a browser of this suite would not die, is the one thing it cannot detect.\n\nThe sibling suite tools/acceptance/profile-lock.test.mjs:68 does the same cleanup as a bare loop with no assertion, so this is the file's own addition rather than the project's convention. It arrived with the file in e8725ad on this branch; this round's diff does not touch these two lines.",
+      "fix": "Either drop the assertion, matching the sibling suite, or give `forceKill` a `strict` mode that rethrows so `teardown` has something to collect.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "tests"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "arch+quality-2",
+      "file": "cli/src/pane.ts",
+      "line": 640,
+      "end_line": 643,
+      "severity": "minor",
+      "confidence": 95,
+      "title": "New CLI comment claims frames-without-marker is a shape no route produces, and both routes still produce it",
+      "body": "The rewritten ownership comment ends \"Frames with no marker beside them are the one shape neither route produces today — an engine predating the marker — and are adopted by the pid question alone, below.\" Today's engine produces that shape in at least two ways.\n\nFirst, the marker write is best-effort. `FrameDir::mark_pane` (frame_file.rs:384) writes with `let _ = fs::write(...)` and its own doc says so: \"Best-effort: a marker that could not be written costs `pane-clear` a recovery it would otherwise make, which is not worth failing a frame over.\" Any antivirus lock, full disk or unwritable temp directory produces the shape.\n\nSecond, the file route has a live window. In `publish_encoded` the PNG is written at `:965` and the marker only at `:1004`, after the host's reply. A browser force-killed inside that window on its first frame leaves the frame file with no marker, and the `remove_file` cleanups on the refusal and error arms are all best-effort too. `write_all_new`'s own comment at `:1196-1202` states this as a live hazard rather than a historical one.\n\nThe substantive half is what a failed marker now does on the fast path. `publish_shm` calls `mark_pane` and sets `placed = true` regardless of whether the write landed, and writes no frame file, so a failed marker leaves an entirely empty directory. `allOwnedFrames`'s guard `if (frames === 0 \u0026\u0026 !marked) continue;` then skips it under both the exit path's pid question and the verb's pane question. On the file route the frame files remain and the pid question still adopts the unattributed wreck, so the exit path recovery survives; the fast path has no second line of evidence. Failure case: fast path active, first frame accepted, the marker's `fs::write` fails, browser later force-killed — the pane stays painted and neither recovery path finds anything.\n\nAs written the comment also makes the pid-question branch below look like dead code kept for compatibility.",
+      "fix": "Reword the claim to name the live producers: a best-effort marker write that failed, or a browser killed between its first frame's write and the host's reply. Separately, consider whether `publish_shm` should treat a marker it could not write as a placement it cannot prove, since on that route the marker is the only evidence there is.",
+      "sources": [
+        "arch+quality",
+        "docs+tests"
+      ],
+      "lenses": [
+        "architecture",
+        "quality",
+        "comments",
+        "docs"
+      ],
+      "verdict": "unverified"
+    },
+    {
+      "id": "docs+tests-1",
+      "file": "docs/plans/20260903-adopt-image-frameshm.md",
+      "line": 113,
+      "end_line": 116,
+      "severity": "minor",
+      "confidence": 90,
+      "title": "Plan constraint still declares pane-clear ownership untouched, and no as-built note records the move",
+      "body": "The Constraints section states \"**The file path is not touched except where the two share a seam.** `encode_png`, `write_frame`, the retention list and `pane-clear` ownership are untouched\". This round changes `pane-clear` ownership on both sides: `allOwnedFrames` in cli/src/pane.ts now accepts a directory holding only the `pane` marker, and the engine's `clear` guard has moved from `written.is_empty()` to `placed` (frame_file.rs:748).\n\nThe plan carries fourteen `➕ as built` notes for smaller deviations, including one for `Producer::close` at line 352, but nothing records this one. A reader reconstructing the task from the plan concludes the CLI's ownership rule was never touched, which is the single most consequential behaviour change in the branch and the one the previous review round raised as major.",
+      "fix": "Reword the constraint to exempt ownership, and add a `➕ as built` note recording that the guard moved to `placed` and that `allOwnedFrames` now reads the marker rather than a frame count.",
+      "sources": [
+        "docs+tests"
+      ],
+      "lenses": [
+        "docs"
+      ],
+      "verdict": "unverified"
+    }
+  ],
+  "open_questions": [],
+  "pre_existing": [],
+  "immaterial": [],
+  "stats": {
+    "started_at": "2026-09-04T11:56:22.7981762+03:00",
+    "finished_at": "2026-09-04T12:08:46.0087703+03:00",
+    "duration_ms": 743233,
+    "tokens": 8935386,
+    "stages": [
+      {
+        "name": "find",
+        "duration_ms": 554629
+      },
+      {
+        "name": "synthesis",
+        "duration_ms": 127594,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      },
+      {
+        "name": "verify",
+        "duration_ms": 61003,
+        "executor": "claude",
+        "model": "opus",
+        "effort": "high"
+      }
+    ]
+  }
+}

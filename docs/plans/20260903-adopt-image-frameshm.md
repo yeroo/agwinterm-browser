@@ -194,7 +194,7 @@ confirms the module is absent there rather than that it compiles.
       are rejected on both axes
 - [x] write tests for `is_valid_name`: the exact prefix is required and case-sensitive
       (`local\…` rejected), the suffix may not be empty, may not exceed 128, and rejects a
-      backslash, a space and a unicode letter; `mapping_name(1234, 0)` passes
+      backslash, a space and a unicode letter; `mapping_name(1234, 1_756_950_000_000, 0)` passes
 - [x] write the test for `slot_for`: `seq` 1..=8 map to 1,0,1,0,… (sequences start at 1)
 - [x] run `cargo nextest run --workspace` — must pass before Task 2
 
@@ -258,7 +258,7 @@ talks to.
       rather than accepted and ignored
 - [x] `Producer::publish(&mut self, canvas: &Canvas) -> io::Result<Published>` — bumps `seq`
       first (sequences start at 1); if there is no mapping or the canvas dimensions differ from
-      the current layout, creates a new mapping under `mapping_name(pid, incarnation)` with
+      the current layout, creates a new mapping under `mapping_name(pid, start, incarnation)` with
       `incarnation += 1` **and keeps `seq` monotonic across the switch**; then delegates to
       `Mapping::publish`
       — a name found already taken (`ERROR_ALREADY_EXISTS`, Task 2's stale-incarnation case)

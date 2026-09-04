@@ -20,7 +20,7 @@
 //!   validates, one read-write view sized once, the header written on creation, and
 //!   `publish` for a frame into the slot its sequence selects.
 //! - `producer` (Windows) — the lifetime: a sequence that never restarts while the
-//!   process lives, a name no earlier process with this pid can have used, a fresh
+//!   producer lives, a name no earlier process with this pid can have used, a fresh
 //!   mapping-name suffix for every mapping created (a resize creates one; so does
 //!   a name found taken), and `close` for the end.
 //!
@@ -1493,14 +1493,15 @@ pub(crate) mod mapping {
 }
 
 /// The producer: the one thing `frame_file.rs` talks to. Owns the mapping, the
-/// sequence counter and the incarnation, and keeps the three rules that tie them
+/// sequence counter and the incarnation, and keeps the four rules that tie them
 /// together in one place:
 ///
-/// - **`seq` is monotonic for the life of the process.** It is bumped on every
+/// - **`seq` is monotonic for the life of the producer.** It is bumped on every
 ///   successful publish and never restarted, not even when the mapping is
 ///   replaced: the host rejects a `seq` that goes backwards and skips the copy
 ///   when `(id, name, seq)` repeats, so a restarted counter would be a dropped or
-///   refused frame.
+///   refused frame. A second producer in the same process starts its own count at
+///   1 — that is safe only because the third rule gives it names of its own.
 /// - **A resize is a fresh mapping under a fresh name.** A mapping is sized for one
 ///   frame size ([`mapping::Mapping::publish`] refuses any other), and the contract only
 ///   admits a recreated mapping under an old name if its sequence continues, so

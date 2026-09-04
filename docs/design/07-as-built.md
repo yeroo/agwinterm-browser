@@ -192,8 +192,12 @@ All three ask the same question first: **is this placement ours?** `FramePublish
 answers it from its own state — it never published, so there is nothing of its to take
 back. The CLI's two answer it from disk, and from **two** pieces of evidence rather than
 one: the directory name, `terminal-browser-frames-<pid>-<n>`, and a file called `pane`
-written inside it beside the first frame the host actually places, holding the pipe name
-and the session id that frame was addressed to.
+written inside it when the host first places a frame over either route, holding the pipe
+name and the session id that frame was addressed to. On the file route it sits beside
+the frame files; on the shared-memory route it is the only file there is, since the
+pixels went through the mapping — so the marker, not a count of frame files, is what
+the CLI reads as a placement, and a wreck the fast path left is recovered exactly as
+one the file path left.
 
 Neither question is "the newest frame directory on this machine". The exit path knows the
 pid it spawned and asks the exact question — but a pid names a *live* process and nothing

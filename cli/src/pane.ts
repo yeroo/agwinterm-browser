@@ -22,7 +22,7 @@
 // Nor is an extra `image.clear` free. A placement belongs to the pane, not to the
 // process that made it, so a clear sent when this browser owns nothing takes down
 // whatever *is* on the pane — which may be a picture someone else drew. That is the
-// ownership rule below: the engine's `written.is_empty()`, read off the filesystem.
+// ownership rule below: the engine's `placed`, read off the filesystem.
 //
 // The picture is only half of what the browser leaves behind, and `restorePaneConsole`
 // below is the other half: the same `Drop` that clears the frame also takes the
@@ -621,20 +621,27 @@ export function restorePaneConsole(
 // that matters most, because it runs against a pane that is already broken and may
 // well be holding a picture this browser had no part in.
 //
-// The engine can consult `written`; the CLI cannot, because the process that held it
+// The engine can consult `placed`; the CLI cannot, because the process that held it
 // is the one that died. What survives it is the frame directory. A publisher creates
-// `%TEMP%\terminal-browser-frames-<pid>-<seq>` and writes `frame-00000000.png` into
-// it per frame, and `FrameDir`'s `Drop` removes the whole directory on the way out —
-// so the directory existing *with a frame file in it* is exactly the state the
-// engine's `written` is non-empty in, left on disk for whoever comes after:
+// `%TEMP%\terminal-browser-frames-<pid>-<seq>`, writes the `pane` marker into it
+// with the first frame the host accepts, and `FrameDir`'s `Drop` removes the whole
+// directory on the way out. What else is in it depends on the route the frames
+// took: over `image.frame` each one is a `frame-00000000.png` beside the marker,
+// and over `image.frameshm` (`frame_shm.rs`) nothing is written at all — the pixels
+// went through a mapping, and the marker is the directory's only file. So the
+// directory existing *with the marker in it* is exactly the state the engine's
+// `placed` is true in, left on disk for whoever comes after:
 //
 //   - ordinary quit — `Drop` ran, directory gone, engine already sent the clear
-//   - `taskkill /F`  — directory survives with frames in it, nobody sent the clear
+//   - `taskkill /F`  — directory survives with the marker in it (and frames, on the
+//                      file route), nobody sent the clear
 //   - died before drawing — directory survives, empty, nothing was ever placed
 //
-// which is `written.is_empty()` read from the filesystem instead of from memory.
-// `tools/cli/pane-clear.test.mjs` reads the prefix and the frame-file name out of
-// the Rust so the two spellings cannot drift.
+// which is `placed` read from the filesystem instead of from memory. Frames with no
+// marker beside them are the one shape neither route produces today — an engine
+// predating the marker — and are adopted by the pid question alone, below.
+// `tools/cli/pane-clear.test.mjs` reads the prefix, the frame-file name and the
+// marker's name out of the Rust so the spellings cannot drift.
 
 /** Mirrors `DIR_PREFIX` in `frame_file.rs`. */
 export const FRAME_DIR_PREFIX = "terminal-browser-frames-";
@@ -642,8 +649,10 @@ export const FRAME_DIR_PREFIX = "terminal-browser-frames-";
 /**
  * Mirrors `FramePublisher::path_for`'s `frame-{seq:08}.png`. The eight is a minimum
  * width, not a cap: a long-lived publisher's sequence runs past it, and matching
- * exactly eight digits would stop counting frames at that point — which presents as
- * `pane-clear` declining to repair a pane that is still painted.
+ * exactly eight digits would stop counting frames at that point — which presented as
+ * `pane-clear` declining to repair a pane that is still painted, back when the count
+ * alone decided ownership. Today the count is evidence only for a directory with no
+ * marker; see [`allOwnedFrames`].
  */
 const FRAME_FILE = /^frame-\d{8,}\.png$/;
 
@@ -656,7 +665,11 @@ export interface OwnedFrames {
   dir: string;
   /** The pid in that directory's name, or null when it does not parse. */
   pid: number | null;
-  /** How many frame files are in it. Never zero — an empty directory is not owned. */
+  /**
+   * How many frame files are in it. Zero for a placement that went over shared
+   * memory, which writes no file — the marker is what proves it. A directory with
+   * neither is not owned, so this is never zero *and* unmarked.
+   */
   frames: number;
 }
 
@@ -878,16 +891,25 @@ function allOwnedFrames(options: OwnedFramesOptions = {}): OwnedFrames[] {
       if (!name.startsWith(wanted)) continue;
       const dir = path.join(root, name);
       let frames = 0;
+      let marked = false;
       let at = -Infinity;
       try {
-        for (const entry of fs.readdirSync(dir)) if (FRAME_FILE.test(entry)) frames += 1;
+        for (const entry of fs.readdirSync(dir)) {
+          if (FRAME_FILE.test(entry)) frames += 1;
+          else if (entry === FRAME_PANE_FILE) marked = true;
+        }
         at = fs.statSync(dir).mtimeMs;
       } catch {
         continue;
       }
-      // An empty directory is a browser that died before it drew anything, which is
-      // the engine's `written.is_empty()` case: nothing was placed, so nothing is ours.
-      if (frames === 0) continue;
+      // A directory with neither a marker nor a frame is a browser that died before
+      // it drew anything, which is the engine's `!placed` case: nothing was placed,
+      // so nothing is ours. Either one on its own is a placement. The marker is
+      // written past the same guard on both routes, and it is the *only* thing a
+      // frame that went over shared memory leaves behind — so counting frame files
+      // here read every wreck the fast path left as "nothing of ours", and both
+      // clears below declined to repair a pane that was still painted.
+      if (frames === 0 && !marked) continue;
       // The marker is written with the first frame the host took, so a directory with
       // frames in it and no marker for this pane belongs to another one.
       //
@@ -1124,7 +1146,7 @@ export function paneClearReport(
     }
   } else if (refusal) {
     lines.push(
-      `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, and no ` +
+      `  frame:   ${left(outcome.owned)} left in ${outcome.owned.dir}, and no ` +
         "image.clear was sent — the guard above says this instance is not one this " +
         "build addresses, and clearing it anyway is how a placement someone else owns " +
         "gets taken down. With no pane this build will address there is no marker to " +
@@ -1133,14 +1155,14 @@ export function paneClearReport(
     );
   } else if (!outcome.request) {
     lines.push(
-      `  frame:   ${outcome.owned.frames} frame(s) left in ${outcome.owned.dir}, but this ` +
+      `  frame:   ${left(outcome.owned)} left in ${outcome.owned.dir}, but this ` +
         "shell is not an agwinterm pane, so there is nowhere to send the clear — run " +
         "this from the pane that was drawn on",
     );
   } else if (outcome.cleared) {
     lines.push(
-      `  frame:   cleared — a browser${owner(outcome.owned)} left ${outcome.owned.frames} ` +
-        `frame(s) in ${outcome.owned.dir} and never took the picture back`,
+      `  frame:   cleared — a browser${owner(outcome.owned)} left ${left(outcome.owned)} ` +
+        `in ${outcome.owned.dir} and never took the picture back`,
     );
   } else if (outcome.refused) {
     // The host is there and said no, which is neither "cleared" nor "nobody home".
@@ -1150,14 +1172,14 @@ export function paneClearReport(
     // branch says so rather than reporting a repair that did not happen.
     lines.push(
       `  frame:   the host refused the image.clear — ${outcome.refused}. A browser` +
-        `${owner(outcome.owned)} left ${outcome.owned.frames} frame(s) in ` +
-        `${outcome.owned.dir}; they were left in place, so run this again from the ` +
+        `${owner(outcome.owned)} left ${left(outcome.owned)} in ` +
+        `${outcome.owned.dir}; that was left in place, so run this again from the ` +
         "pane that was drawn on, with that pane's window in front",
     );
   } else {
     lines.push(
       `  frame:   image.clear went unanswered — a browser${owner(outcome.owned)} left ` +
-        `${outcome.owned.frames} frame(s) in ${outcome.owned.dir}, and the host did not ` +
+        `${left(outcome.owned)} in ${outcome.owned.dir}, and the host did not ` +
         "reply, so either that placement is already gone or that pane is",
     );
   }
@@ -1201,4 +1223,15 @@ export function paneClearReport(
 
 function owner(owned: OwnedFrames): string {
   return owned.pid === null ? "" : ` (pid ${owned.pid})`;
+}
+
+/**
+ * What the wreck holds, for the report. A placement that went over shared memory
+ * left no frame file — only the marker — and "0 frame(s)" would read as nothing to
+ * a user standing at a pane that is plainly painted.
+ */
+function left(owned: OwnedFrames): string {
+  return owned.frames === 0
+    ? "a placement that went over shared memory (a pane marker, no frame file)"
+    : `${owned.frames} frame(s)`;
 }

@@ -1058,9 +1058,11 @@ pub struct Terminal {
     /// [`Terminal::clear_frame`], from `Drop` — swallows every error already; what
     /// the deadline buys there is that shutdown finishes at all.
     host_absent: bool,
-    /// The file-based frame path, created with the first frame. Lazily, because a
-    /// terminal that never draws should not leave a directory behind, and because
-    /// creating it is the one part of `draw` that can fail before any pixels move.
+    /// The frame publisher — both routes, `image.frameshm` over a mapping and
+    /// `image.frame` over a file, with [`frame_file`] choosing between them —
+    /// created with the first frame. Lazily, because a terminal that never draws
+    /// should not leave a directory behind, and because creating it is the one part
+    /// of `draw` that can fail before any pixels move.
     frames: Option<frame_file::FramePublisher>,
     color_query: Option<ColorQuery>,
     /// Clipboard text read by [`Terminal::request_clipboard`] and not yet handed to
@@ -1269,9 +1271,13 @@ impl Terminal {
         Ok(())
     }
 
-    /// Puts a frame on screen: PNG to a file of its own, then one `image.frame`
-    /// request pointing the host at it. [`crate::frame_file`] documents why the
-    /// path is never reused.
+    /// Puts a frame on screen, by one of two routes: the pixels copied into a
+    /// shared-memory mapping and one `image.frameshm` request naming it
+    /// ([`crate::frame_shm`]), or — on a host without the verb, under
+    /// `TERMINAL_BROWSER_FRAME_TRANSPORT=file`, or for a frame the fast path did
+    /// not carry — a PNG to a file of its own and one `image.frame` request
+    /// pointing the host at it. [`crate::frame_file`]'s module doc lists those three
+    /// cases and documents why a file path is never reused.
     ///
     /// Two of the failures here are not failures of anything. A pane with no room
     /// in it is a legitimate state — the frame is skipped and zero bytes are

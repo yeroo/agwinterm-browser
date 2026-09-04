@@ -140,8 +140,8 @@ const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 /// How old a directory that *names a pane* has to be before [`sweep_stale`] reclaims
 /// it.
 ///
-/// [`PANE_FILE`] is the whole of `pane-clear`'s evidence: a wreck with frames in it
-/// and a marker naming this pane is the only thing that authorises an `image.clear`,
+/// [`PANE_FILE`] is the whole of `pane-clear`'s evidence: a wreck with a marker
+/// naming this pane is the only thing that authorises an `image.clear`,
 /// and the recovery verb has no override for its absence — by design, because
 /// clearing without evidence is clearing a placement someone else owns. Sweeping a
 /// marked wreck therefore does not just reclaim disk, it destroys the one route back
@@ -180,10 +180,14 @@ const DIR_PREFIX: &str = "terminal-browser-frames-";
 /// repaired on another pane's evidence, which is the clear-what-you-did-not-place
 /// rule (see [`FramePublisher::clear`]) broken from the other side.
 ///
-/// Written once, after the first frame the host accepted, for the same reason
-/// `written` is the test there: a publisher that never placed anything has no pane
-/// to name. The name has no `frame-` prefix, so `ownedFrames` never counts it as a
-/// frame.
+/// Written once, after the first frame the host accepted over either route, for the
+/// same reason `placed` is [`FramePublisher::clear`]'s test: a publisher that never
+/// placed anything has no pane to name. On the mapping route it is the *only* file
+/// the directory ever holds — the pixels went through the mapping, and nothing is
+/// written beside it — so `ownedFrames` (`cli/src/pane.ts`) reads the marker as a
+/// placement on its own rather than counting frame files, and a wreck the fast path
+/// left is recoverable exactly as one the file path left. The name has no `frame-`
+/// prefix, so it is never counted as a frame either.
 const PANE_FILE: &str = "pane";
 
 /// Names a file to append one line per frame to, breaking the cost down by stage.
@@ -635,8 +639,9 @@ pub(crate) struct FramePublisher {
     /// Most recent last. Anything past [`RETAINED`] is deleted.
     written: Vec<PathBuf>,
     /// Latched after the first frame the host declined to read, so a host that
-    /// keeps declining is complained about once.
-    warned_untransmitted: bool,
+    /// keeps declining is complained about once — per route, since the two routes'
+    /// complaints name different things to check. See [`Warned`].
+    warned_untransmitted: Warned,
     /// Which transport was asked for. `File` never constructs a [`Producer`];
     /// `Auto` and `Shm` try the fast path until [`Self::fast_path`] latches. See
     /// [`crate::frame_shm`].
@@ -667,7 +672,7 @@ impl FramePublisher {
             seq: 0,
             scratch: Vec::new(),
             written: Vec::new(),
-            warned_untransmitted: false,
+            warned_untransmitted: Warned::default(),
             transport: Transport::from_env(env),
             fast_path: Latched::Open,
             producer: None,
@@ -1092,13 +1097,18 @@ impl FramePublisher {
             );
             return true;
         }
-        // Said once per publisher, but decided every frame — the warning is for the
+        // Said once per route, but decided every frame — the warning is for the
         // user and the answer is for the caller, and latching the first must not
-        // latch the second.
-        if self.warned_untransmitted {
+        // latch the second. Per route rather than per publisher because the two
+        // complaints diagnose different things: under `auto`, a host that can open
+        // neither the mapping nor the frame directory answers `frame:0/0` over the
+        // mapping first, and if that spent the publisher's one warning the file
+        // route's — the one that names the unreadable path — would never be said.
+        let warned = self.warned_untransmitted.slot(&source);
+        if *warned {
             return placed > 0;
         }
-        self.warned_untransmitted = true;
+        *warned = true;
         let why = if placed == 0 {
             format!(
                 "agwinterm placed none of the frame ({result:?}): {}",
@@ -1123,6 +1133,31 @@ impl FramePublisher {
 enum Source<'a> {
     File(&'a Path),
     Mapping(&'a str),
+}
+
+/// Which routes' "placed none of the frame" have already been said, one latch per
+/// route. A single latch let the mapping's complaint — said first under `auto`, and
+/// spent by the [`MAX_REFUSALS`] frames that then latch the fast path off — silence
+/// the file route's, which is the one that names the directory the host cannot
+/// read.
+#[derive(Default)]
+struct Warned {
+    file: bool,
+    mapping: bool,
+}
+
+impl Warned {
+    fn slot(&mut self, source: &Source<'_>) -> &mut bool {
+        match source {
+            Source::File(_) => &mut self.file,
+            Source::Mapping(_) => &mut self.mapping,
+        }
+    }
+
+    #[cfg(test)]
+    fn any(&self) -> bool {
+        self.file || self.mapping
+    }
 }
 
 impl Source<'_> {
@@ -1795,7 +1830,7 @@ mod tests {
             3,
             "the placed frames were deleted as litter",
         );
-        // Counted, not latched. `warned_untransmitted == true` shows "at least
+        // Counted, not latched. `warned_untransmitted.file` shows "at least
         // once", which is the half of the claim that was never in doubt; the half
         // worth testing is that three stale frames do not produce three lines in a
         // log the user is reading at 26 frames a second.
@@ -2891,6 +2926,51 @@ mod tests {
     }
 
     #[test]
+    fn a_host_that_can_open_neither_the_mapping_nor_the_directory_is_told_about_both() {
+        // A pane hosted in another logon session with a redirected `TEMP`: the host
+        // answers `frame:0/0` to the mapping and to the file alike. The mapping's
+        // complaint is said first, three of those latch the fast path off, and
+        // every frame after that goes over the file — where the complaint naming
+        // the unreadable directory is the one the user can act on. One latch for
+        // the whole publisher spent it on the mapping and the file route's was
+        // never said; the latch is per route so that each is said exactly once.
+        let _alone = alone_with_the_log();
+        let mark = log_mark();
+        let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+
+        for _ in 0..4 {
+            publisher
+                .publish(&mut client, &canvas(16, 16), (1, 1))
+                .expect("both routes answered, neither placed");
+        }
+        assert_eq!(
+            publisher.fast_path,
+            Latched::Unavailable,
+            "three placed-none replies latch the fast path off like refusals"
+        );
+        assert!(!publisher.placed);
+        let said = warnings_since(mark, "placed none of the frame");
+        assert_eq!(
+            said.len(),
+            2,
+            "once per route, not once per publisher: {said:?}"
+        );
+        assert!(
+            said[0].contains("mapping"),
+            "the mapping's first: {}",
+            said[0]
+        );
+        assert!(
+            said[1].contains(".png"),
+            "the file route's names the path the host could not read: {}",
+            said[1]
+        );
+        assert!(publisher.warned_untransmitted.file && publisher.warned_untransmitted.mapping);
+    }
+
+    #[test]
     fn a_shm_frame_the_host_served_from_its_cache_is_a_placement_and_not_a_stale_one() {
         // `frame:1/0` on the mapping route is the spec's `(id, name, seq)` cache
         // hit — the host re-placed pixels it had already copied, which is what a
@@ -2915,7 +2995,7 @@ mod tests {
         assert!(publisher.refusals.is_empty(), "and not a refusal");
         assert_eq!(files_in(publisher.dir()), Vec::<String>::new());
         assert!(
-            !publisher.warned_untransmitted,
+            !publisher.warned_untransmitted.any(),
             "the stale-frame warning is still available to the file route"
         );
         assert!(
@@ -3047,6 +3127,16 @@ mod tests {
         let marker = publisher.dir().join(PANE_FILE);
         assert_eq!(fs::read_to_string(&marker).expect("a marker"), expected);
         assert!(publisher.placed);
+        // The marker is the *only* thing on disk: no frame was written, because none
+        // was encoded. That is the shape `ownedFrames` (`cli/src/pane.ts`) has to
+        // accept on its own for a force-killed browser's wreck to be recoverable,
+        // and `tools/cli/pane-clear.test.mjs` builds exactly this directory and
+        // pins that it does.
+        assert_eq!(
+            files_in(publisher.dir()),
+            Vec::<String>::new(),
+            "a frame file went with it"
+        );
 
         publisher.clear(&mut client).expect("the clear lands");
         assert_eq!(verbs(&server), ["image.frameshm", "image.clear"]);

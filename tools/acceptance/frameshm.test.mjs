@@ -382,13 +382,18 @@ async function launch(t, { transport, rows = 3 }) {
 
   t.after(async () => {
     const pid = browserPid(root);
+    // Queued before anything below can throw, so an interrupted teardown still
+    // reaches the file-level hook; taken back off the queue once the browser is
+    // confirmed gone, because `forceKill` inspects nothing and the pid of a dead
+    // process is one Windows hands out again — to the next case's Electron, say.
     if (pid) strays.push(pid);
     await control(pipe, { cmd: "session.close", target: session }).catch(() => {});
     if (pid) {
       // The closed console delivers SIGHUP to the CLI and the browser, and the
       // browser's `stop` runs `Session.shutdown` — the engine's `Drop` clears the
       // placement. Given that a bounded chance; then the hammer.
-      await settlesWithin(() => !alive(pid), "the browser to leave with its session", EXIT_MS).catch(
+      await settlesWithin(() => !alive(pid), "the browser to leave with its session", EXIT_MS).then(
+        () => strays.splice(strays.indexOf(pid), 1),
         () => forceKill(pid),
       );
     }
