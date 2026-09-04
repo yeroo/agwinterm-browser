@@ -181,8 +181,10 @@ confirms the module is absent there rather than that it compiles.
       slotStride, pixelOffset, `ready = 0`, reserved zeroed, all little-endian
 - [x] `Layout::descriptor(slot) -> Range<usize>` and `Layout::pixels(slot) -> Range<usize>`
       — where a slot's descriptor and its `height * stride` bytes live in the view
-- [x] `slot_for(seq: u64) -> u32` = `seq % SLOT_COUNT`, and `mapping_name(pid, incarnation)
-      -> String` producing `Local\agwinterm-frame-browser-<pid>-<incarnation>`, plus
+- [x] `slot_for(seq: u64) -> u32` = `seq % SLOT_COUNT`, and `mapping_name(pid, start, incarnation)
+      -> String` producing `Local\agwinterm-frame-browser-<pid>-<start>-<incarnation>`
+      (`start`: the millisecond the process made its first producer, so a reused pid never
+      repeats a name the host still remembers a sequence for), plus
       `is_valid_name(&str) -> bool` implementing the prefix and charset rule
 - [x] write tests quoting the spec's offset table: a header written by `write_header` has
       `0x46534741` at 0, `1` at 4, `2` at 8, `0` at 12, `slot_stride` at 16, `256` at 24, `0` at
@@ -534,14 +536,16 @@ talks to.
 
 Slot `i` pixels at `pixelOffset + i * slotStride`, `height * stride` bytes.
 
-**Name:** `Local\agwinterm-frame-browser-<pid>-<incarnation>`; a new incarnation on every
+**Name:** `Local\agwinterm-frame-browser-<pid>-<start>-<incarnation>`; `<start>` is the
+millisecond the process made its first producer, so a later process Windows gave the same pid
+never repeats a name the host still remembers a sequence for; a new incarnation on every
 resize; `seq` never restarts within a process.
 
 **Request (per frame):**
 
 ```json
 {"cmd":"image.frameshm","target":"<pane>","args":{"images":[{"id":1,
- "name":"Local\\agwinterm-frame-browser-4812-0","slot":1,"seq":1,
+ "name":"Local\\agwinterm-frame-browser-4812-1756950000000-0","slot":1,"seq":1,
  "width":1920,"height":1080,"stride":7680,"format":32,
  "row":0,"col":0,"cols":120,"rows":30}]}}
 ```

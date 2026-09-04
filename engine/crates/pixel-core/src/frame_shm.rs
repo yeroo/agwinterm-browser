@@ -20,8 +20,9 @@
 //!   validates, one read-write view sized once, the header written on creation, and
 //!   `publish` for a frame into the slot its sequence selects.
 //! - `producer` (Windows) — the lifetime: a sequence that never restarts while the
-//!   process lives, a fresh mapping-name suffix for every mapping created (a resize
-//!   creates one; so does a name found taken), and `close` for the end.
+//!   process lives, a name no earlier process with this pid can have used, a fresh
+//!   mapping-name suffix for every mapping created (a resize creates one; so does
+//!   a name found taken), and `close` for the end.
 //!
 //! ## What selects it, and what latches it off
 //!
@@ -350,13 +351,20 @@ pub(crate) mod layout {
         (seq % u64::from(SLOT_COUNT)) as u32
     }
 
-    /// `Local\agwinterm-frame-browser-<pid>-<incarnation>`.
+    /// `Local\agwinterm-frame-browser-<pid>-<start>-<incarnation>`.
     ///
     /// `incarnation` changes on every recreate (a resize), because the reader only
     /// accepts a recreated mapping under an old name when its sequence continues
-    /// and the safe way to guarantee that is never to reuse a name.
-    pub(crate) fn mapping_name(pid: u32, incarnation: u32) -> String {
-        format!("{NAME_PREFIX}browser-{pid}-{incarnation}")
+    /// and the safe way to guarantee that is never to reuse a name. `start` is the
+    /// process's (`process_start` in `producer`), for the same reason one process
+    /// later: the host remembers the last sequence it accepted under each name for
+    /// as long as the pane lives, longer than any browser run in it, and Windows
+    /// reissues a pid once its process is gone — so a later browser in the same
+    /// pane with a reused pid and only the pid in its names would offer
+    /// `browser-<pid>-0` again with `seq` back at 1, and be refused until the
+    /// fast path latched off.
+    pub(crate) fn mapping_name(pid: u32, start: u64, incarnation: u32) -> String {
+        format!("{NAME_PREFIX}browser-{pid}-{start}-{incarnation}")
     }
 
     /// The reader's name rule: the exact prefix, then 1..=[`MAX_NAME_SUFFIX`]
@@ -566,10 +574,18 @@ pub(crate) mod layout {
 
         #[test]
         fn the_producers_own_name_passes_the_readers_rule() {
-            let name = mapping_name(1234, 0);
-            assert_eq!(name, r"Local\agwinterm-frame-browser-1234-0");
+            let name = mapping_name(1234, 1_756_950_000_000, 0);
+            assert_eq!(name, r"Local\agwinterm-frame-browser-1234-1756950000000-0");
             assert!(is_valid_name(&name));
-            assert!(is_valid_name(&mapping_name(u32::MAX, u32::MAX)));
+            assert!(
+                is_valid_name(&mapping_name(u32::MAX, u64::MAX, u32::MAX)),
+                "the longest name is within the suffix bound"
+            );
+            assert_ne!(
+                name,
+                mapping_name(1234, 1_756_950_000_001, 0),
+                "the same pid a millisecond later is another name"
+            );
         }
 
         #[test]
@@ -1494,6 +1510,14 @@ pub(crate) mod mapping {
 ///   are the only thing that tells two producers of one process apart — the pid
 ///   is the process's — so each producer owns a range of them
 ///   ([`producer::RANGE`]) and none is ever offered by two.
+/// - **A name is this process's alone, not its pid's.** The host keeps the last
+///   sequence it accepted under each name for the pane's lifetime, and a pane
+///   outlives the browsers run in it; Windows reissues a pid once its process is
+///   gone. A later browser in the same pane under a reused pid, naming its mappings
+///   by pid alone, would offer the same first name with `seq` back at 1 and be
+///   refused on every frame until the fast path latched off. So every name also
+///   carries [`producer::process_start`], the millisecond this process made its
+///   first producer, which no earlier holder of the pid can share.
 /// - **The old mapping is dropped only after the new one exists and only while no
 ///   request is outstanding.** The drop happens inside [`producer::Producer::publish`], and
 ///   `publish` is only called after the reply for the previous frame has returned
@@ -1505,7 +1529,9 @@ pub(crate) mod mapping {
 #[cfg(windows)]
 pub(crate) mod producer {
     use std::io;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::layout::{Layout, Published, mapping_name};
     use super::mapping::Mapping;
@@ -1532,11 +1558,39 @@ pub(crate) mod producer {
     /// process starts at `0`, which is the name the spec's example shows.
     static NEXT_RANGE: AtomicU32 = AtomicU32::new(0);
 
+    /// When this process made its first producer: milliseconds since the Unix
+    /// epoch, captured once and the same for every producer after.
+    static PROCESS_START: OnceLock<u64> = OnceLock::new();
+
+    /// The segment of every name that tells this process from an earlier one with
+    /// the same pid.
+    ///
+    /// Two processes never hold one pid at once, so the later one made its first
+    /// producer after the earlier one had exited — later on the clock, whose
+    /// millisecond is what the name carries. That is what keeps a name from
+    /// repeating across processes, as the ranges keep it from repeating within
+    /// one; it matters because the host remembers the last sequence accepted
+    /// under a name for the pane's lifetime and refuses a `seq` that goes
+    /// backwards, so a repeated name with a restarted `seq` is refused, not
+    /// skipped. A clock before the epoch reads as `0`, which is still a name; it
+    /// is not a clock this code runs under.
+    pub(crate) fn process_start() -> u64 {
+        *PROCESS_START.get_or_init(|| {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| {
+                    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+                })
+        })
+    }
+
     /// See the [module doc](self).
     #[derive(Debug)]
     pub(crate) struct Producer {
-        /// This process's id: the middle of every name this producer creates.
+        /// This process's id, and when it made its first producer
+        /// ([`process_start`]): the middle of every name this producer creates.
         pid: u32,
+        start: u64,
         /// The sequence of the last frame published, `0` until the first. Never
         /// restarted while the producer lives.
         seq: u64,
@@ -1557,6 +1611,7 @@ pub(crate) mod producer {
             let start = NEXT_RANGE.fetch_add(RANGE, Ordering::Relaxed);
             Self {
                 pid: std::process::id(),
+                start: process_start(),
                 seq: 0,
                 incarnation: start,
                 end: start.saturating_add(RANGE),
@@ -1613,7 +1668,7 @@ pub(crate) mod producer {
                          has been used",
                     ));
                 }
-                let name = mapping_name(self.pid, self.incarnation);
+                let name = mapping_name(self.pid, self.start, self.incarnation);
                 self.incarnation += 1;
                 match Mapping::create(layout, &name) {
                     Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -1625,7 +1680,7 @@ pub(crate) mod producer {
                 format!(
                     "image.frameshm: {NAME_ATTEMPTS} mapping names in a row were already \
                      taken, up to {}",
-                    mapping_name(self.pid, self.incarnation - 1)
+                    mapping_name(self.pid, self.start, self.incarnation - 1)
                 ),
             ))
         }
@@ -1688,7 +1743,11 @@ pub(crate) mod producer {
 
         /// The incarnation a name of this producer's ends in.
         fn incarnation_of(name: &str) -> u32 {
-            let prefix = format!("{NAME_PREFIX}browser-{}-", std::process::id());
+            let prefix = format!(
+                "{NAME_PREFIX}browser-{}-{}-",
+                std::process::id(),
+                process_start()
+            );
             name.strip_prefix(&prefix)
                 .unwrap_or_else(|| panic!("{name} is not this process's: expected {prefix}…"))
                 .parse()
@@ -1701,12 +1760,36 @@ pub(crate) mod producer {
             assert_eq!(producer.current_name(), None);
             assert_eq!(producer.seq(), 0);
             assert_eq!(producer.pid, std::process::id());
+            assert_eq!(producer.start, process_start());
             assert_eq!(
                 producer.incarnation % RANGE,
                 0,
                 "the first mapping takes the first suffix of the producer's range"
             );
             assert_eq!(producer.end, producer.incarnation + RANGE);
+        }
+
+        #[test]
+        fn the_process_start_is_captured_once_and_is_in_every_name() {
+            // Captured once: a producer made later in the process carries the same
+            // start as the first, so the ranges alone tell them apart. Nonzero: it
+            // is a real clock reading, not the fallback.
+            let start = process_start();
+            assert!(start > 0);
+            assert_eq!(process_start(), start, "the same for the process's life");
+            let mut producer = Producer::new();
+            assert_eq!(producer.start, start);
+            producer.publish(&flat(4, 4, [1, 1, 1, 255])).unwrap();
+            let name = producer.current_name().unwrap();
+            assert!(
+                name.contains(&format!("-{start}-")),
+                "{name} carries the process start"
+            );
+            assert_ne!(
+                name,
+                mapping_name(producer.pid, start + 1, producer.incarnation - 1),
+                "a process one millisecond later under this pid names its first mapping differently"
+            );
         }
 
         #[test]
@@ -1735,7 +1818,12 @@ pub(crate) mod producer {
             let mut producer = Producer::new();
             let start = producer.incarnation;
             let held: Vec<Mapping> = (0..NAME_ATTEMPTS)
-                .map(|i| Mapping::create(&layout, &mapping_name(producer.pid, start + i)))
+                .map(|i| {
+                    Mapping::create(
+                        &layout,
+                        &mapping_name(producer.pid, producer.start, start + i),
+                    )
+                })
                 .collect::<io::Result<_>>()
                 .expect("hold the next sixteen names");
 
@@ -1745,8 +1833,11 @@ pub(crate) mod producer {
             assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
             assert!(err.to_string().contains("16 mapping names"), "{err}");
             assert!(
-                err.to_string()
-                    .contains(&mapping_name(producer.pid, start + NAME_ATTEMPTS - 1)),
+                err.to_string().contains(&mapping_name(
+                    producer.pid,
+                    producer.start,
+                    start + NAME_ATTEMPTS - 1
+                )),
                 "the last name tried is named: {err}"
             );
             assert_eq!(
@@ -1782,7 +1873,10 @@ pub(crate) mod producer {
                 producer.incarnation - 1,
                 "the name is this process's, under the incarnation just used"
             );
-            assert_eq!(name, mapping_name(producer.pid, producer.incarnation - 1));
+            assert_eq!(
+                name,
+                mapping_name(producer.pid, producer.start, producer.incarnation - 1)
+            );
             assert_eq!((first.seq, first.slot), (1, 1), "sequences start at 1");
 
             let second = producer.publish(&canvas).expect("second frame");
@@ -1903,7 +1997,7 @@ pub(crate) mod producer {
             // real life — holds the name this producer would have used first.
             let layout = Layout::for_frame(8, 4).unwrap();
             let mut producer = Producer::new();
-            let taken = mapping_name(producer.pid, producer.incarnation);
+            let taken = mapping_name(producer.pid, producer.start, producer.incarnation);
             let stale = Mapping::create(&layout, &taken).expect("hold the name");
 
             let published = producer.publish(&flat(8, 4, [0, 0, 0, 255])).unwrap();

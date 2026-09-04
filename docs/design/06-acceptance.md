@@ -220,8 +220,8 @@ a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **523 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 466 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `cargo nextest run --workspace` | **524 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 467 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
 | `node --test "tools/*/*.test.mjs"` | **570 passed**, 130 suites, **2 skipped** (the two `frameshm` cases that need a host with the verb; this was a release host), 29.5 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |

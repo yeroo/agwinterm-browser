@@ -65,8 +65,10 @@ directory out from under a live publisher.
 ### How the fast path is selected
 
 By asking. On the first frame under `auto` or `shm` the publisher copies the composed
-canvas into a slot of a mapping it has just created — `Local\agwinterm-frame-browser-<pid>-<n>`,
-the contract's prefix, a fresh `<n>` for every mapping — release-stores the frame's
+canvas into a slot of a mapping it has just created — `Local\agwinterm-frame-browser-<pid>-<start>-<n>`,
+the contract's prefix, `<start>` the millisecond this process made its first producer so a
+reused pid never repeats a name the host still holds a sequence for, a fresh `<n>` for
+every mapping — release-stores the frame's
 sequence into the mapping's `ready` field, and sends `image.frameshm` naming the mapping,
 the slot, the sequence, the pixel format (`32`, RGBA, which is what the tiny-skia canvas
 holds) and the same placement `image.frame` would carry. What the host answers settles

@@ -313,7 +313,7 @@ renderer with **no PNG encode, no disk round-trip and no base64**:
 
 ```
 Electron paint(BGRA)
-  └─> CreateFileMapping, NAMED: Local\agwinterm-frame-browser-<pid>-<n>
+  └─> CreateFileMapping, NAMED: Local\agwinterm-frame-browser-<pid>-<start>-<n>
         └─> pipe: {"cmd":"image.frameshm","args":{"images":[
                     {"id":N,"name":"Local\\...","slot":N,"seq":N,
                      "width":N,"height":N,"stride":N,"format":N,
@@ -366,9 +366,12 @@ The existing file-based `image.frame` stays as the fallback and as the bring-up 
 >
 > Two corrections to the diagram above, both from the contract. The mapping name was
 > `Local\winterm-browser-<pid>-<id>` when this was drawn, before any prefix existed; it now
-> reads the contract's `Local\agwinterm-frame-browser-<pid>-<n>`, where `<n>` is fresh for
-> every mapping the process creates, so a resize never reuses a name with a restarted
-> sequence. And what goes into the slot is the composed **canvas**, RGBA (`format: 32`),
+> reads the contract's `Local\agwinterm-frame-browser-<pid>-<start>-<n>`, where `<n>` is
+> fresh for every mapping the process creates, so a resize never reuses a name with a
+> restarted sequence, and `<start>` is the millisecond the process made its first producer,
+> so a later browser that Windows gave the same pid never repeats an earlier one's name in
+> a pane whose host still remembers that name's sequence. And what goes into the slot is
+> the composed **canvas**, RGBA (`format: 32`),
 > not Electron's BGRA paint buffer: the canvas is where the chrome, the overlays and the
 > compositor land, and writing the paint buffer straight through would bypass all of them.
 > One number from the earlier callout did not survive either: the 5.5 ms the baseline read as

@@ -40,7 +40,7 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 523 Rust tests and 570 node tests
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 524 Rust tests and 570 node tests
 pass on Windows — the two node cases that need a host with `image.frameshm` skip on a release —
 including the 203 inherited tests in the files this port did not touch.
 
@@ -233,7 +233,7 @@ platform check standing in for a reason — the reasons are in
 Not through the terminal's output stream, which is the whole reason this is a port:
 
 ```
-Electron OSR paint(BGRA)  ->  pixel-core composites  ->  RGBA into a slot of Local\agwinterm-frame-browser-<pid>-<n>
+Electron OSR paint(BGRA)  ->  pixel-core composites  ->  RGBA into a slot of Local\agwinterm-frame-browser-<pid>-<start>-<n>
     ->  {"cmd":"image.frameshm", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
 
                                                    ->  PNG to a fresh path under %TEMP%       (host without the verb)
