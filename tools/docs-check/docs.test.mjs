@@ -236,8 +236,9 @@ test("the frame budget's comparison names both transports and a real agwinterm c
     /Release host at `[0-9a-f]{7,40}`/,
     "the comparison does not say which agwinterm commit the shm rows were taken on",
   );
-  // And the build is not older than the verb, which is the one commit the whole
-  // plan hangs on.
+  // And the doc still names the commit the verb landed in, so a reader can place
+  // the cited build against it. Only that: whether the build is a descendant of
+  // that commit would take the agwinterm repository, which this test does not have.
   assert.ok(doc.includes("`8230d0e`"), "the doc no longer names the commit the verb landed in");
 });
 

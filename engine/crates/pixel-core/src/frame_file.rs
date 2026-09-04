@@ -18,7 +18,7 @@
 //! [`FramePublisher::publish`]:
 //!
 //! - the host lacks the verb: it answered `unknown command 'image.frameshm'` —
-//!   which every agwinterm release as of 2026-09 does, and agliteterm always will
+//!   which every agwinterm release before v0.17.10 does, and agliteterm always will
 //!   — and the file path is latched for the session on that first frame;
 //! - `TERMINAL_BROWSER_FRAME_TRANSPORT=file`, which never tries the verb and is
 //!   what makes `docs/design/02-frame-budget.md`'s baseline re-measurable on a
@@ -112,15 +112,18 @@ const RETAINED: usize = 3;
 
 /// How old a directory has to be before [`sweep_stale`] reclaims it.
 ///
-/// A publisher that is *painting* refreshes its directory's timestamp for free:
-/// every frame creates a file inside it. An idle one does not — a browser sitting
-/// on a static page writes nothing, so age is a bound on the last frame, not on
-/// liveness, and an hour of it does not mean the process is gone. That is why
-/// [`FramePublisher::write_frame`] recreates a directory swept out from under it and
+/// A publisher that is *painting* refreshes its directory's timestamp: over the file
+/// route every frame creates a file inside it, and over the mapping route — which
+/// writes nothing there after the marker — [`FrameDir::keep_fresh`] rewrites the
+/// marker once the directory has gone [`REFRESH_AFTER`] without a write. An idle one
+/// does not — a browser sitting on a static page writes nothing, so age is a bound
+/// on the last frame, not on liveness, and an hour of it does not mean the process
+/// is gone. That is why [`FramePublisher::write_frame`] recreates a directory swept
+/// out from under it, `keep_fresh` does the same on the mapping route, and
 /// [`FrameDir::remark`] puts the pane marker back; without those, a live browser's
-/// next frame would fail and its wreck would stop being attributable to `pane-clear`.
+/// wreck would stop being attributable to `pane-clear`.
 ///
-/// Both of those run *on the next frame*, which leaves one window they do not cover:
+/// All of those run *on the next frame*, which leaves one window they do not cover:
 /// an idle publisher swept out, then killed before it repaints, has no directory and
 /// so no wreck for `pane-clear` to attribute — its placement stays on the pane and
 /// the recovery verb reports nothing owned. Closing that would mean sweeping on
@@ -166,6 +169,20 @@ const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 /// protecting, which is stranded with no command that can reach it at all.
 const MARKED_STALE_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// How long a directory under a publisher on the mapping route may go without a
+/// write before [`FrameDir::keep_fresh`] rewrites its marker to make it young again.
+///
+/// The file route keeps its directory young for free: every frame creates a file in
+/// it. The mapping route writes nothing there after the marker, so left alone its
+/// directory's age would be the session's, and a browser painting over shared memory
+/// for [`MARKED_STALE_AFTER`] would have its only recovery evidence reclaimed by the
+/// next browser to start anywhere on the machine. The rewrite goes through a rename,
+/// because a directory entry coming or going is what moves the directory's timestamp
+/// on NTFS — rewriting the marker in place would not. Well inside [`STALE_AFTER`], so
+/// even a directory whose marker write failed (best-effort, so unmarked and held to
+/// the shorter threshold) stays ahead of the sweep for as long as it is painting.
+const REFRESH_AFTER: Duration = Duration::from_secs(10 * 60);
+
 /// Shared by every publisher's directory, so [`sweep_stale`] can recognise one.
 const DIR_PREFIX: &str = "terminal-browser-frames-";
 
@@ -180,14 +197,18 @@ const DIR_PREFIX: &str = "terminal-browser-frames-";
 /// repaired on another pane's evidence, which is the clear-what-you-did-not-place
 /// rule (see [`FramePublisher::clear`]) broken from the other side.
 ///
-/// Written once, after the first frame the host accepted over either route, for the
-/// same reason `placed` is [`FramePublisher::clear`]'s test: a publisher that never
-/// placed anything has no pane to name. On the mapping route it is the *only* file
-/// the directory ever holds — the pixels went through the mapping, and nothing is
-/// written beside it — so `ownedFrames` (`cli/src/pane.ts`) reads the marker as a
-/// placement on its own rather than counting frame files, and a wreck the fast path
-/// left is recoverable exactly as one the file path left. The name has no `frame-`
-/// prefix, so it is never counted as a frame either.
+/// Written after the first frame the host accepted over either route, for the same
+/// reason `placed` is [`FramePublisher::clear`]'s test: a publisher that never
+/// placed anything has no pane to name — and written again, with the same text,
+/// whenever the directory has to be recreated or kept young ([`FrameDir::remark`],
+/// [`FrameDir::keep_fresh`]). On the mapping route it is the only file the
+/// directory holds at rest — the pixels went through the mapping, and no frame is
+/// written beside it; the one other name that appears there is [`STAGED_PANE_FILE`],
+/// which [`FrameDir::remark`] writes and renames over this one, and which stays
+/// behind only if that rename fails — so `ownedFrames` (`cli/src/pane.ts`) reads the
+/// marker as a placement on its own rather than counting frame files, and a wreck
+/// the fast path left is recoverable exactly as one the file path left. Neither
+/// name has a `frame-` prefix, so neither is ever counted as a frame either.
 const PANE_FILE: &str = "pane";
 
 /// Names a file to append one line per frame to, breaking the cost down by stage.
@@ -388,23 +409,77 @@ impl FrameDir {
     }
 
     /// Puts the marker back after the directory has been recreated under a live
-    /// publisher.
+    /// publisher, or rewrites it to keep the directory young.
     ///
-    /// Without this, the sweep that [`FramePublisher::write_frame`] recovers from
-    /// takes `pane-clear` with it: the recovery verb refuses to adopt a directory
-    /// that holds frames and names no pane (`ownedFrames`, `cli/src/pane.ts`), so a
-    /// browser whose directory was reclaimed while it sat idle — a real case, since
-    /// [`sweep_stale`] reads age, not liveness, and an idle publisher writes no
-    /// frames to keep its timestamp fresh — would go on publishing frames nothing
-    /// could ever attribute, and its wreck would be unrecoverable. Best-effort for
-    /// the same reason [`FrameDir::mark_pane`] is.
+    /// Without this, the sweep that [`FramePublisher::write_frame`] and
+    /// [`FrameDir::keep_fresh`] recover from takes `pane-clear` with it: the recovery
+    /// verb refuses to adopt a directory that holds frames and names no pane
+    /// (`ownedFrames`, `cli/src/pane.ts`), so a browser whose directory was reclaimed
+    /// while it sat idle — a real case, since [`sweep_stale`] reads age, not
+    /// liveness, and an idle publisher writes no frames to keep its timestamp fresh
+    /// — would go on publishing frames nothing could ever attribute, and its wreck
+    /// would be unrecoverable. Best-effort for the same reason
+    /// [`FrameDir::mark_pane`] is.
+    ///
+    /// Staged and renamed rather than written in place: a directory entry coming or
+    /// going is what moves the directory's timestamp, which is the whole of what
+    /// `keep_fresh` is after, and `pane-clear` never sees a half-written marker. The
+    /// staged name has no `frame-` prefix and is not [`PANE_FILE`], so
+    /// `allOwnedFrames` counts it as nothing should a rename ever fail.
     fn remark(&self) {
         let Some(mark) = self.mark.as_ref() else {
             return;
         };
-        let _ = fs::write(self.path.join(PANE_FILE), mark);
+        let staged = self.path.join(STAGED_PANE_FILE);
+        let _ =
+            fs::write(&staged, mark).and_then(|()| fs::rename(&staged, self.path.join(PANE_FILE)));
+    }
+
+    /// Keeps the directory standing, and young, under a publisher that writes
+    /// nothing into it — the mapping route, where every frame after the marker goes
+    /// through shared memory. Run on every accepted `image.frameshm` frame
+    /// ([`FramePublisher::publish_shm`]), before the marker a first one writes.
+    ///
+    /// Two things the file route gets from [`FramePublisher::write_frame`] for free.
+    /// A directory something removed — a cleaner, or [`sweep_stale`] in another
+    /// browser — is recreated and its marker put back, exactly as `write_frame` does
+    /// on `NotFound`, so a kill after that still leaves a wreck `pane-clear` can
+    /// attribute. And a directory that has gone [`REFRESH_AFTER`] without a write
+    /// gets its marker rewritten, which moves its timestamp and keeps `sweep_stale`
+    /// off it: without that, a browser painting over the mapping for
+    /// [`MARKED_STALE_AFTER`] had its only recovery evidence reclaimed by the next
+    /// browser to start. One `metadata` call per frame, outside the budget's
+    /// columns; best-effort like the rest of the marker.
+    fn keep_fresh(&self) {
+        self.keep_fresh_after(REFRESH_AFTER);
+    }
+
+    /// The half that takes the threshold, so a test can drive the rewrite without
+    /// backdating a directory.
+    fn keep_fresh_after(&self, refresh_after: Duration) {
+        match fs::metadata(&self.path) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                if fs::create_dir_all(&self.path).is_ok() {
+                    self.remark();
+                }
+            }
+            Ok(meta) => {
+                let aged = meta
+                    .modified()
+                    .ok()
+                    .and_then(|at| SystemTime::now().duration_since(at).ok())
+                    .is_some_and(|age| age >= refresh_after);
+                if aged {
+                    self.remark();
+                }
+            }
+            Err(_) => {}
+        }
     }
 }
+
+/// Where [`FrameDir::remark`] writes the marker before renaming it into place.
+const STAGED_PANE_FILE: &str = "pane.staged";
 
 impl Drop for FrameDir {
     /// Removes the directory — unless a clear was attempted here and failed.
@@ -428,10 +503,12 @@ impl Drop for FrameDir {
 ///
 /// By age, not by liveness: asking whether a pid is still alive is both racy (pids
 /// are reused) and more Win32 than this needs. The trade is that age only tracks
-/// *painting* — a directory gains a file every frame, so a browser drawing anything
-/// at all stays fresh, but an idle one goes quiet and can pass [`STALE_AFTER`] while
-/// still holding its pane. [`FramePublisher::write_frame`] and [`FrameDir::remark`]
-/// are what make that survivable rather than fatal. Every error is ignored — a
+/// *painting* — a directory gains a file every frame on the file route, and has its
+/// marker rewritten every [`REFRESH_AFTER`] on the mapping route
+/// ([`FrameDir::keep_fresh`]), so a browser drawing anything at all stays fresh,
+/// but an idle one goes quiet and can pass [`STALE_AFTER`] while still holding its
+/// pane. [`FramePublisher::write_frame`], `keep_fresh` and [`FrameDir::remark`] are
+/// what make that survivable rather than fatal. Every error is ignored — a
 /// directory another live browser is holding open is exactly the case where failing
 /// to delete it is correct.
 ///
@@ -862,10 +939,14 @@ impl FramePublisher {
             Reply::Ok(result) => {
                 cost.publish = started.elapsed();
                 // `frame:0/0` is "nothing was placed" in an `ok:true` envelope,
-                // exactly as on the file path — and, on this path, the answer of a
-                // host that cannot open the mapping at all, on every frame. So it
-                // is not a placement, this frame goes out over the file so the
-                // pane is not left blank, and it counts with the refusals.
+                // exactly as on the file path. On this path the contract does not
+                // produce it for a request like ours: a frame is all-or-nothing,
+                // and a mapping the host cannot open is a rejection — an `ok:false`
+                // naming the reason, which is the `Err` arm below — rather than an
+                // image it skips, so `frame:0/0` would need an empty `images`
+                // array. It is handled all the same, defensively: not a placement,
+                // this frame goes out over the file so the pane is not left blank,
+                // and it counts with the refusals.
                 if !self.check_transmitted(&result, Source::Mapping(&name)) {
                     self.refused(format!("the host placed none of it ({result})"));
                     return Ok(None);
@@ -877,6 +958,11 @@ impl FramePublisher {
                 // reads as what happened rather than as a slow fast path.
                 self.budget.record(&cost);
                 self.refusals.clear();
+                // Nothing on this route writes to the directory, so nothing on
+                // this route would notice it gone or keep it young; this does
+                // both, and runs before a first frame's marker so that marker
+                // lands in a directory that exists.
+                self.dir.keep_fresh();
                 if !self.placed {
                     self.dir.mark_pane(client.target());
                     self.placed = true;
@@ -898,7 +984,7 @@ impl FramePublisher {
     /// and the host is not asked again.
     ///
     /// Said once, at the level the transport earns. Under `Auto` the file path is
-    /// simply the path — every agwinterm release as of 2026-09 answers this, and
+    /// simply the path — every agwinterm release before v0.17.10 answers this, and
     /// agliteterm always will — so it is information. Under `Shm` the caller asked
     /// for something they are not getting, and silence would be the worse answer:
     /// `TERMINAL_BROWSER_FRAME_TRANSPORT=shm` followed by a working browser reads as
@@ -983,7 +1069,7 @@ impl FramePublisher {
                 // this browser left a picture on the pane, and pushing the path would
                 // let [`clear`] send an `image.clear` at whatever *is* on it — both
                 // of them the "clear a placement some other process owns" this
-                // publisher declines to do when `written` is empty. So it is treated
+                // publisher declines to do while `placed` is false. So it is treated
                 // exactly as a refusal is; `a_frame_the_host_refused_names_no_pane`
                 // already pins that for the `ok:false` spelling of the same state.
                 if !self.check_transmitted(&result, Source::File(&path)) {
@@ -1063,7 +1149,7 @@ impl FramePublisher {
     /// `ControlClient::request`'s single replay after a dropped pipe — the same
     /// name, slot and sequence go out again, and the host re-places the pixels it
     /// already copied. That is a correct picture, so it is information, said every
-    /// time, and it does not spend the once-per-publisher warning below.
+    /// time, and it does not spend the once-per-route warning below ([`Warned`]).
     /// A `placed` of zero is the case a `transmitted < placed` test cannot see,
     /// because `0 < 0` is false. It is what agwinterm answers when it cannot open
     /// the path at all: `HandleImageFrame` skips an image whose file it cannot find
@@ -1100,10 +1186,11 @@ impl FramePublisher {
         // Said once per route, but decided every frame — the warning is for the
         // user and the answer is for the caller, and latching the first must not
         // latch the second. Per route rather than per publisher because the two
-        // complaints diagnose different things: under `auto`, a host that can open
-        // neither the mapping nor the frame directory answers `frame:0/0` over the
-        // mapping first, and if that spent the publisher's one warning the file
-        // route's — the one that names the unreadable path — would never be said.
+        // complaints diagnose different things: under `auto` the mapping is tried
+        // first, so a host that staged nothing over it and then cannot open the
+        // frame directory either would, with one warning for the publisher, spend
+        // it on the mapping — and the file route's, the one that names the
+        // unreadable path, would never be said.
         let warned = self.warned_untransmitted.slot(&source);
         if *warned {
             return placed > 0;
@@ -1112,7 +1199,7 @@ impl FramePublisher {
         let why = if placed == 0 {
             format!(
                 "agwinterm placed none of the frame ({result:?}): {}",
-                source.unopenable()
+                source.placed_nothing_from()
             )
         } else {
             // The file route: the mapping route returned above.
@@ -1128,8 +1215,8 @@ impl FramePublisher {
     }
 }
 
-/// What a frame's request pointed the host at, for the complaint that it could not
-/// open it. The two routes differ in nothing else about that reply.
+/// What a frame's request pointed the host at, for the complaint that it placed
+/// nothing from it. The two routes differ in nothing else about that reply.
 enum Source<'a> {
     File(&'a Path),
     Mapping(&'a str),
@@ -1139,7 +1226,9 @@ enum Source<'a> {
 /// route. A single latch let the mapping's complaint — said first under `auto`, and
 /// spent by the [`MAX_REFUSALS`] frames that then latch the fast path off — silence
 /// the file route's, which is the one that names the directory the host cannot
-/// read.
+/// read. That the contract never answers `frame:0/0` to a one-image mapping
+/// request does not change the rule: the file route's complaint must not depend on
+/// what the mapping's did or did not spend.
 #[derive(Default)]
 struct Warned {
     file: bool,
@@ -1161,9 +1250,12 @@ impl Warned {
 }
 
 impl Source<'_> {
-    /// The half of the `frame:0/0` complaint that names what the host could not
-    /// open, and what to check.
-    fn unopenable(&self) -> String {
+    /// The half of the `frame:0/0` complaint that names what the request pointed
+    /// the host at and what that reply means for it. The file route's names a path
+    /// the host could not open and what to check; the mapping route's names the
+    /// mapping and says the reply is one the contract does not give, since a
+    /// mapping the host cannot open is refused with a reason, not placed as nothing.
+    fn placed_nothing_from(&self) -> String {
         match self {
             Self::File(path) => format!(
                 "it could not open {}, so the pane has been left blank. Check that the \
@@ -1171,9 +1263,10 @@ impl Source<'_> {
                 path.display()
             ),
             Self::Mapping(name) => format!(
-                "it could not open the mapping {name}, so the pane has been left blank. \
-                 The name is in the `Local\\` namespace, so the process hosting the \
-                 pane must be in this logon session"
+                "it staged nothing from the mapping {name}, so the pane has been left \
+                 blank. The contract answers a mapping it cannot open with a refusal \
+                 that says why, not with this, so the host is not the one this was \
+                 written against"
             ),
         }
     }
@@ -1199,7 +1292,7 @@ fn write_all_new(path: &Path, png: &[u8]) -> io::Result<()> {
     // pid path `allOwnedFrames` adopts exactly that shape — frames present, marker
     // absent — as "a browser left a picture here", and clearing on that evidence
     // takes down a placement some other producer owns. That is the very thing
-    // `FramePublisher::clear`'s `written.is_empty()` guard exists to refuse.
+    // `FramePublisher::clear`'s `placed` guard exists to refuse.
     let written = file.write_all(png).and_then(|()| file.flush());
     discard_partial(path, file, written)
 }
@@ -2114,9 +2207,109 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_swept_from_under_a_shm_publisher_is_recreated_with_its_marker() {
+        // The file route recovers from this in `write_frame`, because its next frame
+        // has to create a file there. A mapping-route frame writes nothing, so the
+        // recovery is `keep_fresh`'s, run on every accepted frame: without it the
+        // directory — and the marker that is `pane-clear`'s only evidence — stayed
+        // gone for the rest of the session, and killing this browser left its pane
+        // painted and unrecoverable.
+        let _alone = alone_with_the_log();
+        let server = PipeServer::always(&ok_frame());
+        let mut client = server.client();
+        let mut publisher = FramePublisher::new(&transport_of("auto")).expect("a temp directory");
+        let marker = publisher.dir().join(PANE_FILE);
+        let expected = format!(
+            "{}\n{}\n",
+            client.target().pipe(),
+            client.target().session()
+        );
+
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the host takes the first frame");
+        assert_eq!(
+            fs::read_to_string(&marker).expect("a marker on the first placement"),
+            expected
+        );
+        fs::remove_dir_all(publisher.dir()).expect("the sweep takes the whole directory");
+        publisher
+            .publish(&mut client, &canvas(16, 16), (1, 1))
+            .expect("the next frame still goes over the mapping");
+
+        assert_eq!(
+            verbs(&server),
+            ["image.frameshm", "image.frameshm"],
+            "both frames went over the mapping"
+        );
+        assert_eq!(
+            fs::read_to_string(&marker).expect("a marker in the recreated directory"),
+            expected
+        );
+        let entries: Vec<_> = fs::read_dir(publisher.dir())
+            .expect("the directory is back")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            [PANE_FILE],
+            "the marker is the directory's only file"
+        );
+    }
+
+    #[test]
+    fn a_marked_directory_that_has_gone_quiet_gets_its_marker_rewritten_and_its_age_reset() {
+        // `sweep_stale` reads the directory's timestamp, and on the mapping route
+        // nothing but the marker is ever written under it — so a browser painting
+        // over shared memory for a week was, to the next browser to start, a wreck a
+        // week old. `keep_fresh` rewrites the marker through a rename once the
+        // directory has gone `REFRESH_AFTER` without a write, which is the one
+        // thing that moves a directory's timestamp on NTFS; the threshold is a
+        // parameter so this can drive it without backdating a directory.
+        let root = std::env::temp_dir().join(format!("frame-refresh-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("a root");
+        let mut dir = FrameDir::create_in(&root).expect("a directory of its own");
+        dir.mark = Some("pipe\nsession\n".to_owned());
+        dir.remark();
+        let before = fs::metadata(&dir.path)
+            .and_then(|meta| meta.modified())
+            .expect("a timestamp");
+        std::thread::sleep(Duration::from_millis(50));
+
+        dir.keep_fresh_after(Duration::from_secs(60 * 60));
+        let untouched = fs::metadata(&dir.path)
+            .and_then(|meta| meta.modified())
+            .expect("a timestamp");
+        assert_eq!(
+            untouched, before,
+            "a directory younger than the threshold is left alone"
+        );
+
+        dir.keep_fresh_after(Duration::ZERO);
+        let after = fs::metadata(&dir.path)
+            .and_then(|meta| meta.modified())
+            .expect("a timestamp");
+        assert!(
+            after > before,
+            "the rewrite did not move the directory's timestamp"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path.join(PANE_FILE)).expect("the marker is still there"),
+            "pipe\nsession\n"
+        );
+        assert!(
+            !dir.path.join(STAGED_PANE_FILE).exists(),
+            "the staged marker was renamed into place, not left beside it"
+        );
+        drop(dir);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_frame_the_host_refused_names_no_pane() {
-        // Same rule as `clear`'s `written.is_empty()`: nothing was placed, so there is
-        // no pane to claim. A marker here would let `pane-clear` adopt — and delete —
+        // Same rule as `clear`'s `placed`: nothing was placed, so there is no pane to
+        // claim. A marker here would let `pane-clear` adopt — and delete —
         // a directory whose frames never reached a pane at all.
         let server = PipeServer::always(r#"{"ok":false,"error":"no session"}"#);
         let mut client = server.client();
@@ -2486,7 +2679,7 @@ mod tests {
 
     #[test]
     fn asking_for_a_fast_path_the_host_lacks_still_publishes_over_the_file_one() {
-        // Every agwinterm release as of 2026-09, and agliteterm for good: the first
+        // Every agwinterm release before v0.17.10, and agliteterm for good: the first
         // request is answered `unknown command`, and from then on the frames go
         // out as `image.frame` — including the one that was refused. A request for
         // a transport the host lacks must never cost a frame.
@@ -2898,9 +3091,11 @@ mod tests {
 
     #[test]
     fn a_frame_the_host_placed_none_of_over_shm_goes_out_over_the_file() {
-        // `frame:0/0` on this path is a host that cannot open the mapping — which
-        // it will answer on every frame — so beyond not being a placement, it is a
-        // refusal: this frame goes out over the file, and it counts.
+        // `frame:0/0` is not an answer the contract gives a one-image request — a
+        // mapping the host cannot open is an `ok:false` with the reason, not an
+        // image it skips — so this is the defensive reading of a reply nothing
+        // this build knows how to produce: not a placement, and a refusal, so the
+        // frame goes out over the file and it counts.
         let _alone = alone_with_the_log();
         let mark = log_mark();
         let server = scripted(&[r#"{"ok":true,"result":"frame:0/0"}"#, &ok_frame()]);
@@ -2926,14 +3121,16 @@ mod tests {
     }
 
     #[test]
-    fn a_host_that_can_open_neither_the_mapping_nor_the_directory_is_told_about_both() {
-        // A pane hosted in another logon session with a redirected `TEMP`: the host
-        // answers `frame:0/0` to the mapping and to the file alike. The mapping's
-        // complaint is said first, three of those latch the fast path off, and
-        // every frame after that goes over the file — where the complaint naming
-        // the unreadable directory is the one the user can act on. One latch for
-        // the whole publisher spent it on the mapping and the file route's was
-        // never said; the latch is per route so that each is said exactly once.
+    fn a_host_that_stages_nothing_over_either_route_is_told_about_both() {
+        // A host answering `frame:0/0` to the mapping and to the file alike. The
+        // file half is real — a redirected `TEMP` the host cannot read — and the
+        // mapping half is one the contract does not produce, scripted here because
+        // the latch has to hold whatever the host says. The mapping's complaint is
+        // said first, three of those latch the fast path off, and every frame after
+        // that goes over the file — where the complaint naming the unreadable
+        // directory is the one the user can act on. One latch for the whole
+        // publisher spent it on the mapping and the file route's was never said;
+        // the latch is per route so that each is said exactly once.
         let _alone = alone_with_the_log();
         let mark = log_mark();
         let server = PipeServer::always(r#"{"ok":true,"result":"frame:0/0"}"#);
@@ -2976,7 +3173,8 @@ mod tests {
         // hit — the host re-placed pixels it had already copied, which is what a
         // replayed request gets — not the file route's "could not read the file".
         // So: a placement, not resent, not counted, and recorded as information
-        // rather than spending the once-per-publisher stale-frame warning.
+        // rather than spending the mapping route's once-per-route stale-frame
+        // warning (`Warned`).
         let _alone = alone_with_the_log();
         let mark = log_mark();
         let server = scripted(&[r#"{"ok":true,"result":"frame:1/0"}"#, &ok_frame()]);

@@ -12,8 +12,8 @@
 // leaves on the first accepted placement (`FrameDir::mark_pane`), and the log the
 // CLI gives the browser as fd 2.
 //
-// **Which host.** The verb is on agwinterm `main` from `8230d0e` and in no release
-// as of 2026-09-03, so the installed release answers `unknown command` — and so does
+// **Which host.** The verb is in agwinterm from v0.17.10 (`8230d0e`, 2026-09-03);
+// an installed release older than that answers `unknown command` — and so does
 // agliteterm, by design. The suite probes first, with a request the host refuses
 // before it touches anything, and the capable-host cases skip with the reason when
 // the verb is absent. The fallback case needs the *opposite* host and skips on a
@@ -52,8 +52,13 @@ const REPO = path.resolve(HERE, "..", "..");
 /** The page the milestone was brought up on: static, so every frame is the same. */
 const PAGE = pathToFileURL(path.join(REPO, "tools", "milestone", "static-page.html")).href;
 
-/** The plan's wording, so a skipped run says what would un-skip it. */
-const LACKS_VERB = "host lacks image.frameshm (agwinterm main ≥ 8230d0e required)";
+/**
+ * A skipped run has to say what would un-skip it, and a version is the thing a reader
+ * can install. The plan (Task 7) spelled this as `agwinterm main ≥ 8230d0e`, which was
+ * the only way to name the verb before v0.17.10 shipped it; the plan keeps that spelling
+ * as a dated record, and this is the current one.
+ */
+const LACKS_VERB = "host lacks image.frameshm (agwinterm v0.17.10 or later required)";
 
 /** How long a session's browser gets to start, place three frames and log them. */
 const LAUNCH_MS = 90_000;
@@ -140,7 +145,7 @@ async function control(pipe, request, ms = CONTROL_MS) {
   let last = null;
   for (;;) {
     try {
-      return await withDeadline(exchange(endpoint, request), `${request.cmd} on ${pipe}`, ms);
+      return await exchange(endpoint, request, `${request.cmd} on ${pipe}`, ms);
     } catch (error) {
       last = error;
       if (!/^E[A-Z]+$/.test(error.code ?? "") || Date.now() >= until) throw error;
@@ -149,9 +154,21 @@ async function control(pipe, request, ms = CONTROL_MS) {
   }
 }
 
-function exchange(endpoint, request) {
+/**
+ * The deadline is the socket's own, not a race around the promise: a host that
+ * accepts the connection and never answers would otherwise leave a live handle
+ * behind the rejection, and one open socket is enough to keep the file — and the
+ * whole `pnpm test` run behind it — up until the runner's outer timeout. Destroying
+ * the socket rejects through `error` with a message that names the wait, the way
+ * `withDeadline` would have, and the `close` that follows finds the promise settled.
+ */
+function exchange(endpoint, request, what, ms) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(endpoint);
+    const timer = setTimeout(
+      () => socket.destroy(new Error(`timed out after ${ms}ms waiting for ${what}`)),
+      ms,
+    );
     let buffer = "";
     socket.setEncoding("utf8");
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
@@ -167,7 +184,10 @@ function exchange(endpoint, request) {
       }
     });
     socket.once("error", reject);
-    socket.once("close", () => reject(new Error(`${endpoint} closed before it answered`)));
+    socket.once("close", () => {
+      clearTimeout(timer);
+      reject(new Error(`${endpoint} closed before it answered`));
+    });
   });
 }
 
@@ -247,16 +267,65 @@ before(async () => {
 
 const strays = [];
 after(async () => {
-  const failures = await teardown(...strays.map((pid) => () => forceKill(pid)));
+  const failures = await teardown(...strays.map((stray) => () => forceKill(stray)));
   assert.deepEqual(failures, [], "a browser of this suite would not die");
 });
 
-/** `taskkill /F /T`, which runs no destructor; the session's console is gone anyway. */
-function forceKill(pid) {
+/**
+ * `taskkill /F /T`, which runs no destructor; the session's console is gone anyway.
+ *
+ * Takes a `stray` — a pid *and* when that process was born — rather than a pid,
+ * because a pid on its own names whatever Windows has given the number to by now.
+ * The file-level hook runs this on anything a case's own teardown could not confirm
+ * dead, which is after every other case has started and stopped its own Electron;
+ * if the browser did die in between and its pid went to one of those, a kill by
+ * number alone would take down a tree this suite never started. So a process that
+ * is not the one queued — gone, or born at another time — is left alone and counts
+ * as gone, which is the state the caller wanted. Only when the birth time could not
+ * be read at all (`bornAt` failed both times) does this fall back to the number.
+ *
+ * The kill itself is allowed to fail — a pid that is already gone is the state the
+ * caller wanted — but the outcome is not: this throws if the process is still up
+ * afterwards, which is the only way the file-level assertion above can say anything.
+ * Swallowing every error made it green by construction.
+ */
+async function forceKill({ pid, born }) {
+  if (born !== undefined) {
+    const now = bornAt(pid);
+    if (now !== undefined && now !== born) return;
+  }
   try {
     execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { timeout: 15_000, stdio: "ignore" });
   } catch {
-    // Already gone, which is the state the caller wanted.
+    // Already gone, or refused; what matters is checked below.
+  }
+  await settlesWithin(() => !alive(pid), `pid ${pid} to die under taskkill /F`, EXIT_MS);
+}
+
+/**
+ * When `pid`'s process was created, as a file time: `null` if there is no such
+ * process, `undefined` if the question could not be asked. The identity a pid
+ * lacks — Windows reuses the number as soon as it is free, and a freed number can
+ * go to the next case's Electron, so a process is "the one queued" only if its
+ * birth matches the one recorded then. Asked of WMI through PowerShell, which is
+ * a subprocess and most of a second; it runs once per queue and once per kill,
+ * never in a poll.
+ */
+function bornAt(pid) {
+  try {
+    const out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToFileTimeUtc() }`,
+      ],
+      { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return out === "" ? null : out;
+  } catch {
+    return undefined;
   }
 }
 
@@ -382,20 +451,25 @@ async function launch(t, { transport, rows = 3 }) {
 
   t.after(async () => {
     const pid = browserPid(root);
-    // Queued before anything below can throw, so an interrupted teardown still
-    // reaches the file-level hook; taken back off the queue once the browser is
-    // confirmed gone, because `forceKill` inspects nothing and the pid of a dead
-    // process is one Windows hands out again — to the next case's Electron, say.
-    if (pid) strays.push(pid);
+    // Queued — with its birth time, which is what makes the number an identity —
+    // before anything below can throw, so an interrupted teardown still reaches
+    // the file-level hook; taken back off the queue once the browser is confirmed
+    // gone, by its own exit or under the hammer. A browser `forceKill` could not
+    // confirm dead stays queued for that second attempt, and the throw fails this
+    // case. The pid of a dead process is one Windows hands out again — to the next
+    // case's Electron, say — which is why the second attempt checks the birth time
+    // before it kills, rather than taking the number on trust.
+    const stray = pid ? { pid, born: bornAt(pid) } : null;
+    if (stray) strays.push(stray);
     await control(pipe, { cmd: "session.close", target: session }).catch(() => {});
-    if (pid) {
+    if (stray) {
       // The closed console delivers SIGHUP to the CLI and the browser, and the
       // browser's `stop` runs `Session.shutdown` — the engine's `Drop` clears the
       // placement. Given that a bounded chance; then the hammer.
-      await settlesWithin(() => !alive(pid), "the browser to leave with its session", EXIT_MS).then(
-        () => strays.splice(strays.indexOf(pid), 1),
-        () => forceKill(pid),
+      await settlesWithin(() => !alive(pid), "the browser to leave with its session", EXIT_MS).catch(
+        () => forceKill(stray),
       );
+      strays.splice(strays.indexOf(stray), 1);
     }
     // The CLI outlives the browser by the time its `clearOwnedPaneFrame` takes,
     // and holds the store's database open until then; `EBUSY` on the way out is
@@ -523,7 +597,7 @@ describe("a host without image.frameshm", () => {
     if (host.skip) return t.skip(host.skip);
     if (host.capable) {
       return t.skip(
-        `${host.pipe} has image.frameshm; the fallback needs a host without it (every release as of 2026-09)`,
+        `${host.pipe} has image.frameshm; the fallback needs a host without it (any agwinterm before v0.17.10, or agliteterm)`,
       );
     }
     requireArtifacts();

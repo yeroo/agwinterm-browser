@@ -1,6 +1,6 @@
 //! The fast frame path: a canvas into a shared-memory slot, and the host told which.
 //!
-//! On a host that implements `image.frameshm` — agwinterm `main` from `8230d0e`,
+//! On a host that implements `image.frameshm` — agwinterm from v0.17.10 (`8230d0e`),
 //! contract `docs/specs/image-frameshm.md` layout version 1 — a frame is not
 //! encoded, not written and not decoded. The composed canvas is copied, row by row,
 //! into the inactive slot of a named file mapping, the mapping's `ready` field is
@@ -28,8 +28,8 @@
 //!
 //! [`Transport`] is what was asked for, read from [`TRANSPORT_VAR`]; `FramePublisher`
 //! in [`crate::frame_file`] is what does the asking. `Auto` and `Shm` try the verb on
-//! the first frame. `unknown command` — the answer of every agwinterm release as of
-//! 2026-09, and of agliteterm always — latches the file path for the session on the
+//! the first frame. `unknown command` — the answer of every agwinterm release before
+//! v0.17.10, and of agliteterm always — latches the file path for the session on the
 //! spot, closes the mapping, and re-sends that same frame as an `image.frame`, so
 //! the probe costs no frame; under `Shm` the latch is explained once
 //! ([`Transport::unavailable_reason`]), under `Auto` it is information. Any other
@@ -141,8 +141,8 @@ impl Transport {
             Self::Shm => Some(format!(
                 "{TRANSPORT_VAR}=shm asked for `{FRAMESHM_CMD}`, which this host does \
                  not implement: it answered `unknown command`. The verb (agwinterm's \
-                 docs/specs/image-frameshm.md) is on agwinterm `main` from 8230d0e \
-                 and in no release as of 2026-09, and agliteterm never has it. Frames \
+                 docs/specs/image-frameshm.md) is in agwinterm from v0.17.10 (commit \
+                 8230d0e, 2026-09-03), and agliteterm never has it. Frames \
                  are going out over `image.frame` for the rest of this session — the \
                  picture is the same, the cost is the one in \
                  docs/design/02-frame-budget.md"
@@ -210,9 +210,24 @@ pub(crate) mod layout {
     pub(crate) const NAME_PREFIX: &str = r"Local\agwinterm-frame-";
     /// The reader rejects a `width` or `height` outside `1..=16384`.
     pub(crate) const MAX_DIMENSION: u32 = 16384;
+    /// The control server rejects a request that would copy more than this many
+    /// pixel bytes (spec § Limits: 268,435,456 aggregate per `images` array). One
+    /// frame is one image, so a frame past this is one no request could place —
+    /// and both dimensions inside [`MAX_DIMENSION`] do not keep it under, since
+    /// 16384² × 4 is four times this.
+    pub(crate) const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
     /// What may follow [`NAME_PREFIX`]: 1..=128 characters of `[A-Za-z0-9._-]`.
     pub(crate) const MAX_NAME_SUFFIX: usize = 128;
-    /// Slot strides are rounded up to this, so each slot starts on a page.
+    /// Slot strides are rounded up to this. Not so that a slot starts on a page —
+    /// none does, since the pixels begin at [`HEADER_LEN`], 256 bytes into the view
+    /// — but so that the slots sit a whole number of pages apart: every slot
+    /// boundary then falls at the same offset into its page, and the stride is a
+    /// round figure rather than one frame's exact byte count. It does *not* keep
+    /// the slots on separate pages: a frame whose bytes are themselves a page
+    /// multiple — 1920×1080×4 is one — ends 256 bytes into a page that the next
+    /// slot's first rows share. Nothing depends on their not sharing: the producer
+    /// writes one slot, the inactive one, and the host reads the other by
+    /// descriptor, not by page.
     pub(crate) const PAGE: usize = 4096;
     /// Every format the verb carries is 4 bpp; the bounds in the spec assume it.
     const BYTES_PER_PIXEL: u32 = 4;
@@ -236,8 +251,9 @@ pub(crate) mod layout {
     impl Layout {
         /// The layout for a `width`×`height` RGBA frame.
         ///
-        /// Rejects a dimension the reader would reject, so a mapping is never
-        /// created for a frame no request could place.
+        /// Rejects a dimension the reader would reject, and a frame the control
+        /// server's byte limit would, so a mapping is never created — nor a quarter
+        /// gigabyte copied into it — for a frame no request could place.
         pub(crate) fn for_frame(width: u32, height: u32) -> io::Result<Self> {
             for (axis, value) in [("width", width), ("height", height)] {
                 if !(1..=MAX_DIMENSION).contains(&value) {
@@ -249,6 +265,15 @@ pub(crate) mod layout {
             }
             let stride = width * BYTES_PER_PIXEL;
             let slot_bytes = height as usize * stride as usize;
+            if slot_bytes > MAX_FRAME_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "image.frameshm {width}x{height} is {slot_bytes} bytes, past the \
+                         {MAX_FRAME_BYTES} the host copies per request"
+                    ),
+                ));
+            }
             let slot_stride = slot_bytes.div_ceil(PAGE) * PAGE;
             Ok(Self {
                 width,
@@ -518,7 +543,7 @@ pub(crate) mod layout {
 
             let bytes = 1080 * 7680;
             assert!(layout.slot_stride() >= bytes, "a slot holds its frame");
-            assert_eq!(layout.slot_stride() % PAGE, 0, "slots start on a page");
+            assert_eq!(layout.slot_stride() % PAGE, 0, "slots sit whole pages apart");
             assert!(
                 layout.slot_stride() - bytes < PAGE,
                 "and no more than a page of padding"
@@ -565,8 +590,27 @@ pub(crate) mod layout {
                 assert!(err.to_string().contains("16384"), "{err}");
             }
             assert!(
-                Layout::for_frame(16384, 16384).is_ok(),
+                Layout::for_frame(16384, 4096).is_ok(),
                 "the bound is inclusive"
+            );
+        }
+
+        #[test]
+        fn a_frame_past_the_hosts_byte_limit_is_rejected_before_a_mapping_exists() {
+            // Both dimensions legal, the product not: 8192 × 8193 × 4 is one row past
+            // the 256 MiB the control server copies per request, so every request
+            // for it would be refused — after this side had committed a half-gigabyte
+            // mapping and copied a quarter of one into it, three frames running.
+            let err = Layout::for_frame(8192, 8193).expect_err("past the byte limit");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("268435456"), "{err}");
+            assert!(
+                Layout::for_frame(8192, 8192).is_ok(),
+                "exactly the limit is inclusive"
+            );
+            assert!(
+                Layout::for_frame(16384, 16384).is_err(),
+                "the largest legal dimensions are four times the limit"
             );
         }
 
@@ -1501,7 +1545,8 @@ pub(crate) mod mapping {
 ///   replaced: the host rejects a `seq` that goes backwards and skips the copy
 ///   when `(id, name, seq)` repeats, so a restarted counter would be a dropped or
 ///   refused frame. A second producer in the same process starts its own count at
-///   1 — that is safe only because the third rule gives it names of its own.
+///   1 — that is safe only because the second rule gives it names of its own
+///   ([`producer::RANGE`]: each producer's suffixes are nobody else's).
 /// - **A resize is a fresh mapping under a fresh name.** A mapping is sized for one
 ///   frame size ([`mapping::Mapping::publish`] refuses any other), and the contract only
 ///   admits a recreated mapping under an old name if its sequence continues, so

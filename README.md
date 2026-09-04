@@ -40,19 +40,20 @@ output. In one line: **split one module, port one, drop one, keep forty-three.**
 
 **It works.** A stock Electron 43.3.0 OSR browser, composited by `pixel-core`, drawn into an
 agwinterm pane, with working keyboard and mouse — verified live and written up in
-[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 524 Rust tests and 570 node tests
-pass on Windows — the two node cases that need a host with `image.frameshm` skip on a release —
-including the 203 inherited tests in the files this port did not touch.
+[`docs/design/06-acceptance.md`](docs/design/06-acceptance.md). 528 Rust tests and 573 node tests
+pass on Windows — of the three node cases that talk to a live host, which of them skip depends
+on the host's version, as the acceptance section below says — including the 203 inherited tests
+in the files this port did not touch.
 
 Two things are knowingly short of upstream, both because of a host gap rather than this tree:
-the pointer resolves to one character cell, and on every agwinterm release as of 2026-09 cell
+the pointer resolves to one character cell, and on any agwinterm release before v0.17.10 cell
 pixel metrics have to be set by hand for a sharp picture. Both are
 [documented ceilings](docs/design/07-as-built.md#3-the-accepted-ceilings) with a named fix on the
-agwinterm side; the second's, `session.metrics`, is on agwinterm `main` at `8230d0e` beside
+agwinterm side; the second's, `session.metrics`, is in agwinterm from v0.17.10 (`8230d0e`) beside
 `image.frameshm`, and the browser already asks for it. One planned feature shipped later than the port: the
 `image.frameshm` fast path, adopted in 2026-09 once agwinterm published its contract. On a host
-that has the verb — agwinterm built from `main` at `8230d0e` or later; no release as of
-2026-09-04 — frames go over shared memory at about **114 fps** at a 131×37 pane. On any other
+that has the verb — agwinterm v0.17.10 (released 2026-09-03) or later — frames go over shared
+memory at about **114 fps** at a 131×37 pane. On any other
 host, and on agliteterm always, they go out as PNG at about **25 fps**: enough for a page, not
 enough for smooth scrolling.
 
@@ -152,9 +153,10 @@ neither does the CLI's clear on the way out.
 
 ### Getting a sharp picture
 
-No agwinterm release publishes its cell size yet — `session.metrics` is on `main` at `8230d0e`,
-and the browser asks for it before falling back — so on a release the engine falls back to 16×32 px
-per cell and agwinterm resamples the result. Tell it the truth and text sharpens, the page's
+An agwinterm before v0.17.10 does not publish its cell size — `session.metrics` arrived in
+v0.17.10 (`8230d0e`), and the browser asks for it before falling back — so on an older release
+the engine falls back to 16×32 px per cell and agwinterm resamples the result. Tell it the truth
+and text sharpens, the page's
 viewport stops being ~1.8× too large, and the frame gets **2.5× cheaper**:
 
 ```powershell
@@ -240,8 +242,8 @@ Electron OSR paint(BGRA)  ->  pixel-core composites  ->  RGBA into a slot of Loc
     ->  {"cmd":"image.frame", ...}  over agwinterm's control pipe  ->  placed at the pane's origin
 ```
 
-The upper route needs an agwinterm that implements `image.frameshm` (`main` from `8230d0e`;
-no release as of 2026-09-04). The first frame asks; a host that answers `unknown command` gets
+The upper route needs an agwinterm that implements `image.frameshm` (v0.17.10 or later; the
+verb landed at `8230d0e`). The first frame asks; a host that answers `unknown command` gets
 the lower route for the rest of the session, and that first frame is re-sent down it rather
 than dropped.
 
@@ -261,9 +263,10 @@ python tools/vendor-check/clippy-scope.py
 
 `tools/acceptance/frameshm.test.mjs` is the one suite that talks to a live host. Run from an
 agwinterm pane, it opens sessions on *that* instance (`session.new`, never the pane it runs in),
-runs the built browser in each, and closes them. On a release host it runs only the fallback case
-and skips the two fast-path cases; a pane of an instance built from agwinterm `main` at `8230d0e`
-or later (`--app-id agwinterm-dev`) runs those too. With no host — CI — it skips entirely, and a
+runs the built browser in each, and closes them. On a host older than v0.17.10 it runs only the
+fallback case and skips the two fast-path cases; a pane of an instance at v0.17.10 or later (the
+installed release, or a build with `--app-id agwinterm-dev`) runs those too, and skips the fallback
+case instead. With no host — CI — it skips entirely, and a
 launch that fails keeps its scratch directory and names it in the message.
 
 `tools/vendor-check/` is the suite that keeps this port honest about upstream. It takes its

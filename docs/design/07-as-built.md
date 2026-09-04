@@ -25,7 +25,7 @@ two, both in this build, and **the host decides which one carries a frame**.
 |---|---|---|
 | verb | `image.frame` | `image.frameshm` |
 | carries | a PNG on disk, named per frame | raw RGBA in a named file mapping, two slots |
-| host requirement | none — shipped agwinterm (`ControlServer.cs:426`) | agwinterm built from `main` at `8230d0e` (2026-09-03) or later; in no release as of 2026-09-04, and never agliteterm |
+| host requirement | none — shipped agwinterm (`ControlServer.cs:426`) | agwinterm v0.17.10 (2026-09-03, the release that carries `8230d0e`) or later; never agliteterm |
 | in this build | **yes**, `pixel-core/src/frame_file.rs` — the fallback, and the baseline | **yes**, `pixel-core/src/frame_shm.rs` — the default wherever the host has it |
 | cost | 40 ms/frame at 131×37 cells, 25 fps ([02](02-frame-budget.md)) | 8.7 ms/frame at the same pane, 114 fps ([02](02-frame-budget.md)) |
 
@@ -60,7 +60,11 @@ sweeps directories older than an hour left by processes that died before they co
 week, once the directory names a pane (`MARKED_STALE_AFTER`), for the reason *Taking the
 picture back* gives. The `pane` marker (see there) is written beside the first frame the
 host *does* place, is exempt from that reaping, and is rewritten if something removes the
-directory out from under a live publisher.
+directory out from under a live publisher — on the file route by the next frame's write,
+and on the fast path, which writes nothing else there, by a check every accepted frame
+makes (`FrameDir::keep_fresh`). That check also rewrites the marker once the directory has
+gone ten minutes without a write, since on the fast path nothing else would move its
+timestamp, and a week of not moving it is what the sweep reads as a wreck.
 
 ### How the fast path is selected
 
@@ -80,7 +84,7 @@ the session:
 - **`unknown command 'image.frameshm'`**: the host has never heard of the verb. The file
   path is latched for the rest of the session, the mapping is closed, and *this* frame is
   re-sent as an `image.frame`, so the probe costs no frame. Under `auto` that is logged as
-  information — it is the answer of every agwinterm release as of 2026-09, and of
+  information — it is the answer of every agwinterm release before v0.17.10, and of
   agliteterm always — and under `shm` as a warning that names the verb, where it is, and
   what the frames are doing instead.
 - **any other refusal**, an `ok` that placed nothing (`frame:0/0`), or a mapping this side
@@ -110,7 +114,7 @@ process that happened to start.
 
 | value | aliases | what it does |
 |---|---|---|
-| unset / `auto` | `default` | the fast path where the host has it, the file path otherwise. On every agwinterm release as of 2026-09 that is the file path; on a host built from `main ≥ 8230d0e` it is the fast one. |
+| unset / `auto` | `default` | the fast path where the host has it, the file path otherwise. On agwinterm v0.17.10 or later that is the fast path; on any earlier release, and on agliteterm, the file one. |
 | `file` | `png`, `image.frame` | the file path **even on a host that offers the fast one**. This is what makes the [02](02-frame-budget.md) baseline re-measurable after the fast path lands. |
 | `shm` | `frameshm`, `image.frameshm` | ask for the fast path, and — on a host without it — **say once** why it is not carrying the frame. Publishes over `image.frame` in that case regardless: the picture is the same, the cost is the file path's. |
 
@@ -194,8 +198,10 @@ back. The CLI's two answer it from disk, and from **two** pieces of evidence rat
 one: the directory name, `terminal-browser-frames-<pid>-<n>`, and a file called `pane`
 written inside it when the host first places a frame over either route, holding the pipe
 name and the session id that frame was addressed to. On the file route it sits beside
-the frame files; on the shared-memory route it is the only file there is, since the
-pixels went through the mapping — so the marker, not a count of frame files, is what
+the frame files; on the shared-memory route it is the only file there is at rest, since
+the pixels went through the mapping (the engine rewrites it by staging `pane.staged` and
+renaming it over, so that name passes through, and stays only if a rename failed) — so
+the marker, not a count of frame files, is what
 the CLI reads as a placement, and a wreck the fast path left is recovered exactly as
 one the file path left.
 

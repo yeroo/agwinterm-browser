@@ -104,7 +104,7 @@ async function control(pipe, request, ms = CONTROL_MS) {
   let last = null;
   for (;;) {
     try {
-      return await withDeadline(exchange(endpoint, request), `${request.cmd} on ${pipe}`, ms);
+      return await exchange(endpoint, request, `${request.cmd} on ${pipe}`, ms);
     } catch (error) {
       last = error;
       if (!/^E[A-Z]+$/.test(error.code ?? "") || Date.now() >= until) throw last;
@@ -113,9 +113,16 @@ async function control(pipe, request, ms = CONTROL_MS) {
   }
 }
 
-function exchange(endpoint, request) {
+// The deadline is the socket's own: a host that accepts and never answers would
+// otherwise leave a live handle behind the rejection and keep the process up past
+// it. Same shape as `tools/acceptance/frameshm.test.mjs`.
+function exchange(endpoint, request, what, ms = CONTROL_MS) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(endpoint);
+    const timer = setTimeout(
+      () => socket.destroy(new Error(`timed out after ${ms}ms waiting for ${what}`)),
+      ms,
+    );
     let buffer = "";
     socket.setEncoding("utf8");
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
@@ -131,7 +138,10 @@ function exchange(endpoint, request) {
       }
     });
     socket.once("error", reject);
-    socket.once("close", () => reject(new Error(`${endpoint} closed before it answered`)));
+    socket.once("close", () => {
+      clearTimeout(timer);
+      reject(new Error(`${endpoint} closed before it answered`));
+    });
   });
 }
 
@@ -248,7 +258,7 @@ function instanceEndpoint(pid) {
 
 /** One request to the browser's endpoint, in `cli/src/control.ts`'s protocol; the reply's `data`. */
 async function browser(endpoint, request) {
-  const reply = await exchange(endpoint, request);
+  const reply = await exchange(endpoint, request, `${request.cmd} on the browser's endpoint`, CONTROL_MS);
   if (!reply.ok) throw new Error(`${request.cmd} refused: ${reply.error}`);
   return reply.data;
 }
@@ -282,12 +292,12 @@ async function measure({ pipe, frames, out }, cell, transport) {
     // (`store/src/paths.ts`), and the directory listing is what `ls` would read.
     await settlesWithin(() => instanceEndpoint(browserPid(root)) !== null, `the browser's control endpoint in session ${session}`, CONTROL_MS);
     const endpoint = instanceEndpoint(browserPid(root));
-    const opened = await withDeadline(browser(endpoint, { cmd: "open-tab", url: PAGE }), "open-tab", CONTROL_MS);
+    const opened = await browser(endpoint, { cmd: "open-tab", url: PAGE });
     await quiet(count, "the second tab's load to end");
     const tabs = opened.tabs.map((tab) => tab.id);
     for (let i = 0; count() < frames; i += 1) {
       if (i >= frames) throw new Error(`${frames} rows did not come in ${i} tab switches (${count()} rows)`);
-      await withDeadline(browser(endpoint, { cmd: "activate-tab", tab: tabs[i % tabs.length] }), "activate-tab", CONTROL_MS);
+      await browser(endpoint, { cmd: "activate-tab", tab: tabs[i % tabs.length] });
       await quiet(count, `tab switch ${i} to be painted`);
     }
   } finally {

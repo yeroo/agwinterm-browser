@@ -190,5 +190,6 @@ the seven-column shape the budget file had then.
 ⚠️ Measure against a second instance (`--app-id agwinterm-dev`, agwinterm's README),
 never the real one. The baseline's was a Debug build, which is not optimised, so its
 stages 4 and 5 are if anything pessimistic; the comparison's was a Release build from
-`main`, because the verb is in no release as of 2026-09-04 and a Debug host would
-have put a build difference into a transport comparison.
+`main` one commit past v0.17.10 — the release that carries the verb — because the
+installed release on the measuring machine predated it, and a Debug host would have
+put a build difference into a transport comparison.

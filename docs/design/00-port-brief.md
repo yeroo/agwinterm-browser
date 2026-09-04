@@ -360,9 +360,9 @@ The existing file-based `image.frame` stays as the fallback and as the bring-up 
 > `image.frameshm` route in `frame_file.rs`'s publisher — against the contract linked above,
 > layout version 1. On a host that has the verb, frames go over the mapping: measured on the
 > same Release host, the producer's cost at a 131×37 pane fell from **40.4 ms to 8.7 ms per
-> frame, 25 fps to 114** ([`02-frame-budget.md`](02-frame-budget.md)). On every agwinterm
-> release as of 2026-09-04, and on agliteterm always, the first frame's `unknown command`
-> latches the file path for the session and nothing else changes.
+> frame, 25 fps to 114** ([`02-frame-budget.md`](02-frame-budget.md)). The verb is in
+> agwinterm from v0.17.10; on any earlier release, and on agliteterm always, the first
+> frame's `unknown command` latches the file path for the session and nothing else changes.
 >
 > Two corrections to the diagram above, both from the contract. The mapping name was
 > `Local\winterm-browser-<pid>-<id>` when this was drawn, before any prefix existed; it now

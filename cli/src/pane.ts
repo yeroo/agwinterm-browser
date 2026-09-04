@@ -627,8 +627,10 @@ export function restorePaneConsole(
 // with the first frame the host accepts, and `FrameDir`'s `Drop` removes the whole
 // directory on the way out. What else is in it depends on the route the frames
 // took: over `image.frame` each one is a `frame-00000000.png` beside the marker,
-// and over `image.frameshm` (`frame_shm.rs`) nothing is written at all — the pixels
-// went through a mapping, and the marker is the directory's only file. So the
+// and over `image.frameshm` (`frame_shm.rs`) no frame is written at all — the pixels
+// went through a mapping, and the marker is the directory's only file at rest (the
+// engine stages a rewrite of it as `pane.staged` and renames it over, so that name
+// can be there for a moment, or stay behind if the rename failed). So the
 // directory existing *with the marker in it* is exactly the state the engine's
 // `placed` is true in, left on disk for whoever comes after:
 //
@@ -638,8 +640,12 @@ export function restorePaneConsole(
 //   - died before drawing — directory survives, empty, nothing was ever placed
 //
 // which is `placed` read from the filesystem instead of from memory. Frames with no
-// marker beside them are the one shape neither route produces today — an engine
-// predating the marker — and are adopted by the pid question alone, below.
+// marker beside them are a browser killed inside the file route's first frame: the
+// PNG is written before the `image.frame` request goes out and the marker only after
+// the host's reply, so a kill in between leaves a frame file and no marker (and an
+// engine predating the marker left the same shape for every frame). Those are
+// adopted by the pid question alone, below, which is why that branch still counts
+// frame files rather than only reading the marker.
 // `tools/cli/pane-clear.test.mjs` reads the prefix, the frame-file name and the
 // marker's name out of the Rust so the spellings cannot drift.
 

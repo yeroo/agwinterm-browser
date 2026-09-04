@@ -98,10 +98,11 @@ and `the_unavailable_fast_path_is_said_once_and_not_per_frame`.
 
 ➕ *2026-09:* the build now produces the verb (plan `20260903-adopt-image-frameshm.md`),
 so this criterion reads "a host that answers `unknown command`" — every agwinterm
-release as of 2026-09, and agliteterm always — and the budget file has grown a
+release before v0.17.10, and agliteterm always — and the budget file has grown a
 `transport` and a `copy_ms` column after the seven shown. It is re-accepted against a
-release host by `tools/acceptance/frameshm.test.mjs`, which also reads the once-said
-reason out of the CLI's `stderr.log`.
+host older than v0.17.10 by `tools/acceptance/frameshm.test.mjs`, which also reads the
+once-said reason out of the CLI's `stderr.log`; on a host at v0.17.10 or later the
+suite skips this case and runs the two fast-path cases instead.
 
 ➕ **A test-isolation bug surfaced here.** The transport tests share one process-wide
 log store behind a mutex, but the mutex was taken only by the tests that *read* it —
@@ -220,9 +221,9 @@ a claim about a tree that no longer exists.
 
 | check | result |
 |---|---|
-| `cargo nextest run --workspace` | **524 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
-| `cargo test --workspace` | 467 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
-| `node --test "tools/*/*.test.mjs"` | **570 passed**, 130 suites, **2 skipped** (the two `frameshm` cases that need a host with the verb; this was a release host), 29.5 s wall clock |
+| `cargo nextest run --workspace` | **528 passed**, 1 skipped (`bench_encode`, a manual benchmark) |
+| `cargo test --workspace` | 471 + 57 passed — run *as well*, because it shares one process and can see races nextest cannot |
+| `node --test "tools/*/*.test.mjs"` | **573 passed**, 130 suites, **1 skipped** (the `frameshm` fallback case, which needs a host older than v0.17.10; this was a v0.17.10 host, so the two fast-path cases ran), 29.5 s wall clock |
 | inherited `pixel-core` tests | the 203 measured at Task 4 are still green, on Windows |
 | `cargo clippy --workspace --all-targets` | 12 warnings, **0 on a line this port wrote** |
 | `cargo fmt --all --check` | 297 complaints, **0 on a line this port wrote** |
@@ -302,7 +303,8 @@ every one is:
 
 Re-counted on **2026-08-26**; the node column sums to the 551 of that day's run. The
 2026-09-04 run's new suites are `browser/engine-log.test.mjs` (8) and
-`acceptance/frameshm.test.mjs` (4, two of them skipped on a release host), plus one
+`acceptance/frameshm.test.mjs` (4, of which a host's version skips one or two: the fallback
+case on v0.17.10 or later, the two fast-path cases before it), plus one
 case in `docs-check/docs`; the breakdown above was not redone. Most of the
 growth in the table's "the rest" is three suites that did not exist at the previous
 count, all from the deferred-browser-defects plan: `browser/foreground.test.mjs` (14),

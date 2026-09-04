@@ -317,9 +317,13 @@ talks to.
       the verb warns exactly once, and `file` still never warns
 - [x] run tests — must pass before Task 6
 - ➕ as built: a `frame:0/0` on the shm reply is not a placement *and* counts as a refusal —
-  this frame goes out over the file, three in a row latch — because on this path it is the
-  answer of a host that cannot open the mapping, which it gives on every frame. A mapping this
-  side cannot create (a size the contract does not admit) is counted the same way.
+  this frame goes out over the file, three in a row latch. A mapping this side cannot create
+  (a size the contract does not admit) is counted the same way.
+  ➕ *corrected 2026-09-04:* this bullet first said `frame:0/0` is "the answer of a host that
+  cannot open the mapping". It is not: the contract answers a mapping it cannot open with
+  `ok:false` and a reason, which is the refusal path above, and a one-image request cannot
+  come back `frame:0/0` from a host that follows it. The handling stays — defensively, for a
+  host that does not — and the warning it logs says so (`Source::placed_nothing_from`).
 - ➕ as built: `unknown command` is logged at `info` under `auto` (the file path is simply the
   path on every release as of 2026-09) and as the `unavailable_reason` warning under `shm`;
   the tests' `warnings_since` reads warnings only. The budget row for a shm frame is Task 6's.
